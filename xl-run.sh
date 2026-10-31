@@ -2,7 +2,7 @@
 # Chay kernel HakiOS tren loader dang song, KHONG qua `xl enter` (duong do
 # doi hoi anh U-Boot/Silicium va getvar de treo sau mot lan kernel hang).
 #
-#   hakios/xl-run.sh [SECS] [extra kernel args...]
+#   ./xl-run.sh [SECS] [extra kernel args...]
 #
 # 1. dung payload bang xnuloader/mkpayload.py (kernel + cmdline)
 # 2. fastboot stage / oem run

@@ -2,7 +2,7 @@
 # Chay day du tren may: nap system.apfs vao RAM, roi chay kernel (core 0) voi root.apfs.
 # Dung khi loader dang song (sau mot lan bat may). Sau khi chay, man hinh la kenh duy nhat.
 #
-#   hakios/phone-full-run.sh [SECS]
+#   ./phone-full-run.sh [SECS]
 set -u
 SECS=${1:-120}
 H=${HAKIOS:-/home/tritm/hakios-u}

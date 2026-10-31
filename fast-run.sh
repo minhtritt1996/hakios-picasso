@@ -1,7 +1,7 @@
 #!/bin/bash
 # Vong lap NHANH: chi stage kernel (khong nap 2,3 GB) roi chay.
 # Dung de kiem tra kernel di duoc bao xa (man hinh hien cac dong HAKIOS:).
-#   hakios/fast-run.sh [SECS] [cmdline extra...]
+#   ./fast-run.sh [SECS] [cmdline extra...]
 set -u
 SECS=${1:-40}; shift || true
 H=${HAKIOS:-/home/tritm/hakios-u}

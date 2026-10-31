@@ -2,7 +2,7 @@
 # Doc log loader da ghi vao partition `logdump` (loader ghi o moi lan chay kernel),
 # qua recovery (OrangeFox) + adb. Dung khi loader da mat USB sau mot lan chay.
 #
-#   hakios/read-logdump.sh [OUT]
+#   ./read-logdump.sh [OUT]
 #
 # Tien dieu kien: may dang o ABL fastboot (Vol-Down + Power).
 set -u

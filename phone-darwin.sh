@@ -1,7 +1,7 @@
 #!/bin/bash
 # Dua HakiOS + Darwin userland 16.5 len picasso (ban day du).
 #
-#   hakios/phone-darwin.sh [/tmp/boot-loader-real.img] [SECS]
+#   ./phone-darwin.sh [/tmp/boot-loader-real.img] [SECS]
 #
 # 1. flash boot image (loader that identity that + usb)
 # 2. nap userland/system.apfs (2,3 GB) vao RAM

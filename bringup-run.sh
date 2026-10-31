@@ -2,7 +2,7 @@
 # Man quyet dinh: flash boot image co fix-up, roi dua Darwin userland 16.5 vao RAM
 # va chay kernel.
 #
-#   hakios/bringup-run.sh [/tmp/boot-fix.img] [SECS]
+#   ./bringup-run.sh [/tmp/boot-fix.img] [SECS]
 #
 # 1. fastboot flash boot IMG (phai o ABL fastboot: Vol-Down + Power)
 # 2. reboot -> loader len (~20 s)
@@ -41,5 +41,5 @@ echo "   nap xong sau $(( $(date +%s) - t0 ))s"
 echo "== 4. chay kernel voi root.apfs"
 SOC=$(grep -v '^#' devices/picasso/soc.args | grep . | tr '\n' ' ')
 cd /home/tritm/ios || exit 1
-RAMDISK=/home/tritm/hakios-u/userland/root.apfs timeout $(( SECS + 200 )) bash hakios/xl-run.sh "$SECS" \
+RAMDISK=/home/tritm/hakios-u/userland/root.apfs timeout $(( SECS + 200 )) bash ./xl-run.sh "$SECS" \
 	"-v debug=0x8 hv_wdt_pet=1 cpus=1 $SOC" 2>&1 | tail -40

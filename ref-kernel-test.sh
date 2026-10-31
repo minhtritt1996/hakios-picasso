@@ -3,7 +3,7 @@
 # voi loader + identity that. Neu no qua duoc "VM boostrap: 0 maps" thi loi nam
 # o config build cua ta; neu cung dung yen thi la van de port SM7250.
 #
-#   hakios/ref-kernel-test.sh [SECS]
+#   ./ref-kernel-test.sh [SECS]
 set -u
 SECS=${1:-30}
 H=/home/tritm/hakios-u
@@ -18,6 +18,6 @@ fastboot devices 2>/dev/null | grep -q xnuloader || { echo "ref-kernel-test: loa
 SOC=$(grep -v '^#' "$H/devices/picasso/soc.args" | grep . | tr '\n' ' ')
 cd "$IOS" || exit 1
 KERNEL=$H/prebuilt/hakios-kernel RAMDISK=prebuilt/userland/hello \
-	timeout $(( SECS + 90 )) bash hakios/xl-run.sh "$SECS" \
+	timeout $(( SECS + 90 )) bash ./xl-run.sh "$SECS" \
 	"-v debug=0x8 rd=md0 hv_wdt_pet=1 cpus=1 $SOC" 2>&1 |
 	grep -aE "payload entry 'kernel'|kernel.ver|jumping to|kernel returned|VM boostrap|CP[0-9]+|H[0-9]+=|result:"

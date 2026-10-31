@@ -2,7 +2,7 @@
 # Flash mot boot image (dang o ABL fastboot), reboot, cho loader len, roi fetch log
 # khong can `stage` (payload da nam trong boot image).
 #
-#   hakios/flash-and-log.sh IMG [SECS]
+#   ./flash-and-log.sh IMG [SECS]
 #
 # Sau khi kernel chay xong (loader_return_after trong cmdline), loader tra loi
 # `oem log` + `get_staged`; script in cac moc CP/H va phan ket qua.
