@@ -623,3 +623,20 @@ Ngoài ra đã sửa hai thứ trong `bsd/dev/picasso_usb.c` (patch `0023`):
   (và file config bị daemon khôi phục), nên phiên có lệnh trả exit 126; dựng sshd phụ
   `/root/hakios/sshd-hakios.conf` cổng **2222** (sftp/scp chạy), còn lệnh thì chạy qua phiên tương tác
   port 22 + script tải bằng HTTP từ `100.67.179.75:8899`.
+
+## 2026-11-01 01:45 — kiểm tra đường log của console (kết luận tạm)
+
+Đường in của kernel đã đúng: `printf → consdebug_putc → console_write_char → console_write`
+(đã hook `console_write` + `console_write_unbuffered` + `consdebug_putc_unbuffered` trong cây này),
+nên về lý thuyết ring của driver phải nhận được. Nhưng trên máy: lần thì `/dev/ttyACM0` tồn tại và
+`status` trả lời (`tx=15737`), lần thì **`status` không trả lời** và console chết hẳn ⇒ vấn đề nằm ở
+**enumeration/USB** chứ không phải ở hook log.
+Bằng chứng phụ: màn hình vẫn in đủ `PICASSO USB: UTMI ...` (in bằng `ud_say` → `console_write`), tức
+hàm console chạy; chỉ TX ra host là lúc được lúc không.
+
+Việc tiếp, theo thứ tự:
+1. Cho các mốc khởi động của driver **luôn in** (không gate): `live handoff`, `control window`, `ep0 …
+   timeout n=` — để một ảnh màn hình nói được enumeration dừng ở đâu.
+2. Khi console ổn định: chạy `probe-q7` (bật từng INTID 19/27/28 một) → chốt timer.
+3. Rồi tới `CADisplay`/SpringBoard với `MiniIOMobileFramebuffer` + `IOMFBDisplayRefresh` đã lấy từ
+   upstream (patch `0022`) và `fps_info` (đã thêm vào userland/build.sh).
