@@ -660,3 +660,27 @@ Kết luận: dùng **sweettick (SPI 700)** làm nguồn tick; bỏ hướng PPI
 
 Việc tiếp: chạy full userland (`system.apfs` + `root.apfs`) với `sweettick=1 picasso_usb=2 mfb=1`,
 đọc log qua `/dev/ttyACM0` — phải thấy `-- time --`, `slept 200 ms …`, `=== 36 checks ===`, `launchd`.
+
+## 2026-11-01 03:10 — userland vẫn dừng ở `usleep`; tick được pend nhưng log tắt ngay sau đó
+
+Chạy full userland qua console USB (không cần ảnh). Kết quả đo được:
+
+- Console USB **ổn định** khi mở cổng trong ~50 ms (`ring=… sent=…` khớp ở `status`).
+- Kernel: mount RAM root OK, `load_init_program`, init chạy tới
+  `-- time --` → `before gettimeofday` → `before usleep` rồi **không in gì nữa**
+  (kể cả mark `W<n>` của `sweettick_note_wait` và chấm `.` của `sweettick_intr` đều dừng).
+- Trước mốc đó, `sweettick_poll()` **có chạy** và pend tick (mark `T1113/T1482/T1767`, ~185 pend/giây,
+  tức ~1 ms/lần) ⇒ phần *pend* đúng; phần *nhận interrupt* không còn bằng chứng sau mốc đó.
+
+Đã thêm trong phiên này (chưa chốt được hành vi):
+- `sweettick_poll()` gọi từ `cpu_idle()`, `machine_idle()` (spin tới khi pend), `ud_poll()` của driver USB;
+- `sweettick_note_wait()` gọi trong `assert_wait_deadline()` (mọi thread sắp block đều pend 1 tick);
+- mark chẩn đoán `T<n>` (poll) và `W<n>` (wait).
+
+Bước kế tiếp nên làm (theo thứ tự, mỗi bước 1 vòng ~5 phút với script `hakfull.sh`):
+1. Tách "console chết" khỏi "hệ thống treo": cho `sweettick_intr` ghi mark **ra UART giả/video** hoặc
+   đơn giản là in mark rồi `console_write` + đọc lại `status` (tx có tăng không). Nếu tx không tăng ⇒
+   TX chết khi mọi thread block; nếu tx tăng mà init không dậy ⇒ `rtclock_intr` không đánh thức waiter.
+2. Nếu TX chết: cho poller chạy ở thread priority cao hơn hoặc đẩy TX từ ngữ cảnh ngắt.
+3. Nếu waiter không dậy: kiểm `rtclock_intr(TRUE)` có `timer_resync_deadlines()` cho thread userland
+   (so với đường PPI 27 trong `sleh.c`), có thể cần gọi thêm `cpu_tick`/`ast` như nhánh PPI.
