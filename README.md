@@ -20,3 +20,14 @@ The ios-sweet port this work started from lives on the `agy` branch and is untou
 The upstream work (the platform entry for picasso, two kernel fixes, the launchd plist permissions) is in the fork
 `minhtritt1996/hakios-xnu-kernel`, branch `picasso`, and the device repository is
 `minhtritt1996/hakios-device-picasso`.
+
+## The repositories this work sits between
+
+| Repository | What it is | Relationship |
+|---|---|---|
+| [oosexgang/hakios-xnu-kernel](https://github.com/oosexgang/hakios-xnu-kernel) | HakiOS itself (XNU + its drivers, loader, tools, docs) | upstream |
+| [minhtritt1996/hakios-xnu-kernel](https://github.com/minhtritt1996/hakios-xnu-kernel) `picasso` | our fork: the picasso platform entry in `xnuloader/loader.c`, the host build fixes, the two kernel fixes (`redzone`, the RAM-disk `IOBSD` wait), the `mfb=1` gate, the launchd plist permissions, and the `devices/manifest.conf` block | fork of the above; a pull request to upstream carries these commits |
+| [minhtritt1996/hakios-device-picasso](https://github.com/minhtritt1996/hakios-device-picasso) | the device repository of the port (`device.conf` with what works on the phone, `configs/`, `soc/`, `soc.args`, `pull-firmware.sh`) | referenced from the fork's manifest at a locked revision; `hakios/picasso-device/` here is a copy of it |
+| [oosexgang/hakios-uefi](https://github.com/oosexgang/hakios-uefi) | HakiOS's UEFI (Mu-Silicium + its XnuLoader) | applied on top of the picasso Mu-Silicium tree (`YinCQL/uefi_picasso`) to build the boot image |
+| [Project-Silicium/Mu-Silicium](https://github.com/Project-Silicium/Mu-Silicium) / [YinCQL/uefi_picasso](https://github.com/YinCQL/uefi_picasso) | the UEFI firmware and its picasso platform | the `SILICIUM_UEFI.fd` that `hakios/build-bootimg.py` packs |
+| this repository | the HakiOS-on-picasso work of the session: the measured numbers (`hakios/README.md`), the fix series (`hakios/patches/`), the iteration scripts, the SoC data of the phone | standalone (not a fork); the ios-sweet port it started from is the `agy` branch |
