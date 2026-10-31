@@ -534,3 +534,22 @@ Hướng đi tiếp (chưa làm):
 - Loader chỉ nhận `stage`/`oem run`/`oem log`/`get_staged`/`getvar`/`reboot`; **không có `boot`**.
 - Font console 1,5× (`osfmk/console/video_console.c`, commit `b5209df` sau khi revert/restore) **chạy tốt
   trên máy thật**; các lần "không có gì trên màn hình" trước đó là do probe chết trước khi in.
+
+## 2026-10-31 22:30 — GICD_TYPER xác nhận dual security state
+
+```
+HAKIOS gic: GICD_TYPER 0x7b041d SecurityExtn 1 (dual state: the secure side owns the PPIs) ITLines 960
+```
+
+Vậy: **arch timer (PPI 27) không thể tới EL1 NS** trên máy này — PPI thuộc secure, NS không đổi group
+(ghi IGROUPR0 đọc lại 0), không bật được EnableGrp0 (GICD_CTLR giữ 0x12), HPPIR1 = 0x3ff.
+Không phải bug XNU; là cấu hình bảo mật của firmware/hypervisor.
+
+Đường đi còn lại (chọn một):
+1. **SPI thay PPI**: `EnableGrp1NS` đã bật, SPI không thuộc secure thì NS nhận group-1 bình thường.
+   Cần một nguồn ngắt định kỳ có SPI: Qualcomm QTIMER (driver + node DT mới) — "đúng bài" nhưng phải
+   viết driver.
+2. **Software tick**: một kthread polling `CNTVCT` gọi thẳng `rtclock_intr(TRUE)` (đường mà
+   `osfmk/arm64/sleh.c:1962` dùng khi IRQ là PPI 27) + `task_vtimer_check`. Không cần secure, nhưng
+   phải tự lo preemption/AST và đảm bảo không ăn hết CPU0.
+   `ml_cause_interrupt()` trong XNU arm64 là no-op, nên không dùng SGI để tự ngắt được.
