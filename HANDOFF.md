@@ -471,3 +471,24 @@ cần sửa `va_of_foff` (offset file → VA trong cache nhiều subcache).
 
 **Bẫy**: chạy payload lần thứ hai trong **cùng một session loader** thì hỏng (máy reset, logdump
 không đổi) — luôn power-cycle → ABL → `fastboot reboot` → loader → `stage`+`oem run`.
+
+## 2026-10-31 21:00 — nguyên nhân SpringBoard chết: "failed to find the main CADisplay"
+
+Chuỗi lệnh ở `FrontBoardServices+0x58c1c` là `bl __bs_set_crash_log_message ; brk #0`
+(`BaseBoard+0x6cd58` = `__bs_set_crash_log_message`, xác nhận bằng export trie của BaseBoard).
+Tức FrontBoardServices **cố ý** crash qua macro fatal của BSService. Message nằm trong biến toàn cục
+mà setter ghi (`adrp x8,#0x1dd147000; str x0,[x8,#0x900]`) — crash reporter đọc ra:
+
+```
+hakios: CRASH message: failed to find the main CADisplay
+```
+
+⇒ **QuartzCore không trả về `CADisplay` chính** cho FrontBoard/SpringBoard. Đây là gốc của vòng
+crash 14–28 lần/boot, không phải lỗi của hook nào của ta:
+boot với `sb_nohooks=1` (gate mới trong `inject_sb.c`: giữ crash reporter, tắt hết hook) vẫn cùng
+message. backboardd thì báo window server ready và "acquired main display digitizer", nên display
+có ở phía window server nhưng client (`[CADisplay mainDisplay]`) không thấy.
+
+**Đọc message trực tiếp**: crash handler tính slide bằng cách quét `_dyld_image_count()` /
+`_dyld_get_image_vmaddr_slide()` tìm image chứa pc, rồi `vm_read_overwrite` tại
+`0x1dd147900 + slide` (con trỏ message) — không cần symbol cho cache.
