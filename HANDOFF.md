@@ -433,3 +433,41 @@ SpringBoard[7] exited due to SIGTRAP | sent by exc handler[7]     ← cần GPU/
 ```
 ⇒ Tầng launchd/daemon đã thông; SpringBoard chỉ còn thiếu đường vẽ (GPU/CA).
 Fix này đã đưa lên fork: commit `caa3c6e` (nhánh `picasso`).
+
+## 2026-10-31 20:50 — font console 3/2, probe GIC gate, và SpringBoard chết ở đâu (QEMU)
+
+**1. Console kernel to hơn 50%** (`osfmk/console/video_console.c`, commit `75c6dd1` trong cây kernel):
+`VC_CW = 8*3/2 = 12`, `VC_CH = 16*3/2 = 24`; `vc_render_char()` phóng glyph 8×16 bằng nearest
+neighbour; mọi chỗ dùng hình học cell (buffer rendered font, `linelongs`, paint 8/16/32bpp,
+`vc_reverse_cursor`, `v_rows/v_columns`) đổi sang VC_CW/VC_CH. Chỉ ảnh hưởng chữ **do kernel vẽ**;
+banner `hello hakios-kernel!` là UEFI ConOut của loader (font firmware) nên vẫn nhỏ.
+
+**2. Probe GIC/timer chỉ chạy với `gicprobe=1`** (`bsd/kern/bsd_init.c`, commit `45d596f`), ghi số
+đo bằng `loader_cp_hex` (tag 70..80) nên đọc qua logdump, và `panic("HAKIOS probe done")` để trả về.
+Đo trên máy (logdump, lần chạy 20:0x): `ints_enabled=1 igrpen1=0x1 pmr=0xf0 sre=0x1 ctlr=0x8440
+cntv_ctl=0x5 cntfrq=19200000`, counter chạy 200 ms thật, `IOSleep(100)` không trả về.
+⇒ timer **đang bật, không mask, ISTATUS=1 (pending)**, CPU interface mở hết mà IRQ không được nhận.
+Chưa đọc được HPPIR0/HPPIR1/RPR/GICR_ISENABLER/GICD_IGROUPR (bản probe mới) vì `oem log` chỉ trả
+buffer của loader; phải đọc logdump qua recovery (1 lần power-cycle mỗi lần đo).
+
+**3. SpringBoard chết ở đâu (QEMU, tái lập 100%)**: thêm crash reporter vào `libhakios.sb.dylib`
+(`userland/src/inject_sb.c`, `crash_handler_install()` cho SIGTRAP/SEGV/BUS/ILL/ABRT): in signal,
+`si_addr`, pc/lr/sp, thanh ghi, backtrace `dladdr`, và tên class của con trỏ trong x0/x2/x4/x6.
+Mỗi boot QEMU: 28 lần, cùng một chỗ:
+```
+SIGTRAP pc=FrontBoardServices+0x58c20 (brk #0; brk #1)
+  #1 libsystem_platform+0x22f4 (sigtramp)
+  #2 FrontBoardServices+0x58c20
+  #3 FrontBoard+0x50438        (một dispatch block)
+  #4/#5 libdispatch            #6 FrontBoard+0x1a30  #7 FrontBoard+0x5c1b4
+  #8 SpringBoard+0x9b9c8       #9 dyld+0x14344
+```
+x16 = BaseBoard+0x6cd58 (một getter `adrp/str/ret`), x0 = con trỏ tagged, LR == PC.
+`lr == pc` ⇒ FrontBoard **gọi thẳng** vào `0x58c20`, và ở đó byte đầu tiên là `brk #0` ⇒ đây là
+một **trap thunk** (không phải thân hàm bình thường).  Không có dòng nào của SpringBoard trước khi
+chết (im lặng).  `sysimage/20F66__iPhone10,3_6/dyld_shared_cache_arm64*` là bản strip (không có
+`.symbols`), nên tên symbol phải lấy từ export trie — parser đọc trie chưa đúng (chỉ ra 1 export),
+cần sửa `va_of_foff` (offset file → VA trong cache nhiều subcache).
+
+**Bẫy**: chạy payload lần thứ hai trong **cùng một session loader** thì hỏng (máy reset, logdump
+không đổi) — luôn power-cycle → ABL → `fastboot reboot` → loader → `stage`+`oem run`.
