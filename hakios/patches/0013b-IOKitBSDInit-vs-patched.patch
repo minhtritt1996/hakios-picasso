@@ -1,0 +1,72 @@
+--- /tmp/portonly/iokit/bsddev/IOKitBSDInit.cpp	2026-10-31 15:25:55.930058028 +0700
++++ /home/tritm/hakios-u/xnu-src/xnu-8796.121.2/iokit/bsddev/IOKitBSDInit.cpp	2026-10-31 14:34:23.105395844 +0700
+@@ -679,6 +679,7 @@
+ 	int xchar, dchar;
+ 
+ 	// stall here for anyone matching on the IOBSD resource to finish (filesystems)
++	printf("HAKIOS: IOFindBSDRoot: entry\n");
+ 	matching = IOService::serviceMatching(gIOResourcesKey);
+ 	assert(matching);
+ 	matching->setObject(gIOResourceMatchedKey, gIOBSDKey);
+@@ -690,11 +691,19 @@
+ 		bsdWait = kSecondScale / 10;
+ 	}
+ 
+-	if ((service = IOService::waitForMatchingService(matching, bsdWait))) {
++	printf("HAKIOS: IOFindBSDRoot: waiting IOBSD resource, bsdWait=%llu\n", (unsigned long long)bsdWait);
++	if (rdEarly[0] == 'm' && rdEarly[1] == 'd') {
++		/*
++		 * HakiOS picasso bring-up: a memory-device root needs no filesystem kext, and on this
++		 * platform the wait never returns (the IOBSD resource is never published). Skip it.
++		 */
++		printf("HAKIOS: IOFindBSDRoot: RAM-disk root, not waiting for the IOBSD resource\n");
++	} else if ((service = IOService::waitForMatchingService(matching, bsdWait))) {
+ 		OSSafeReleaseNULL(service);
+ 	} else {
+ 		IOLog("!BSD\n");
+ 	}
++	printf("HAKIOS: IOFindBSDRoot: waited, service=%p\n", (void *)service);
+ 	matching->release();
+ 	matching = NULL;
+ 
+@@ -714,8 +723,10 @@
+ 		rdBootVar[0] = 0;
+ 	}
+ 
++	printf("HAKIOS: IOFindBSDRoot: before fromPath(/chosen)\n");
+ 	if ((regEntry = IORegistryEntry::fromPath( "/chosen", gIODTPlane ))) {
+ 		do {
++			printf("HAKIOS: IOFindBSDRoot: in /chosen block\n");
+ 			di_root_ramfile(regEntry);
+ 			OSObject* unserializedContainer = NULL;
+ 			data = OSDynamicCast(OSData, regEntry->getProperty( "root-matching" ));
+@@ -754,9 +765,12 @@
+ //	It will become /dev/mdx, where x is 0-f.
+ //
+ 
++	printf("HAKIOS: IOFindBSDRoot: rd=[%s] scanning memory-map\n", rdBootVar);
+ 	if (!didRam) {                                                                                           /* Have we already build this ram disk? */
+ 		didRam = 1;                                                                                             /* Remember we did this */
++		printf("HAKIOS: IOFindBSDRoot: after the /chosen block\n");
+ 		if ((regEntry = IORegistryEntry::fromPath( "/chosen/memory-map", gIODTPlane ))) {        /* Find the map node */
++			printf("HAKIOS: IOFindBSDRoot: found /chosen/memory-map\n");
+ 			data = (OSData *)regEntry->getProperty("RAMDisk");      /* Find the ram disk, if there */
+ 			if (data) {                                                                                      /* We found one */
+ 				uintptr_t *ramdParms;
+@@ -767,6 +781,8 @@
+ 					panic("ramdisk params");
+ 				}
+ #endif /* __LP64__ */
++				printf("HAKIOS: IOFindBSDRoot: RAMDisk base=%#llx size=%#llx\n",
++				    (unsigned long long)ramdParms[0], (unsigned long long)ramdParms[1]);
+ 				(void)mdevadd(-1, ml_static_ptovirt(ramdParms[0]) >> 12, (unsigned int) (ramdParms[1] >> 12), 0);        /* Initialize it and pass back the device number */
+ 			}
+ 			/*
+@@ -804,6 +820,7 @@
+ 		if (xchar >= 0) {                                                                                /* Do we have a valid memory device name? */
+ 			OSSafeReleaseNULL(matching);
+ 			*root = mdevlookup(xchar);                                                      /* Find the device number */
++			printf("HAKIOS: IOFindBSDRoot: mdevlookup(%d)=%d\n", xchar, (int)*root);
+ 			if (*root >= 0) {                                                                        /* Did we find one? */
+ 				rootName[0] = 'm';                                                              /* Build root name */
+ 				rootName[1] = 'd';                                                              /* Build root name */

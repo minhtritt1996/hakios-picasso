@@ -1,0 +1,626 @@
+diff --git a/bsd/kern/bsd_init.c b/bsd/kern/bsd_init.c
+index 4df41ba..d5b9565 100644
+--- a/bsd/kern/bsd_init.c
++++ b/bsd/kern/bsd_init.c
+@@ -147,6 +147,14 @@
+ #include <net/if_ether.h>               /* for ether_family_init() */
+ #include <net/if_gif.h>                 /* for gif_init() */
+ #include <miscfs/devfs/devfsdefs.h>     /* for devfs_kernel_mount() */
++#include <sys/hakios.input.h>
++#include <sys/hakios.audio.h>
++#include <sys/hakios.virtio_blk.h>
++#include <sys/hakios.sparse.h>
++#include <sys/hakios.version.h>
++#if APFS
++#include <sys/hakios.apfs_check.h>
++#endif
+ #include <vm/vm_kern.h>                 /* for kmem_suballoc() */
+ #include <sys/proc_uuid_policy.h>       /* proc_uuid_policy_init() */
+ #include <netinet/flow_divert.h>        /* flow_divert_init() */
+@@ -490,9 +498,10 @@ bsd_init(void)
+ 	platform_stall_panic_or_spin(PLATFORM_STALL_XNU_LOCATION_BSD_INIT);
+ #endif
+ 
+-#define DEBUG_BSDINIT 0
++#define DEBUG_BSDINIT 1 /* bring-up: trace bsd_init steps (only visible with -enable_kprintf_spam) */
+ 
+ #if DEBUG_BSDINIT
++extern void loader_checkpoint(uint64_t n);
+ #define bsd_init_kprintf(x, ...) kprintf("bsd_init: " x, ## __VA_ARGS__)
+ #else
+ #define bsd_init_kprintf(x, ...)
+@@ -504,7 +513,8 @@ bsd_init(void)
+ 
+ #if CONFIG_DEV_KMEM
+ 	bsd_init_kprintf("calling dev_kmem_init\n");
+-	dev_kmem_init();
++	dev_kmem_init();	loader_checkpoint(70);
++
+ #endif
+ 
+ 	/* Initialize kauth subsystem before instancing the first credential */
+@@ -679,7 +689,8 @@ bsd_init(void)
+ 	 *		the kernel task.
+ 	 */
+ 	bsd_init_kprintf("calling bsd_bufferinit\n");
+-	bsd_bufferinit();
++	bsd_bufferinit();	loader_checkpoint(71);
++
+ 
+ 	/*
+ 	 * Initialize the calendar.
+@@ -786,7 +797,8 @@ bsd_init(void)
+ 	sysctl_mib_init();
+ 
+ 	bsd_init_kprintf("calling bsd_autoconf\n");
+-	bsd_autoconf();
++	bsd_autoconf();	loader_checkpoint(72);
++
+ 
+ #if CONFIG_DTRACE
+ 	dtrace_postinit();
+@@ -854,22 +866,26 @@ bsd_init(void)
+ #endif /* NETWORKING */
+ 
+ 	bsd_init_kprintf("calling inittodr\n");
+-	inittodr(0);
++	inittodr(0);	loader_checkpoint(73);
++
+ 
+ 	/* Mount the root file system. */
+ 	while (TRUE) {
+ 		int err;
+ 
+ 		bsd_init_kprintf("calling setconf\n");
+-		setconf();
++		setconf();	loader_checkpoint(74);
++
+ #if CONFIG_NETBOOT
+ 		netboot = (mountroot == netboot_mountroot);
+ #endif
+ 
+-		bsd_init_kprintf("vfs_mountroot\n");
++		bsd_init_kprintf("vfs_mountroot\n");	loader_checkpoint(75);
++
+ 		if (0 == (err = vfs_mountroot())) {
+ 			break;
+-		}
++		}	loader_checkpoint(76);
++
+ 		rootdevice[0] = '\0';
+ #if CONFIG_NETBOOT
+ 		if (netboot) {
+@@ -976,6 +992,15 @@ bsd_init(void)
+ 
+ 		bsd_init_kprintf("calling devfs_kernel_mount\n");
+ 		devfs_kernel_mount(mounthere);
++		hakios_version_init();         /* kern.hakios.version, and the version in the boot log */
++		hakios_input_init();           /* /dev/hakios-touch */
++		hakios_audio_init();           /* /dev/hakios-audio */
++		hakios_virtio_blk_init();      /* /dev/rvblk0, a disk image of the host (QEMU) */
++		hakios_sparse_init();          /* /dev/rsp0, part of an image too big to hold */
++#if APFS
++		/* mounts and walks /dev/rvblk0 once userland has /private/var up */
++		hakios_apfs_check_init();
++#endif
+ 	}
+ #endif /* DEVFS */
+ 
+diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
+index 1d71c66..ae870f2 100644
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -1157,6 +1157,9 @@ SYSCTL_PROC(_vm, OID_AUTO, shared_region_control,
+  *		activators should not be given the opportunity to attempt
+  *		to activate the image.
+  */
++/* Bring-up aid: with boot-arg systrace set, say which stage of an exec refused the image. */
++static TUNABLE(uint32_t, exec_trace, "systrace", 0);
++
+ static int
+ exec_mach_imgact(struct image_params *imgp)
+ {
+@@ -1315,6 +1318,9 @@ grade:
+ 	 * Actually load the image file we previously decided to load.
+ 	 */
+ 	lret = load_machfile(imgp, mach_header, thread, &map, &load_result);
++	if (lret != LOAD_SUCCESS && exec_trace) {
++		printf("exectrace: %s: load_machfile failed: %d\n", imgp->ip_ndp->ni_cnd.cn_pnbuf, lret);
++	}
+ 	if (lret != LOAD_SUCCESS) {
+ 		error = load_return_to_errno(lret);
+ 
+@@ -2197,6 +2203,9 @@ again:
+ 	}
+ 
+ 	error = exec_check_permissions(imgp);
++	if (error && exec_trace) {
++		printf("exectrace: %s: exec_check_permissions failed: %d\n", imgp->ip_ndp->ni_cnd.cn_pnbuf, error);
++	}
+ 	if (error) {
+ 		goto bad;
+ 	}
+@@ -2640,6 +2649,57 @@ done:
+ 	return ret;
+ }
+ 
++/*
++ * Bring-up aid, boot-arg applog=1: what applications and other programs started without a
++ * terminal say is worth reading here. Their standard output and error, which launchd opens on
++ * /dev/null, go to the console instead (that shows NSLog and the "Terminating app due to
++ * uncaught exception" kind of message). With applog=2 every program also gets
++ * OS_ACTIVITY_DT_MODE in its environment, which makes os_log write to standard error as well:
++ * everything any program logs, and a much slower system. applog_name=NAME[,NAME...] with
++ * applog=1 does that for the programs whose file names begin with one of the NAMEs only,
++ * which is how to read what one application extension has to say (launchd starts those for
++ * whoever asks, so there is no job description of ours to put the variable in).
++ */
++static TUNABLE(uint32_t, exec_applog, "applog", 0);
++static TUNABLE_STR(exec_applog_name, 128, "applog_name", "");
++
++static bool
++exec_applog_oslog(struct image_params *imgp)
++{
++	const char *name, *p = exec_applog_name;
++
++	if (exec_applog >= 2) {
++		return true;
++	}
++	if (exec_applog == 0 || *p == 0 || imgp->ip_ndp == NULL) {
++		return false;
++	}
++	name = imgp->ip_ndp->ni_cnd.cn_nameptr;
++	while (*p != 0) {
++		const char *word = p;
++
++		while (*p != 0 && *p != ',') {
++			p++;
++		}
++		if (p != word && (size_t)(p - word) <= imgp->ip_ndp->ni_cnd.cn_namelen && strncmp(word, name, (size_t)(p - word)) == 0) {
++			return true;
++		}
++		if (*p == ',') {
++			p++;
++		}
++	}
++	return false;
++}
++
++static const char *
++exec_applog_path(int fd, const char *path)
++{
++	if (exec_applog && (fd == 1 || fd == 2) && strcmp(path, "/dev/null") == 0) {
++		return "/dev/console";
++	}
++	return path;
++}
++
+ /*
+  * exec_handle_file_actions
+  *
+@@ -2709,7 +2769,7 @@ exec_handle_file_actions(struct image_params *imgp, short psa_flags)
+ 			AUDIT_SUBCALL_ENTER(OPEN, p, uthread);
+ 
+ 			NDINIT(ndp, LOOKUP, OP_OPEN, FOLLOW | AUDITVNPATH1, UIO_SYSSPACE,
+-			    CAST_USER_ADDR_T(psfa->psfaa_openargs.psfao_path),
++			    CAST_USER_ADDR_T(exec_applog_path(psfa->psfaa_filedes, psfa->psfaa_openargs.psfao_path)),
+ 			    imgp->ip_vfs_context);
+ 
+ 			error = open1(imgp->ip_vfs_context, ndp,
+@@ -3094,10 +3154,16 @@ spawn_validate_persona(struct _posix_spawn_persona_info *px_persona)
+ 	int error = 0;
+ 	struct persona *persona = NULL;
+ 
+-	if (!IOCurrentTaskHasEntitlement( PERSONA_MGMT_ENTITLEMENT)) {
+-		return EPERM;
+-	}
+-
++	/*
++	 * hakios: two of the three checks below cannot be passed in this port, and both stand in
++	 * the way of something ordinary. The entitlement is one nobody carries here (nothing is
++	 * signed, AMFI is a stub), and the persona is one nobody makes -- yet a package manager
++	 * becomes root by asking for exactly this: Sileo spawns apt and dpkg into persona 99 with
++	 * the uid it wants (its APTWrapper). Refused here, the spawn failed before the program was
++	 * ever started, and the application waited for an answer that could not come. The check
++	 * that still means something -- the size of the group list -- stays; see
++	 * spawn_persona_adopt() below for what happens then.
++	 */
+ 	if (px_persona->pspi_flags & POSIX_SPAWN_PERSONA_GROUPS) {
+ 		if (px_persona->pspi_ngroups > NGROUPS_MAX) {
+ 			return EINVAL;
+@@ -3105,12 +3171,6 @@ spawn_validate_persona(struct _posix_spawn_persona_info *px_persona)
+ 	}
+ 
+ 	persona = persona_lookup(px_persona->pspi_id);
+-	if (!persona) {
+-		error = ESRCH;
+-		goto out;
+-	}
+-
+-out:
+ 	if (persona) {
+ 		persona_put(persona);
+ 	}
+@@ -3130,9 +3190,6 @@ spawn_persona_adopt(proc_t p, struct _posix_spawn_persona_info *px_persona)
+ 	 * the kauth with a different UID/GID combo
+ 	 */
+ 	persona = persona_lookup(px_persona->pspi_id);
+-	if (!persona) {
+-		return ESRCH;
+-	}
+ 
+ 	cred = kauth_cred_proc_ref(p);
+ 
+@@ -3158,6 +3215,48 @@ spawn_persona_adopt(proc_t p, struct _posix_spawn_persona_info *px_persona)
+ 		    px_persona->pspi_gmuid);
+ 	}
+ 
++	if (persona == NULL) {
++		/*
++		 * hakios: there are no personas in this port -- nothing makes them, and
++		 * kpersona_find_by_type() answers "no such process" to everyone who asks. Darwin's own
++		 * programs get along without them, but a package manager becomes root by way of one:
++		 * Sileo asks posix_spawn for persona 99 with OVERRIDE and uid 0 (its APTWrapper), and
++		 * that is how it runs apt and dpkg. With the persona missing the lookup failed, the
++		 * whole spawn failed with ESRCH, and the application sat for ever waiting for an
++		 * answer from a program that was never started. What the caller is after is the
++		 * credential, not the persona, so the credential is what it gets: the uid, gid and
++		 * groups it asked for, set on the process being spawned.
++		 *
++		 * The thread's own credential is not touched here: the thread running this is the
++		 * parent's, and the new process gets its credential when its image is activated.
++		 *
++		 * And the count of processes per real uid follows, as persona_proc_adopt() keeps it:
++		 * fork1() counted the new process under the parent's uid (mobile's), its exit takes
++		 * it off under the one it has then (root's). Without that, every program Sileo ran as
++		 * root took one away from root's count that had never been given -- and once Sileo's
++		 * own mv, cp and rm ran at all, a few dozen of them brought root's count to nothing,
++		 * and the next process of root's to exit panicked the kernel ("chgproccnt: lost user").
++		 */
++		__block kauth_cred_t new_cred = cred;
++		__block uid_t old_ruid = KAUTH_UID_NONE;
++		uid_t new_ruid = kauth_cred_getruid(cred);
++
++		(void)proc_update_label(p, true, ^kauth_cred_t (kauth_cred_t cur_cred) {
++			old_ruid = kauth_cred_getruid(cur_cred);
++			if (new_cred != cur_cred) {
++			        kauth_cred_ref(new_cred);
++			        kauth_cred_unref(&cur_cred);
++			}
++			return new_cred;
++		});
++		kauth_cred_unref(&cred);
++		if (old_ruid != KAUTH_UID_NONE && old_ruid != new_ruid) {
++			(void)chgproccnt(new_ruid, 1);
++			(void)chgproccnt(old_ruid, -1);
++		}
++		return 0;
++	}
++
+ 	ret = persona_proc_adopt(p, persona, cred);
+ 
+ 	kauth_cred_unref(&cred);
+@@ -5586,10 +5685,75 @@ bad:
+  * Note:	The argument and environment vectors are user space pointers
+  *		to arrays of user space pointers.
+  */
++/*
++ * Bring-up aid: the sysctl kern.exec_inject holds "LIBRARY NAME NAME ..."; every program
++ * whose file name is one of the NAMEs is started with DYLD_INSERT_LIBRARIES=LIBRARY in its
++ * environment, so that dyld loads our library into it. Several such groups may follow each
++ * other, separated by ";". A program named in more than one group gets every one of those
++ * libraries, joined with ":" in the one DYLD_INSERT_LIBRARIES, so SpringBoard can carry both
++ * our window-server library and the tweak loader. launchd refuses to pass DYLD_ variables
++ * from a job description, which is why the kernel adds this one. Set once by our init (from
++ * etc/inject.conf) before it hands over to launchd.
++ */
++static char exec_inject_conf[512];
++SYSCTL_STRING(_kern, OID_AUTO, exec_inject, CTLFLAG_RW | CTLFLAG_LOCKED, exec_inject_conf, sizeof(exec_inject_conf),
++    "LIBRARY NAME... [; LIBRARY NAME...]: programs started with the library inserted");
++
++static bool
++exec_inject_env(struct image_params *imgp, char *env, size_t size)
++{
++	const char *name, *p = exec_inject_conf;
++	size_t namelen, used;
++	bool any = false;
++
++	if (*p == 0 || imgp->ip_ndp == NULL) {
++		return false;
++	}
++	name = imgp->ip_ndp->ni_cnd.cn_nameptr;
++	namelen = imgp->ip_ndp->ni_cnd.cn_namelen;
++	used = strlcpy(env, "DYLD_INSERT_LIBRARIES=", size);
++	while (*p != 0) {
++		const char *library;
++		size_t liblen;
++		bool matched = false;
++
++		while (*p == ' ' || *p == ';') {
++			p++;
++		}
++		library = p;
++		while (*p != 0 && *p != ' ' && *p != ';') {
++			p++;
++		}
++		liblen = (size_t)(p - library);
++		while (*p == ' ') {
++			const char *word = ++p;
++
++			while (*p != 0 && *p != ' ' && *p != ';') {
++				p++;
++			}
++			if (!matched && (size_t)(p - word) == namelen && namelen != 0 && liblen != 0 &&
++			    strncmp(word, name, namelen) == 0) {
++				matched = true;         /* this group names this program; its library is added once */
++			}
++		}
++		if (matched && liblen != 0 && used + 1 + liblen < size) {
++			if (any) {
++				env[used++] = ':';      /* dyld takes several libraries separated by ":" */
++			}
++			memcpy(env + used, library, liblen);
++			used += liblen;
++			env[used] = 0;
++			any = true;
++		}
++	}
++	return any;
++}
++
+ __attribute__((noinline))
+ static int
+ exec_extract_strings(struct image_params *imgp)
+ {
++	char            inject_env[512];
+ 	int error = 0;
+ 	int     ptr_size = (imgp->ip_flags & IMGPF_WAS_64BIT_ADDR) ? 8 : 4;
+ 	int new_ptr_size = (imgp->ip_flags & IMGPF_IS_64BIT_ADDR) ? 8 : 4;
+@@ -5759,6 +5923,33 @@ exec_extract_strings(struct image_params *imgp)
+ 		imgp->ip_envc++;
+ 	}
+ 
++	/* one more variable for the programs that get our library inside them (see exec_inject_env) */
++	if (exec_inject_env(imgp, inject_env, sizeof(inject_env))) {
++		error = exec_add_user_string(imgp, CAST_USER_ADDR_T(inject_env), UIO_SYSSPACE, TRUE);
++		if (error) {
++			goto bad;
++		}
++		if (imgp->ip_argspace < new_ptr_size) {
++			error = E2BIG;
++			goto bad;
++		}
++		imgp->ip_argspace -= new_ptr_size;
++		imgp->ip_envc++;
++	}
++	/* ... and one for everybody when the logs are wanted on the console (see exec_applog_path) */
++	if (exec_applog_oslog(imgp)) {
++		error = exec_add_user_string(imgp, CAST_USER_ADDR_T("OS_ACTIVITY_DT_MODE=YES"), UIO_SYSSPACE, TRUE);
++		if (error) {
++			goto bad;
++		}
++		if (imgp->ip_argspace < new_ptr_size) {
++			error = E2BIG;
++			goto bad;
++		}
++		imgp->ip_argspace -= new_ptr_size;
++		imgp->ip_envc++;
++	}
++
+ 	/* Save space for envv[] NULL terminator */
+ 	if (imgp->ip_argspace < new_ptr_size) {
+ 		error = E2BIG;
+@@ -6636,7 +6827,23 @@ handle_mac_transition:
+ 	}
+ 
+ 	/* Update the process' identity version and set the security token */
+-	proc_setpidversion(p, OSIncrementAtomic(&nextpidversion));
++	{
++		/*
++		 * (redwood) Except when xpcproxy becomes the service it was spawned for: then the process keeps
++		 * xpcproxy's identity version, as if launchd had spawned the service itself, which is what launchd
++		 * means by eliding xpcproxy ("service will attempt to elide xpcproxy"; here it spawns xpcproxy
++		 * all the same). RunningBoard keeps the audit token of such a process from before the exec and
++		 * never takes the newer one: every entitlement check it made for it failed (SecTaskLoadEntitlements
++		 * error 3, a thousand times a minute with Safari open), and Safari's web processes got no
++		 * assertions ("target is not running or doesn't have entitlement
++		 * com.apple.runningboard.assertions.webkit"). Boot-arg xpcproxy_idversion=1: a new version, as XNU.
++		 */
++		static TUNABLE(uint32_t, xpcproxy_idversion, "xpcproxy_idversion", 0);
++
++		if (xpcproxy_idversion || strncmp(p->p_comm, "xpcproxy", sizeof(p->p_comm)) != 0) {
++			proc_setpidversion(p, OSIncrementAtomic(&nextpidversion));
++		}
++	}
+ 	task_set_uniqueid(task);
+ 	set_security_token_task_internal(p, task);
+ 
+@@ -6888,9 +7095,12 @@ static const char * init_programs[] = {
+  * 3		2		NA		/usr/appleinternal/sbin/launchd.development
+  * 4		3		1		/sbin/launchd
+  */
++extern void loader_checkpoint(uint64_t n);
++
+ void
+ load_init_program(proc_t p)
+ {
++	loader_checkpoint(77);
+ 	uint32_t i;
+ 	int error;
+ 	vm_map_t map = current_map();
+@@ -6913,6 +7123,7 @@ load_init_program(proc_t p)
+ 		if (is_release_suffix) {
+ 			printf("load_init_program: attempting to load /sbin/launchd\n");
+ 			error = load_init_program_at_path(p, (user_addr_t)scratch_addr, "/sbin/launchd");
++			loader_checkpoint(78);
+ 			if (!error) {
+ 				return;
+ 			}
+@@ -6937,6 +7148,10 @@ load_init_program(proc_t p)
+ 	for (i = 0; i < sizeof(init_programs) / sizeof(init_programs[0]); i++) {
+ 		printf("load_init_program: attempting to load %s\n", init_programs[i]);
+ 		error = load_init_program_at_path(p, (user_addr_t)scratch_addr, init_programs[i]);
++		{
++			extern void loader_checkpoint(uint64_t);
++			loader_checkpoint(error == 0 ? 79 : 80);
++		}
+ 		if (!error) {
+ 			return;
+ 		} else if (error != ENOENT) {
+@@ -7538,6 +7753,11 @@ process_signature(proc_t p, struct image_params *imgp)
+ 	}
+ 
+ done:
++	if (error && exec_trace) {
++		printf("exectrace: %s[%d]: process_signature failed: %d (csflags 0x%x, mac %d, cs_error %d)\n",
++		    p->p_comm, proc_getpid(p), error, imgp->ip_csflags, imgp->ip_mac_return,
++		    signature_failure_reason != OS_REASON_NULL);
++	}
+ 	if (0 == error) {
+ 		/*
+ 		 * Update the new process's signature-dependent process state.
+diff --git a/osfmk/kern/startup.c b/osfmk/kern/startup.c
+index bec97fb..b1f0257 100644
+--- a/osfmk/kern/startup.c
++++ b/osfmk/kern/startup.c
+@@ -156,6 +156,7 @@
+ #include <security/mac_mach_internal.h>
+ #if CONFIG_VNGUARD
+ extern void vnguard_policy_init(void);
++extern void minimac_policy_init(void);
+ #endif
+ #endif
+ 
+@@ -419,6 +420,9 @@ kernel_startup_initialize_upto(startup_subsystem_id_t upto)
+ 	startup_phase = upto;
+ }
+ 
++/* HakiOS bring-up: checkpoints for porting (picasso) */
++extern void loader_checkpoint(uint64_t n);
++
+ void
+ kernel_bootstrap(void)
+ {
+@@ -426,12 +430,15 @@ kernel_bootstrap(void)
+ 	thread_t        thread;
+ 	char            namep[16];
+ 
++	loader_checkpoint(50);
++
+ 	printf("%s\n", version); /* log kernel version */
+ 
+ 	scale_setup();
+ 
+ 	kernel_bootstrap_log("vm_mem_bootstrap");
+ 	vm_mem_bootstrap();
++	loader_checkpoint(51);
+ 
+ 	machine_info.memory_size = (uint32_t)mem_size;
+ #if XNU_TARGET_OS_OSX
+@@ -448,6 +455,7 @@ kernel_bootstrap(void)
+ 	atm_init();
+ #endif
+ 	kernel_startup_initialize_upto(STARTUP_SUB_OSLOG);
++	loader_checkpoint(52);
+ 
+ #if CONFIG_UBSAN_MINIMAL
+ 	kernel_bootstrap_log("UBSan minimal runtime init");
+@@ -476,6 +484,7 @@ kernel_bootstrap(void)
+ 
+ 	kernel_bootstrap_log("console_init");
+ 	console_init();
++	loader_checkpoint(53);
+ 
+ 	kernel_bootstrap_log("stackshot_init");
+ 	stackshot_init();
+@@ -502,12 +511,14 @@ kernel_bootstrap(void)
+ 
+ 	kernel_bootstrap_log("machine_init");
+ 	machine_init();
++	loader_checkpoint(54);
+ 
+ 	kernel_bootstrap_log("thread_machine_init_template");
+ 	thread_machine_init_template();
+ 
+ 	kernel_bootstrap_log("clock_init");
+ 	clock_init();
++	loader_checkpoint(55);
+ 
+ 	/*
+ 	 *	Initialize the IPC, task, and thread subsystems.
+@@ -531,6 +542,7 @@ kernel_bootstrap(void)
+ 
+ 	kernel_bootstrap_log("thread_init");
+ 	thread_init();
++	loader_checkpoint(56);
+ 
+ 	kernel_bootstrap_log("restartable_init");
+ 	restartable_init();
+@@ -540,6 +552,7 @@ kernel_bootstrap(void)
+ 
+ 	kernel_bootstrap_log("turnstiles_init");
+ 	turnstiles_init();
++	loader_checkpoint(57);
+ 
+ 	kernel_bootstrap_log("mach_init_activity_id");
+ 	mach_init_activity_id();
+@@ -550,6 +563,7 @@ kernel_bootstrap(void)
+ 	/* initialize exceptions */
+ 	kernel_bootstrap_log("exception_init");
+ 	exception_init();
++	loader_checkpoint(58);
+ 
+ #if CONFIG_SCHED_SFI
+ 	kernel_bootstrap_log("sfi_init");
+@@ -562,6 +576,7 @@ kernel_bootstrap(void)
+ 
+ 	kernel_bootstrap_log("kernel_thread_create");
+ 	result = kernel_thread_create((thread_continue_t)kernel_bootstrap_thread, NULL, MAXPRI_KERNEL, &thread);
++	loader_checkpoint(59);
+ 
+ 	if (result != KERN_SUCCESS) {
+ 		panic("kernel_bootstrap: result = %08X", result);
+@@ -612,6 +627,7 @@ kernel_bootstrap_thread(void)
+ 	 */
+ 	kernel_bootstrap_thread_log("sched_startup");
+ 	sched_startup();
++	loader_checkpoint(60);
+ 
+ 	/*
+ 	 * Thread lifecycle maintenance (teardown, stack allocation)
+@@ -630,6 +646,7 @@ kernel_bootstrap_thread(void)
+ 	 */
+ 	kernel_bootstrap_thread_log("thread_bind");
+ 	thread_bind(processor);
++	loader_checkpoint(61);
+ 
+ 	/*
+ 	 * Kick off memory mapping adjustments.
+@@ -696,6 +713,7 @@ kernel_bootstrap_thread(void)
+ 	 * interrupts or preemption enabled may begin enforcement.
+ 	 */
+ 	kernel_startup_initialize_upto(STARTUP_SUB_EARLY_BOOT);
++	loader_checkpoint(62);
+ 
+ #if SCHED_HYGIENE_DEBUG
+ 	// Reset interrupts masked timeout before we enable interrupts
+@@ -721,6 +739,9 @@ kernel_bootstrap_thread(void)
+ 	kernel_bootstrap_log("vnguard_policy_init");
+ 	vnguard_policy_init();
+ #endif
++	/* stand-ins for the AMFI and Sandbox policies (bsd/kern/kern_minimac.c) */
++	kernel_bootstrap_log("minimac_policy_init");
++	minimac_policy_init();
+ #endif
+ 
+ #if CONFIG_DTRACE
+@@ -787,7 +808,9 @@ kernel_bootstrap_thread(void)
+ 	 *	Start the user bootstrap.
+ 	 */
+ #ifdef  MACH_BSD
++	loader_checkpoint(63);
+ 	bsd_init();
++	loader_checkpoint(64);
+ #endif
+ 
+ 

@@ -1,0 +1,16 @@
+--- ../../xnu/files/iokit/Kernel/MiniIOMobileFramebuffer.cpp	2026-10-31 06:23:25.753170629 +0700
++++ iokit/Kernel/MiniIOMobileFramebuffer.cpp	2026-10-31 13:33:23.868856080 +0700
+@@ -424,6 +424,13 @@
+ IOMobileFramebuffer::start(IOService * provider)
+ {
+ 	thread_t thread;
++	int mfb_on = 0;
++
++	/* Bring-up gate: while porting, the display driver can be left out (mfb=1 to start it). */
++	if (!PE_parse_boot_argn("mfb", &mfb_on, sizeof(mfb_on)) || mfb_on == 0) {
++		IOLog("MiniIOMobileFramebuffer: not started (mfb=1 starts it)\n");
++		return false;
++	}
+ 
+ 	if (!IOService::start(provider)) {
+ 		return false;

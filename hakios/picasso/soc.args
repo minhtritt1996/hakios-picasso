@@ -1,0 +1,59 @@
+# hakios/picasso/soc.args -- lop SoC SM7250 (lito) cho HakiOS, doc tu
+# device tree THAT cua may (hakios/picasso/fdt.dtb, Android/recovery, soc_id=400,
+# machine=SM7250). Dinh dang giong devices/redwood/soc.args cua hakios-sm7325.
+# Moi dong o day deu lay tu fdt.dtb (fdt.dts); dong nao chua xac minh ghi chu ro.
+
+# IPA / GSI: reg = <0x1e00000 0x84000 0x1e04000 0x23000>, reg-names "ipa-base","gsi-base",
+# qcom,ipa-hw-ver = 0x12
+soc_ipa_base=0x1e00000
+soc_gsi_base=0x1e04000
+
+# qcom,ipcc@408000
+soc_ipcc=0x408000
+
+# qcom,qmp-aop@c300000 (AOSS QMP)
+soc_aoss=0xc300000
+
+# rsc@18200000 (RSC cho cluster lon); con rsc@af20000 la cua AOSS
+soc_rsc=0x18200000
+
+# apps-smmu@15000000; GPU co rieng kgsl-smmu@3da0000
+soc_apps_smmu=0x15000000
+
+# reserved-memory@80860000, compatible "qcom,cmd-db"
+soc_cmd_db=0x80860000
+# xbl_aop_region@80700000 (no-map)
+soc_xbl_aop=0x80700000
+
+# smem_region@80900000, size 0x200000
+soc_smem=0x80900000
+
+# qcom,msm-imem@146ab000
+soc_imem=0x146ab000
+
+# modem_wlan_region@8c000000, size 0xf800000 (248 MiB) -- vung modem cua picasso.
+# (mkadt.py cua ios-sweet cung dung 0x8c000000+0xF800000 cho carve-out nay.)
+soc_mpss_mem=0x8c000000
+modem_ipa_fw_at=0x8bc00000
+
+# PAS ids doc tu fdt.dts (node -> pas-id): mss@4080000 = 0x04, adsp = 0x01,
+# cdsp = 0x12, venus@aae0000 = 0x09, ipa_fws = 0x0f, npu@9800000 = 0x17.
+# Giong SM7325 o mpss/ipa.
+soc_pas_mpss=0x4
+soc_pas_ipa=0xf
+soc_pas_adsp=0x1
+soc_pas_cdsp=0x12
+
+# firmware: qcom,firmware-name trong ipa_fws = "ipa_fws"; giong ten file
+# lito_ipa_fws.mbn cua SM7250 (SM7325 dung yupik_ipa_fws).
+soc_ipa_fw=lito_ipa_fws
+
+# ==== them cho buoc sau (chua thuoc bo soc.args cua ho) ====
+# GPU: kgsl@3d00000 + qcom,firmware-name = "a620_zap"  => Adreno 620
+soc_kgsl=0x3d00000
+soc_kgsl_smmu=0x3da0000
+# vung firmware GPU lay tu Android (fw-*/ tren vendor, "a620_zap.mbn")
+# panel: cont_splash_region cua picasso = 0xa0000000 (35 MiB) -- tu mkadt.py
+soc_framebuffer=0xa0000000
+# UFS host: 0x1d84000 (size 0x3000) -- tu mkadt.py, da chay that
+soc_ufshc=0x1d84000

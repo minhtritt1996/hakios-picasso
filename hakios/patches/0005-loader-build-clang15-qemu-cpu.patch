@@ -1,0 +1,32 @@
+diff --git a/qemu/run.sh b/qemu/run.sh
+index c05e8a0..4644d5e 100755
+--- a/qemu/run.sh
++++ b/qemu/run.sh
+@@ -34,7 +34,7 @@ if [ -n "${QEMU_ESP:-}" ]; then
+ 	mkdir -p esp/EFI/hakios && cp payload.bin esp/EFI/hakios/payload.bin
+ 	PAYLOAD_DEVICE=()
+ fi
+-timeout "$T" qemu-system-aarch64 -M virt,gic-version=3 -cpu cortex-a76 -smp ${QEMU_SMP:-1} -m ${QEMU_MEM:-6G} \
++timeout "$T" qemu-system-aarch64 -M virt,gic-version=3 -cpu ${QEMU_CPU:-cortex-a76} -smp ${QEMU_SMP:-1} -m ${QEMU_MEM:-6G} \
+   -accel tcg,tb-size=${QEMU_TB_MB:-384} \
+   -drive if=pflash,format=raw,readonly=on,file="$EFI" \
+   -drive if=pflash,format=raw,file=vars.fd \
+diff --git a/xnuloader/build.sh b/xnuloader/build.sh
+index d8e696a..5a95481 100755
+--- a/xnuloader/build.sh
++++ b/xnuloader/build.sh
+@@ -5,9 +5,12 @@ cd "$(dirname "$0")"
+ # the iPhone's identity for XNU, from the device tree of the builder's own IPSW (not in the repository)
+ [ -f identity.h ] || ./mkidentity.sh
+ 
+-clang --target=aarch64-unknown-windows -ffreestanding -fno-builtin -fno-stack-protector -fshort-wchar \
++CLANG=${CLANG:-clang}
++LD=${LD:-lld-link}
++[ -x /usr/bin/clang-15 ] && [ -z "${CLANG_OVERRIDE:-}" ] && { CLANG=clang-15; LD=lld-link-15; }
++$CLANG --target=aarch64-unknown-windows -ffreestanding -fno-builtin -fno-stack-protector -fshort-wchar \
+   -mgeneral-regs-only -O1 -Wall -Wextra -Wno-unused-parameter -c loader.c -o loader.obj
+ # /base: UEFI loads an image at its preferred address when that is free. The PE default (0x140000000)
+ # is in the middle of the phone's largest block of RAM, which XNU needs in one piece.
+-lld-link /subsystem:efi_application /entry:efi_main /nodefaultlib /base:0xA1000000 /out:loader.efi loader.obj
++$LD /subsystem:efi_application /entry:efi_main /nodefaultlib /base:0xA1000000 /out:loader.efi loader.obj
+ ls -la loader.efi

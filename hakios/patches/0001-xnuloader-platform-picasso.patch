@@ -1,0 +1,33 @@
+diff --git a/xnuloader/loader.c b/xnuloader/loader.c
+index 422f9d3..2611f94 100644
+--- a/xnuloader/loader.c
++++ b/xnuloader/loader.c
+@@ -588,6 +588,18 @@ static const struct platform platform_redwood = {
+ 	.small_cores = 0x0f,
+ };
+ 
++/*
++ * picasso: Redmi K30 5G, SM7250 (lito). GICD/GICR as redwood's (0x17A00000/0x17A60000,
++ * see the phone's own device tree: hakios/picasso/fdt.dts); the cores are 6 Cortex-A55
++ * (0-5) and 2 Cortex-A76 (6-7), numbered in MPIDR's second affinity field (cpu@0..cpu@700).
++ */
++static const struct platform platform_picasso = {
++	.name = "picasso", .io_base = 0x00400000, .io_size = 0x3FC00000,
++	.gic_dist = 0x17A00000, .gic_redist = 0x17A60000, .uart = 0, .log_other_cpu = 1,
++	.cores = 8, .core_shift = 8,
++	.small_cores = 0x3f,
++};
++
+ /* ------------------------------------------------------------------------ */
+ 
+ static void
+@@ -4345,6 +4357,9 @@ efi_main(efi_handle image, efi_system_table *st)
+ 		SCREEN.stride = GOP->mode->info->pixels_per_scanline * 4;
+ 		if (SCREEN.base == 0xE1000000ULL) {
+ 			PLAT = &platform_redwood;
++		} else if (SCREEN.base == 0xA0000000ULL) {
++			/* picasso's cont_splash_region (SM7250, Redmi K30 5G) */
++			PLAT = &platform_picasso;
+ 		} else {
+ 			ramfb_phone_screen();
+ 		}

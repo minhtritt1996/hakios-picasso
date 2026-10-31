@@ -1,0 +1,136 @@
+diff --git a/osfmk/kern/zalloc.c b/osfmk/kern/zalloc.c
+index 6ff4ee2..e3ff0d6 100644
+--- a/osfmk/kern/zalloc.c
++++ b/osfmk/kern/zalloc.c
+@@ -124,6 +124,9 @@
+ #include <IOKit/IOBSD.h>
+ #include <arm64/amcc_rorgn.h>
+ 
++extern void loader_cp_mark(uint64_t n);
++extern void loader_cp_hex(uint64_t tag, uint64_t v);
++
+ #if DEBUG
+ #define z_debug_assert(expr)  assert(expr)
+ #else
+@@ -4017,11 +4020,21 @@ static void
+ zcram(zone_t zone, vm_offset_t addr, uint32_t pages, uint16_t lock)
+ {
+ 	uint32_t chunk_pages = zone->z_chunk_pages;
++	loader_cp_mark(130);
++	loader_cp_hex(30, pages);
++	loader_cp_hex(31, chunk_pages);
++	loader_cp_hex(32, zone_elem_outer_size(zone));
++	loader_cp_hex(34, zone->z_elem_size);
++	loader_cp_hex(35, zone->z_elems_avail);
++	loader_cp_hex(36, zone->z_chunk_elems);
++	loader_cp_hex(37, (uint64_t)zone->z_percpu | ((uint64_t)zone->z_permanent << 8));
+ 
+ 	assert(pages % chunk_pages == 0);
+ 	for (; pages > 0; pages -= chunk_pages, addr += ptoa(chunk_pages)) {
+ 		zcram_and_lock(zone, addr, chunk_pages, 0, chunk_pages, lock);
+ 		zone_unlock(zone);
++		loader_cp_mark(131);
++		loader_cp_hex(33, zone->z_elems_free);
+ 	}
+ }
+ 
+@@ -4602,6 +4615,7 @@ zone_expand_async_schedule_if_allowed(zone_t zone)
+ static void
+ zone_expand_locked(zone_t z, zalloc_flags_t flags, bool (*pred)(zone_t))
+ {
++	loader_cp_mark(124);
+ 	zone_security_flags_t zsflags = zone_security_config(z);
+ 	struct zone_expand ze = {
+ 		.ze_thread  = current_thread(),
+@@ -4639,6 +4653,7 @@ zone_expand_locked(zone_t z, zalloc_flags_t flags, bool (*pred)(zone_t))
+ 			z->z_expander = &ze;
+ 			break;
+ 		}
++		loader_cp_mark(125);
+ 
+ 		if (ze.ze_vm_priv && !z->z_expander->ze_vm_priv) {
+ 			change_sleep_inheritor(&z->z_expander, ze.ze_thread);
+@@ -4659,6 +4674,7 @@ zone_expand_locked(zone_t z, zalloc_flags_t flags, bool (*pred)(zone_t))
+ 
+ 	do {
+ 		struct zone_page_metadata *meta = NULL;
++		loader_cp_mark(126);
+ 		uint32_t new_va = 0, cur_pages = 0, min_pages = 0, pages = 0;
+ 		vm_page_t page_list = NULL;
+ 		vm_offset_t addr = 0;
+@@ -4686,6 +4702,7 @@ zone_expand_locked(zone_t z, zalloc_flags_t flags, bool (*pred)(zone_t))
+ 			zone_meta_lock_in_partial(z, meta, cur_pages);
+ 		}
+ 		zone_unlock(z);
++		loader_cp_mark(127);
+ 
+ 		/*
+ 		 * And now allocate pages to populate our VA.
+@@ -6383,11 +6400,15 @@ zalloc_item(zone_t zone, zone_stats_t zstats, zalloc_flags_t flags)
+ 	zone_lock_nopreempt_check_contention(zone);
+ 
+ 	if (__improbable(zone->z_elems_free <= zone->z_elems_rsv / 2)) {
++	loader_cp_mark(122);
++	loader_cp_hex(20, zone->z_elems_free);
+ 		if ((flags & Z_NOWAIT) || zone->z_elems_free) {
+ 			zone_expand_async_schedule_if_allowed(zone);
+ 		} else {
+ 			zone_expand_locked(zone, flags, zalloc_needs_refill);
+ 		}
++		loader_cp_mark(123);
++		loader_cp_hex(21, zone->z_elems_free);
+ 		if (__improbable(zone->z_elems_free == 0)) {
+ 			zpercpu_get(zstats)->zs_alloc_fail++;
+ 			zone_unlock(zone);
+@@ -6594,6 +6615,7 @@ zalloc_cached_get_pcpu_cache(
+ struct kalloc_result
+ zalloc_ext(zone_t zone, zone_stats_t zstats, zalloc_flags_t flags)
+ {
++	loader_cp_mark(120);
+ 	/*
+ 	 * KASan uses zalloc() for fakestack, which can be called anywhere.
+ 	 * However, we make sure these calls can never block.
+@@ -6644,6 +6666,8 @@ zalloc_ext(zone_t zone, zone_stats_t zstats, zalloc_flags_t flags)
+ 
+ 	disable_preemption();
+ 
++	loader_cp_mark(121);
++
+ #if ZALLOC_ENABLE_ZERO_CHECK
+ 	if (zalloc_skip_zero_check()) {
+ 		flags |= Z_NOZZC;
+@@ -9117,6 +9141,8 @@ zone_create_ext(
+ 	zone_security_flags_t *zsflags;
+ 	uint16_t redzone;
+ 	zone_t z;
++	loader_cp_mark(132);
++	loader_cp_hex(50, (uint64_t)startup_phase);
+ 
+ 	if (size > ZONE_MAX_ALLOC_SIZE) {
+ 		panic("zone_create: element size too large: %zd", (size_t)size);
+@@ -9128,6 +9154,8 @@ zone_create_ext(
+ 	}
+ 
+ 	size = zone_elem_adjust_size(name, size, flags, &redzone);
++	loader_cp_hex(54, (uint64_t)size);
++	loader_cp_hex(55, (uint64_t)redzone);
+ 
+ 	/*
+ 	 * Allocate the zone slot, return early if we found an older match.
+@@ -9137,6 +9165,7 @@ zone_create_ext(
+ 		/* We found a zone to reuse */
+ 		return z;
+ 	}
++	loader_cp_mark(133);
+ 	zsflags = &zone_security_array[zid];
+ 
+ 	/*
+@@ -9195,6 +9224,8 @@ zone_create_ext(
+ 			z->z_chunk_elems = (uint16_t)(alloc / size);
+ 			z->z_elem_offs = (uint16_t)(alloc % size) + redzone;
+ 		}
++		loader_cp_hex(52, (uint64_t)z->z_elem_size);
++		loader_cp_hex(53, (uint64_t)zid);
+ 	}
+ 
+ 	/*

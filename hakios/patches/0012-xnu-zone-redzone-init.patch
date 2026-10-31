@@ -1,0 +1,13 @@
+diff --git a/osfmk/kern/zalloc.c b/osfmk/kern/zalloc.c
+index 6ff4ee2..641285e 100644
+--- a/osfmk/kern/zalloc.c
++++ b/osfmk/kern/zalloc.c
+@@ -9115,7 +9115,7 @@ zone_create_ext(
+ 	void                  (^extra_setup)(zone_t))
+ {
+ 	zone_security_flags_t *zsflags;
+-	uint16_t redzone;
++	uint16_t redzone = 0;   /* zone_elem_adjust_size() only sets it with KASAN_CLASSIC */
+ 	zone_t z;
+ 
+ 	if (size > ZONE_MAX_ALLOC_SIZE) {

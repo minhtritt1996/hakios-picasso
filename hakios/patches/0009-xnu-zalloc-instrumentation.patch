@@ -1,0 +1,203 @@
+diff --git a/osfmk/kern/zalloc.c b/osfmk/kern/zalloc.c
+index 6ff4ee2..e856c54 100644
+--- a/osfmk/kern/zalloc.c
++++ b/osfmk/kern/zalloc.c
+@@ -124,6 +124,9 @@
+ #include <IOKit/IOBSD.h>
+ #include <arm64/amcc_rorgn.h>
+ 
++extern void loader_cp_mark(uint64_t n);
++extern void loader_cp_hex(uint64_t tag, uint64_t v);
++
+ #if DEBUG
+ #define z_debug_assert(expr)  assert(expr)
+ #else
+@@ -4017,11 +4020,21 @@ static void
+ zcram(zone_t zone, vm_offset_t addr, uint32_t pages, uint16_t lock)
+ {
+ 	uint32_t chunk_pages = zone->z_chunk_pages;
++	loader_cp_mark(130);
++	loader_cp_hex(30, pages);
++	loader_cp_hex(31, chunk_pages);
++	loader_cp_hex(32, zone_elem_outer_size(zone));
++	loader_cp_hex(34, zone->z_elem_size);
++	loader_cp_hex(35, zone->z_elems_avail);
++	loader_cp_hex(36, zone->z_chunk_elems);
++	loader_cp_hex(37, (uint64_t)zone->z_percpu | ((uint64_t)zone->z_permanent << 8));
+ 
+ 	assert(pages % chunk_pages == 0);
+ 	for (; pages > 0; pages -= chunk_pages, addr += ptoa(chunk_pages)) {
+ 		zcram_and_lock(zone, addr, chunk_pages, 0, chunk_pages, lock);
+ 		zone_unlock(zone);
++		loader_cp_mark(131);
++		loader_cp_hex(33, zone->z_elems_free);
+ 	}
+ }
+ 
+@@ -4602,6 +4615,7 @@ zone_expand_async_schedule_if_allowed(zone_t zone)
+ static void
+ zone_expand_locked(zone_t z, zalloc_flags_t flags, bool (*pred)(zone_t))
+ {
++	loader_cp_mark(124);
+ 	zone_security_flags_t zsflags = zone_security_config(z);
+ 	struct zone_expand ze = {
+ 		.ze_thread  = current_thread(),
+@@ -4639,6 +4653,7 @@ zone_expand_locked(zone_t z, zalloc_flags_t flags, bool (*pred)(zone_t))
+ 			z->z_expander = &ze;
+ 			break;
+ 		}
++		loader_cp_mark(125);
+ 
+ 		if (ze.ze_vm_priv && !z->z_expander->ze_vm_priv) {
+ 			change_sleep_inheritor(&z->z_expander, ze.ze_thread);
+@@ -4659,6 +4674,7 @@ zone_expand_locked(zone_t z, zalloc_flags_t flags, bool (*pred)(zone_t))
+ 
+ 	do {
+ 		struct zone_page_metadata *meta = NULL;
++		loader_cp_mark(126);
+ 		uint32_t new_va = 0, cur_pages = 0, min_pages = 0, pages = 0;
+ 		vm_page_t page_list = NULL;
+ 		vm_offset_t addr = 0;
+@@ -4686,6 +4702,7 @@ zone_expand_locked(zone_t z, zalloc_flags_t flags, bool (*pred)(zone_t))
+ 			zone_meta_lock_in_partial(z, meta, cur_pages);
+ 		}
+ 		zone_unlock(z);
++		loader_cp_mark(127);
+ 
+ 		/*
+ 		 * And now allocate pages to populate our VA.
+@@ -6383,11 +6400,15 @@ zalloc_item(zone_t zone, zone_stats_t zstats, zalloc_flags_t flags)
+ 	zone_lock_nopreempt_check_contention(zone);
+ 
+ 	if (__improbable(zone->z_elems_free <= zone->z_elems_rsv / 2)) {
++	loader_cp_mark(122);
++	loader_cp_hex(20, zone->z_elems_free);
+ 		if ((flags & Z_NOWAIT) || zone->z_elems_free) {
+ 			zone_expand_async_schedule_if_allowed(zone);
+ 		} else {
+ 			zone_expand_locked(zone, flags, zalloc_needs_refill);
+ 		}
++		loader_cp_mark(123);
++		loader_cp_hex(21, zone->z_elems_free);
+ 		if (__improbable(zone->z_elems_free == 0)) {
+ 			zpercpu_get(zstats)->zs_alloc_fail++;
+ 			zone_unlock(zone);
+@@ -6594,6 +6615,7 @@ zalloc_cached_get_pcpu_cache(
+ struct kalloc_result
+ zalloc_ext(zone_t zone, zone_stats_t zstats, zalloc_flags_t flags)
+ {
++	loader_cp_mark(120);
+ 	/*
+ 	 * KASan uses zalloc() for fakestack, which can be called anywhere.
+ 	 * However, we make sure these calls can never block.
+@@ -6644,6 +6666,8 @@ zalloc_ext(zone_t zone, zone_stats_t zstats, zalloc_flags_t flags)
+ 
+ 	disable_preemption();
+ 
++	loader_cp_mark(121);
++
+ #if ZALLOC_ENABLE_ZERO_CHECK
+ 	if (zalloc_skip_zero_check()) {
+ 		flags |= Z_NOZZC;
+diff --git a/osfmk/vm/vm_map.c b/osfmk/vm/vm_map.c
+index 3a29bf4..70a08f8 100644
+--- a/osfmk/vm/vm_map.c
++++ b/osfmk/vm/vm_map.c
+@@ -64,6 +64,8 @@
+  */
+ 
+ #include "vm/vm_map.h"
++extern void loader_cp_mark(uint64_t n);
++extern void loader_cp_hex(uint64_t tag, uint64_t v);
+ #include <mach/vm_types.h>
+ #include <mach_assert.h>
+ 
+@@ -1126,6 +1128,9 @@ vm_map_init(void)
+ 
+ 	zone_create_ext(VM_MAP_ZONE_NAME, sizeof(struct _vm_map),
+ 	    VM_MAP_ZFLAGS, ZONE_ID_VM_MAP, NULL);
++	loader_cp_hex(40, vm_map_zone->z_elem_size);
++	loader_cp_hex(41, vm_map_zone->z_elems_avail);
++	loader_cp_hex(42, zone_elem_outer_size(vm_map_zone));
+ 
+ 	/*
+ 	 * Don't quarantine because we always need elements available
+@@ -1153,15 +1158,20 @@ vm_map_init(void)
+ 	zone_cram_early(vm_map_zone, map_data, map_data_size);
+ 	zone_cram_early(vm_map_entry_zone, kentry_data, kentry_data_size);
+ 	zone_cram_early(vm_map_holes_zone, map_holes_data, map_holes_data_size);
++	loader_cp_hex(6, zone_count_free(vm_map_zone));
++	loader_cp_hex(7, zone_count_free(vm_map_entry_zone));
++	loader_cp_hex(8, zone_count_free(vm_map_holes_zone));
+ 	printf("VM boostrap: %d maps, %d entries and %d holes available\n",
+ 	    zone_count_free(vm_map_zone),
+ 	    zone_count_free(vm_map_entry_zone),
+ 	    zone_count_free(vm_map_holes_zone));
++	loader_cp_mark(92);
+ 
+ 	/*
+ 	 * Since these are covered by zones, remove them from stolen page accounting.
+ 	 */
+ 	VM_PAGE_MOVE_STOLEN(atop_64(map_data_size) + atop_64(kentry_data_size) + atop_64(map_holes_data_size));
++	loader_cp_mark(100);
+ 
+ #if VM_MAP_DEBUG_APPLE_PROTECT
+ 	PE_parse_boot_argn("vm_map_debug_apple_protect",
+@@ -1177,6 +1187,7 @@ vm_map_init(void)
+ 	PE_parse_boot_argn("malloc_no_cow",
+ 	    &malloc_no_cow,
+ 	    sizeof(malloc_no_cow));
++	loader_cp_mark(101);
+ 	if (malloc_no_cow) {
+ 		vm_memory_malloc_no_cow_mask = 0ULL;
+ 		vm_memory_malloc_no_cow_mask |= 1ULL << VM_MEMORY_MALLOC;
+@@ -1196,7 +1207,10 @@ vm_map_init(void)
+ 	}
+ 
+ #if CONFIG_MAP_RANGES
++	loader_cp_mark(102);
+ 	vm_map_range_map_init();
++	loader_cp_mark(103);
++	loader_cp_mark(93);
+ #endif /* CONFIG_MAP_RANGES */
+ 
+ #if DEBUG
+@@ -1255,6 +1269,9 @@ vm_map_steal_memory(void)
+ 	map_holes_data_size = zone_get_early_alloc_size(VM_MAP_HOLES_ZONE_NAME,
+ 	    sizeof(struct vm_map_links), VM_MAP_HOLES_ZFLAGS,
+ 	    8 * VM_MAP_EARLY_COUNT_MAX);
++	loader_cp_hex(1, map_data_size);
++	loader_cp_hex(2, kentry_data_size);
++	loader_cp_hex(3, map_holes_data_size);
+ 
+ 	/*
+ 	 * Steal a contiguous range of memory so that a simple range check
+@@ -1265,6 +1282,8 @@ vm_map_steal_memory(void)
+ 	    map_holes_data_size);
+ 	kentry_data    = map_data + map_data_size;
+ 	map_holes_data = kentry_data + kentry_data_size;
++	loader_cp_hex(4, (uint64_t)(uintptr_t)map_data);
++	loader_cp_hex(5, (uint64_t)(uintptr_t)map_holes_data);
+ }
+ STARTUP(PMAP_STEAL, STARTUP_RANK_FIRST, vm_map_steal_memory);
+ 
+@@ -1460,6 +1479,7 @@ vm_map_create_options(
+ 	vm_map_t result;
+ 
+ #if DEBUG || DEVELOPMENT
++	loader_cp_mark(115);
+ 	if (__improbable(startup_phase < STARTUP_SUB_ZALLOC)) {
+ 		if (early_map_count != ~0u && early_map_count !=
+ 		    zone_count_allocated(vm_map_zone) + 1) {
+@@ -1473,8 +1493,11 @@ vm_map_create_options(
+ 	}
+ #endif /* DEBUG || DEVELOPMENT */
+ 
++	loader_cp_mark(116);
+ 	result = zalloc_id(ZONE_ID_VM_MAP, Z_WAITOK | Z_NOFAIL | Z_ZERO);
++	loader_cp_mark(117);
+ 
++	loader_cp_mark(118);
+ 	vm_map_store_init(&result->hdr);
+ 	result->hdr.entries_pageable = (bool)(options & VM_MAP_CREATE_PAGEABLE);
+ 	vm_map_set_page_shift(result, PAGE_SHIFT);

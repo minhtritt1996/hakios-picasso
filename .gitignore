@@ -1,0 +1,5 @@
+# device dumps stay local
+hakios/picasso/fdt.dtb
+hakios/picasso/fdt.dts
+*.dtb
+*.dts

@@ -1,0 +1,92 @@
+diff --git a/osfmk/vm/vm_map.c b/osfmk/vm/vm_map.c
+index 3a29bf4..276977e 100644
+--- a/osfmk/vm/vm_map.c
++++ b/osfmk/vm/vm_map.c
+@@ -64,6 +64,8 @@
+  */
+ 
+ #include "vm/vm_map.h"
++extern void loader_cp_mark(uint64_t n);
++extern void loader_cp_hex(uint64_t tag, uint64_t v);
+ #include <mach/vm_types.h>
+ #include <mach_assert.h>
+ 
+@@ -1153,15 +1155,20 @@ vm_map_init(void)
+ 	zone_cram_early(vm_map_zone, map_data, map_data_size);
+ 	zone_cram_early(vm_map_entry_zone, kentry_data, kentry_data_size);
+ 	zone_cram_early(vm_map_holes_zone, map_holes_data, map_holes_data_size);
++	loader_cp_hex(6, zone_count_free(vm_map_zone));
++	loader_cp_hex(7, zone_count_free(vm_map_entry_zone));
++	loader_cp_hex(8, zone_count_free(vm_map_holes_zone));
+ 	printf("VM boostrap: %d maps, %d entries and %d holes available\n",
+ 	    zone_count_free(vm_map_zone),
+ 	    zone_count_free(vm_map_entry_zone),
+ 	    zone_count_free(vm_map_holes_zone));
++	loader_cp_mark(92);
+ 
+ 	/*
+ 	 * Since these are covered by zones, remove them from stolen page accounting.
+ 	 */
+ 	VM_PAGE_MOVE_STOLEN(atop_64(map_data_size) + atop_64(kentry_data_size) + atop_64(map_holes_data_size));
++	loader_cp_mark(100);
+ 
+ #if VM_MAP_DEBUG_APPLE_PROTECT
+ 	PE_parse_boot_argn("vm_map_debug_apple_protect",
+@@ -1177,6 +1184,7 @@ vm_map_init(void)
+ 	PE_parse_boot_argn("malloc_no_cow",
+ 	    &malloc_no_cow,
+ 	    sizeof(malloc_no_cow));
++	loader_cp_mark(101);
+ 	if (malloc_no_cow) {
+ 		vm_memory_malloc_no_cow_mask = 0ULL;
+ 		vm_memory_malloc_no_cow_mask |= 1ULL << VM_MEMORY_MALLOC;
+@@ -1196,7 +1204,10 @@ vm_map_init(void)
+ 	}
+ 
+ #if CONFIG_MAP_RANGES
++	loader_cp_mark(102);
+ 	vm_map_range_map_init();
++	loader_cp_mark(103);
++	loader_cp_mark(93);
+ #endif /* CONFIG_MAP_RANGES */
+ 
+ #if DEBUG
+@@ -1255,6 +1266,9 @@ vm_map_steal_memory(void)
+ 	map_holes_data_size = zone_get_early_alloc_size(VM_MAP_HOLES_ZONE_NAME,
+ 	    sizeof(struct vm_map_links), VM_MAP_HOLES_ZFLAGS,
+ 	    8 * VM_MAP_EARLY_COUNT_MAX);
++	loader_cp_hex(1, map_data_size);
++	loader_cp_hex(2, kentry_data_size);
++	loader_cp_hex(3, map_holes_data_size);
+ 
+ 	/*
+ 	 * Steal a contiguous range of memory so that a simple range check
+@@ -1265,6 +1279,8 @@ vm_map_steal_memory(void)
+ 	    map_holes_data_size);
+ 	kentry_data    = map_data + map_data_size;
+ 	map_holes_data = kentry_data + kentry_data_size;
++	loader_cp_hex(4, (uint64_t)(uintptr_t)map_data);
++	loader_cp_hex(5, (uint64_t)(uintptr_t)map_holes_data);
+ }
+ STARTUP(PMAP_STEAL, STARTUP_RANK_FIRST, vm_map_steal_memory);
+ 
+@@ -1460,6 +1476,7 @@ vm_map_create_options(
+ 	vm_map_t result;
+ 
+ #if DEBUG || DEVELOPMENT
++	loader_cp_mark(115);
+ 	if (__improbable(startup_phase < STARTUP_SUB_ZALLOC)) {
+ 		if (early_map_count != ~0u && early_map_count !=
+ 		    zone_count_allocated(vm_map_zone) + 1) {
+@@ -1473,8 +1490,11 @@ vm_map_create_options(
+ 	}
+ #endif /* DEBUG || DEVELOPMENT */
+ 
++	loader_cp_mark(116);
+ 	result = zalloc_id(ZONE_ID_VM_MAP, Z_WAITOK | Z_NOFAIL | Z_ZERO);
++	loader_cp_mark(117);
+ 
++	loader_cp_mark(118);
+ 	vm_map_store_init(&result->hdr);
+ 	result->hdr.entries_pageable = (bool)(options & VM_MAP_CREATE_PAGEABLE);
+ 	vm_map_set_page_shift(result, PAGE_SHIFT);

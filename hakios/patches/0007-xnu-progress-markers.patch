@@ -1,0 +1,410 @@
+diff --git a/bsd/kern/bsd_init.c b/bsd/kern/bsd_init.c
+index 4df41ba..d5b9565 100644
+--- a/bsd/kern/bsd_init.c
++++ b/bsd/kern/bsd_init.c
+@@ -147,6 +147,14 @@
+ #include <net/if_ether.h>               /* for ether_family_init() */
+ #include <net/if_gif.h>                 /* for gif_init() */
+ #include <miscfs/devfs/devfsdefs.h>     /* for devfs_kernel_mount() */
++#include <sys/hakios.input.h>
++#include <sys/hakios.audio.h>
++#include <sys/hakios.virtio_blk.h>
++#include <sys/hakios.sparse.h>
++#include <sys/hakios.version.h>
++#if APFS
++#include <sys/hakios.apfs_check.h>
++#endif
+ #include <vm/vm_kern.h>                 /* for kmem_suballoc() */
+ #include <sys/proc_uuid_policy.h>       /* proc_uuid_policy_init() */
+ #include <netinet/flow_divert.h>        /* flow_divert_init() */
+@@ -490,9 +498,10 @@ bsd_init(void)
+ 	platform_stall_panic_or_spin(PLATFORM_STALL_XNU_LOCATION_BSD_INIT);
+ #endif
+ 
+-#define DEBUG_BSDINIT 0
++#define DEBUG_BSDINIT 1 /* bring-up: trace bsd_init steps (only visible with -enable_kprintf_spam) */
+ 
+ #if DEBUG_BSDINIT
++extern void loader_checkpoint(uint64_t n);
+ #define bsd_init_kprintf(x, ...) kprintf("bsd_init: " x, ## __VA_ARGS__)
+ #else
+ #define bsd_init_kprintf(x, ...)
+@@ -504,7 +513,8 @@ bsd_init(void)
+ 
+ #if CONFIG_DEV_KMEM
+ 	bsd_init_kprintf("calling dev_kmem_init\n");
+-	dev_kmem_init();
++	dev_kmem_init();	loader_checkpoint(70);
++
+ #endif
+ 
+ 	/* Initialize kauth subsystem before instancing the first credential */
+@@ -679,7 +689,8 @@ bsd_init(void)
+ 	 *		the kernel task.
+ 	 */
+ 	bsd_init_kprintf("calling bsd_bufferinit\n");
+-	bsd_bufferinit();
++	bsd_bufferinit();	loader_checkpoint(71);
++
+ 
+ 	/*
+ 	 * Initialize the calendar.
+@@ -786,7 +797,8 @@ bsd_init(void)
+ 	sysctl_mib_init();
+ 
+ 	bsd_init_kprintf("calling bsd_autoconf\n");
+-	bsd_autoconf();
++	bsd_autoconf();	loader_checkpoint(72);
++
+ 
+ #if CONFIG_DTRACE
+ 	dtrace_postinit();
+@@ -854,22 +866,26 @@ bsd_init(void)
+ #endif /* NETWORKING */
+ 
+ 	bsd_init_kprintf("calling inittodr\n");
+-	inittodr(0);
++	inittodr(0);	loader_checkpoint(73);
++
+ 
+ 	/* Mount the root file system. */
+ 	while (TRUE) {
+ 		int err;
+ 
+ 		bsd_init_kprintf("calling setconf\n");
+-		setconf();
++		setconf();	loader_checkpoint(74);
++
+ #if CONFIG_NETBOOT
+ 		netboot = (mountroot == netboot_mountroot);
+ #endif
+ 
+-		bsd_init_kprintf("vfs_mountroot\n");
++		bsd_init_kprintf("vfs_mountroot\n");	loader_checkpoint(75);
++
+ 		if (0 == (err = vfs_mountroot())) {
+ 			break;
+-		}
++		}	loader_checkpoint(76);
++
+ 		rootdevice[0] = '\0';
+ #if CONFIG_NETBOOT
+ 		if (netboot) {
+@@ -976,6 +992,15 @@ bsd_init(void)
+ 
+ 		bsd_init_kprintf("calling devfs_kernel_mount\n");
+ 		devfs_kernel_mount(mounthere);
++		hakios_version_init();         /* kern.hakios.version, and the version in the boot log */
++		hakios_input_init();           /* /dev/hakios-touch */
++		hakios_audio_init();           /* /dev/hakios-audio */
++		hakios_virtio_blk_init();      /* /dev/rvblk0, a disk image of the host (QEMU) */
++		hakios_sparse_init();          /* /dev/rsp0, part of an image too big to hold */
++#if APFS
++		/* mounts and walks /dev/rvblk0 once userland has /private/var up */
++		hakios_apfs_check_init();
++#endif
+ 	}
+ #endif /* DEVFS */
+ 
+diff --git a/osfmk/kern/startup.c b/osfmk/kern/startup.c
+index bec97fb..0e2d161 100644
+--- a/osfmk/kern/startup.c
++++ b/osfmk/kern/startup.c
+@@ -156,6 +156,7 @@
+ #include <security/mac_mach_internal.h>
+ #if CONFIG_VNGUARD
+ extern void vnguard_policy_init(void);
++extern void minimac_policy_init(void);
+ #endif
+ #endif
+ 
+@@ -419,6 +420,10 @@ kernel_startup_initialize_upto(startup_subsystem_id_t upto)
+ 	startup_phase = upto;
+ }
+ 
++/* HakiOS bring-up: checkpoints for porting (picasso) */
++extern void loader_checkpoint(uint64_t n);
++extern void loader_cp_mark(uint64_t n);
++
+ void
+ kernel_bootstrap(void)
+ {
+@@ -426,12 +431,16 @@ kernel_bootstrap(void)
+ 	thread_t        thread;
+ 	char            namep[16];
+ 
++	loader_checkpoint(50);
++
+ 	printf("%s\n", version); /* log kernel version */
+ 
+ 	scale_setup();
+ 
+ 	kernel_bootstrap_log("vm_mem_bootstrap");
+ 	vm_mem_bootstrap();
++	loader_cp_mark(106);
++	loader_checkpoint(51);
+ 
+ 	machine_info.memory_size = (uint32_t)mem_size;
+ #if XNU_TARGET_OS_OSX
+@@ -447,7 +456,10 @@ kernel_bootstrap(void)
+ 	kernel_bootstrap_log("atm_init");
+ 	atm_init();
+ #endif
++	loader_cp_mark(105);
+ 	kernel_startup_initialize_upto(STARTUP_SUB_OSLOG);
++	loader_cp_mark(94);
++	loader_checkpoint(52);
+ 
+ #if CONFIG_UBSAN_MINIMAL
+ 	kernel_bootstrap_log("UBSan minimal runtime init");
+@@ -475,7 +487,9 @@ kernel_bootstrap(void)
+ 	}
+ 
+ 	kernel_bootstrap_log("console_init");
++	loader_cp_mark(95);
+ 	console_init();
++	loader_checkpoint(53);
+ 
+ 	kernel_bootstrap_log("stackshot_init");
+ 	stackshot_init();
+@@ -501,13 +515,17 @@ kernel_bootstrap(void)
+ 	mapping_free_prime();                                           /* Load up with temporary mapping blocks */
+ 
+ 	kernel_bootstrap_log("machine_init");
++	loader_cp_mark(96);
+ 	machine_init();
++	loader_checkpoint(54);
+ 
+ 	kernel_bootstrap_log("thread_machine_init_template");
+ 	thread_machine_init_template();
+ 
+ 	kernel_bootstrap_log("clock_init");
++	loader_cp_mark(97);
+ 	clock_init();
++	loader_checkpoint(55);
+ 
+ 	/*
+ 	 *	Initialize the IPC, task, and thread subsystems.
+@@ -527,10 +545,12 @@ kernel_bootstrap(void)
+ 	code_signing_configuration(NULL, NULL);
+ 
+ 	kernel_bootstrap_log("task_init");
++	loader_cp_mark(98);
+ 	task_init();
+ 
+ 	kernel_bootstrap_log("thread_init");
+ 	thread_init();
++	loader_checkpoint(56);
+ 
+ 	kernel_bootstrap_log("restartable_init");
+ 	restartable_init();
+@@ -540,6 +560,7 @@ kernel_bootstrap(void)
+ 
+ 	kernel_bootstrap_log("turnstiles_init");
+ 	turnstiles_init();
++	loader_checkpoint(57);
+ 
+ 	kernel_bootstrap_log("mach_init_activity_id");
+ 	mach_init_activity_id();
+@@ -549,7 +570,9 @@ kernel_bootstrap(void)
+ 
+ 	/* initialize exceptions */
+ 	kernel_bootstrap_log("exception_init");
++	loader_cp_mark(99);
+ 	exception_init();
++	loader_checkpoint(58);
+ 
+ #if CONFIG_SCHED_SFI
+ 	kernel_bootstrap_log("sfi_init");
+@@ -562,6 +585,7 @@ kernel_bootstrap(void)
+ 
+ 	kernel_bootstrap_log("kernel_thread_create");
+ 	result = kernel_thread_create((thread_continue_t)kernel_bootstrap_thread, NULL, MAXPRI_KERNEL, &thread);
++	loader_checkpoint(59);
+ 
+ 	if (result != KERN_SUCCESS) {
+ 		panic("kernel_bootstrap: result = %08X", result);
+@@ -612,6 +636,7 @@ kernel_bootstrap_thread(void)
+ 	 */
+ 	kernel_bootstrap_thread_log("sched_startup");
+ 	sched_startup();
++	loader_checkpoint(60);
+ 
+ 	/*
+ 	 * Thread lifecycle maintenance (teardown, stack allocation)
+@@ -630,6 +655,7 @@ kernel_bootstrap_thread(void)
+ 	 */
+ 	kernel_bootstrap_thread_log("thread_bind");
+ 	thread_bind(processor);
++	loader_checkpoint(61);
+ 
+ 	/*
+ 	 * Kick off memory mapping adjustments.
+@@ -696,6 +722,7 @@ kernel_bootstrap_thread(void)
+ 	 * interrupts or preemption enabled may begin enforcement.
+ 	 */
+ 	kernel_startup_initialize_upto(STARTUP_SUB_EARLY_BOOT);
++	loader_checkpoint(62);
+ 
+ #if SCHED_HYGIENE_DEBUG
+ 	// Reset interrupts masked timeout before we enable interrupts
+@@ -721,6 +748,9 @@ kernel_bootstrap_thread(void)
+ 	kernel_bootstrap_log("vnguard_policy_init");
+ 	vnguard_policy_init();
+ #endif
++	/* stand-ins for the AMFI and Sandbox policies (bsd/kern/kern_minimac.c) */
++	kernel_bootstrap_log("minimac_policy_init");
++	minimac_policy_init();
+ #endif
+ 
+ #if CONFIG_DTRACE
+@@ -787,7 +817,9 @@ kernel_bootstrap_thread(void)
+ 	 *	Start the user bootstrap.
+ 	 */
+ #ifdef  MACH_BSD
++	loader_checkpoint(63);
+ 	bsd_init();
++	loader_checkpoint(64);
+ #endif
+ 
+ 
+diff --git a/osfmk/vm/vm_init.c b/osfmk/vm/vm_init.c
+index 11428bf..2105f26 100644
+--- a/osfmk/vm/vm_init.c
++++ b/osfmk/vm/vm_init.c
+@@ -64,6 +64,7 @@
+  */
+ 
+ #include <mach/machine/vm_types.h>
++extern void loader_cp_mark(uint64_t n);
+ #include <mach/vm_map.h>
+ #include <kern/startup.h>
+ #include <kern/zalloc_internal.h>
+@@ -126,14 +127,18 @@ vm_mem_bootstrap(void)
+ 
+ 	vm_mem_bootstrap_log("vm_map_init");
+ 	vm_map_init();
++	loader_cp_mark(109);
+ 
+ 	vm_mem_bootstrap_log("kmem_init");
+ 	kmem_init(start, end);
++	loader_cp_mark(107);
+ 
+ 	kernel_startup_initialize_upto(STARTUP_SUB_KMEM);
++	loader_cp_mark(110);
+ 
+ 	vm_mem_bootstrap_log("vm_fault_init");
+ 	vm_fault_init();
++	loader_cp_mark(108);
+ 
+ 	kernel_startup_initialize_upto(STARTUP_SUB_ZALLOC);
+ 
+diff --git a/osfmk/vm/vm_kern.c b/osfmk/vm/vm_kern.c
+index 2927d4b..57260ce 100644
+--- a/osfmk/vm/vm_kern.c
++++ b/osfmk/vm/vm_kern.c
+@@ -3762,6 +3762,8 @@ kmem_get_gobj_stats(void)
+  *	Initialize the kernel's virtual memory map, taking
+  *	into account all memory allocated up to this time.
+  */
++extern void loader_cp_mark(uint64_t n);
++
+ __startup_func
+ void
+ kmem_init(
+@@ -3777,11 +3779,18 @@ kmem_init(
+ 	    VM_MAP_PAGE_MASK(kernel_map));
+ 
+ 	vm_map_will_allocate_early_map(&kernel_map);
++	loader_cp_mark(112);
+ #if defined(__arm64__)
+-	kernel_map = vm_map_create_options(pmap_kernel(),
+-	    VM_MIN_KERNEL_AND_KEXT_ADDRESS,
+-	    VM_MAX_KERNEL_ADDRESS,
+-	    VM_MAP_CREATE_DEFAULT);
++	loader_cp_mark(113);
++	{
++		pmap_t pk = pmap_kernel();
++		loader_cp_mark(114);
++		kernel_map = vm_map_create_options(pk,
++		    VM_MIN_KERNEL_AND_KEXT_ADDRESS,
++		    VM_MAX_KERNEL_ADDRESS,
++		    VM_MAP_CREATE_DEFAULT);
++	}
++	loader_cp_mark(111);
+ 	/*
+ 	 *	Reserve virtual memory allocated up to this time.
+ 	 */
+@@ -3792,6 +3801,7 @@ kmem_init(
+ 		vm_map_offset_t map_addr;
+ 		kern_return_t kr;
+ 
++		loader_cp_mark(200 + region_select);
+ 		while (pmap_virtual_region(region_select, &region_start, &region_size)) {
+ 			map_addr = region_start;
+ 			kr = vm_map_enter(kernel_map, &map_addr,
+diff --git a/osfmk/vm/vm_map.c b/osfmk/vm/vm_map.c
+index 3a29bf4..879a37b 100644
+--- a/osfmk/vm/vm_map.c
++++ b/osfmk/vm/vm_map.c
+@@ -64,6 +64,7 @@
+  */
+ 
+ #include "vm/vm_map.h"
++extern void loader_cp_mark(uint64_t n);
+ #include <mach/vm_types.h>
+ #include <mach_assert.h>
+ 
+@@ -1157,11 +1158,13 @@ vm_map_init(void)
+ 	    zone_count_free(vm_map_zone),
+ 	    zone_count_free(vm_map_entry_zone),
+ 	    zone_count_free(vm_map_holes_zone));
++	loader_cp_mark(92);
+ 
+ 	/*
+ 	 * Since these are covered by zones, remove them from stolen page accounting.
+ 	 */
+ 	VM_PAGE_MOVE_STOLEN(atop_64(map_data_size) + atop_64(kentry_data_size) + atop_64(map_holes_data_size));
++	loader_cp_mark(100);
+ 
+ #if VM_MAP_DEBUG_APPLE_PROTECT
+ 	PE_parse_boot_argn("vm_map_debug_apple_protect",
+@@ -1177,6 +1180,7 @@ vm_map_init(void)
+ 	PE_parse_boot_argn("malloc_no_cow",
+ 	    &malloc_no_cow,
+ 	    sizeof(malloc_no_cow));
++	loader_cp_mark(101);
+ 	if (malloc_no_cow) {
+ 		vm_memory_malloc_no_cow_mask = 0ULL;
+ 		vm_memory_malloc_no_cow_mask |= 1ULL << VM_MEMORY_MALLOC;
+@@ -1196,7 +1200,10 @@ vm_map_init(void)
+ 	}
+ 
+ #if CONFIG_MAP_RANGES
++	loader_cp_mark(102);
+ 	vm_map_range_map_init();
++	loader_cp_mark(103);
++	loader_cp_mark(93);
+ #endif /* CONFIG_MAP_RANGES */
+ 
+ #if DEBUG
+@@ -1460,6 +1467,7 @@ vm_map_create_options(
+ 	vm_map_t result;
+ 
+ #if DEBUG || DEVELOPMENT
++	loader_cp_mark(115);
+ 	if (__improbable(startup_phase < STARTUP_SUB_ZALLOC)) {
+ 		if (early_map_count != ~0u && early_map_count !=
+ 		    zone_count_allocated(vm_map_zone) + 1) {
+@@ -1473,8 +1481,11 @@ vm_map_create_options(
+ 	}
+ #endif /* DEBUG || DEVELOPMENT */
+ 
++	loader_cp_mark(116);
+ 	result = zalloc_id(ZONE_ID_VM_MAP, Z_WAITOK | Z_NOFAIL | Z_ZERO);
++	loader_cp_mark(117);
+ 
++	loader_cp_mark(118);
+ 	vm_map_store_init(&result->hdr);
+ 	result->hdr.entries_pageable = (bool)(options & VM_MAP_CREATE_PAGEABLE);
+ 	vm_map_set_page_shift(result, PAGE_SHIFT);

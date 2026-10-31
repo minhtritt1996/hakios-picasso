@@ -1,0 +1,5 @@
+# device dumps stay local (repo rule: no device dumps in git)
+fdt.dtb
+fdt.dts
+*.dtb
+*.dts

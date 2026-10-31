@@ -1,0 +1,31 @@
+diff --git a/SETUP/replacecontents/replacecontents.c b/SETUP/replacecontents/replacecontents.c
+index 5b14bc3..0ebacb0 100644
+--- a/SETUP/replacecontents/replacecontents.c
++++ b/SETUP/replacecontents/replacecontents.c
+@@ -21,6 +21,26 @@
+  * @APPLE_LICENSE_HEADER_END@
+  */
+ 
++/* glibc < 2.38 has no strlcat (added to glibc 2.38); this host tool only. */
++#if !defined(__GLIBC__) || (__GLIBC__ * 1000 + __GLIBC_MINOR__) < 2038
++#include <string.h>
++static size_t strlcpy_local(char *, const char *, size_t);
++static size_t
++strlcat(char *dst, const char *src, size_t size)
++{
++	size_t dl = strnlen(dst, size);
++	if (dl == size) return size + strlen(src);
++	return dl + strlcpy_local(dst + dl, src, size - dl);
++}
++static size_t
++strlcpy_local(char *dst, const char *src, size_t size)
++{
++	size_t sl = strlen(src);
++	if (size) { size_t n = sl < size - 1 ? sl : size - 1; memcpy(dst, src, n); dst[n] = 0; }
++	return sl;
++}
++#endif
++
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <unistd.h>

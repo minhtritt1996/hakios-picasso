@@ -1,0 +1,56 @@
+diff --git a/Platforms/Xiaomi/picassoPkg/picasso.dsc b/Platforms/Xiaomi/picassoPkg/picasso.dsc
+index c6fb77c..0d85268 100644
+--- a/Platforms/Xiaomi/picassoPkg/picasso.dsc
++++ b/Platforms/Xiaomi/picassoPkg/picasso.dsc
+@@ -76,7 +76,6 @@
+   #
+   # UniXNU Libraries
+   #
+-  UniXNULib|UniXNUPkg/Library/UniXNULib/UniXNULib.inf
+   FdtLib|MdePkg/Library/BaseFdtLib/BaseFdtLib.inf
+ 
+ [Components]
+@@ -89,6 +88,3 @@
+   # Initrd block device: publishes /chosen linux,initrd-start/-end as a volume
+   picassoPkg/Drivers/PicassoBootMemoryDxe/PicassoBootMemoryDxe.inf
+ 
+-  UniXNUPkg/Application/UniXNU/UniXNU.inf
+-  UniXNUPkg/Driver/UniXNUDxe/UniXNUDxe.inf
+-  DarwinBootPkg/Driver/DarwinBoot.inf
+diff --git a/Platforms/Xiaomi/picassoPkg/picasso.fdf b/Platforms/Xiaomi/picassoPkg/picasso.fdf
+index 69a7cb8..99c52f3 100644
+--- a/Platforms/Xiaomi/picassoPkg/picasso.fdf
++++ b/Platforms/Xiaomi/picassoPkg/picasso.fdf
+@@ -56,9 +56,6 @@ READ_LOCK_STATUS   = TRUE
+   !include QcomPkg/Extra.fdf.inc
+ 
+   # UniXNU
+-  INF UniXNUPkg/Application/UniXNU/UniXNU.inf
+-  INF UniXNUPkg/Driver/UniXNUDxe/UniXNUDxe.inf
+-  INF DarwinBootPkg/Driver/DarwinBoot.inf
+ 
+ [FV.FVMAIN_COMPACT]
+ FvAlignment        = 8
+diff --git a/build_uefi.py b/build_uefi.py
+index e20a2ec..6a89e32 100755
+--- a/build_uefi.py
++++ b/build_uefi.py
+@@ -25,6 +25,7 @@ logger: logging.Logger
+ BOOT_SHIM_PATH        = Path ("BootShim")
+ CONFIG_PATH           = Path ("Conf")
+ BUILD_PATH            = Path ("Build")
++PAYLOAD_BASE          = "0xF0000000"
+ PLATFORM_PATH         = Path ("Platforms")
+ RESOURCE_CONFIGS_PATH = Path ("Resources/Configs")
+ RESOURCE_DTBS_PATH    = Path ("Resources/DTBs")
+@@ -193,7 +194,9 @@ def compile_boot_shim (boot_shim_config: dict, fd_config: dict) -> bool:
+         "make",
+         f"REQUIRES_KERNEL_HEADER={int (requires_kernel_header)}",
+         f"FD_BASE={fd_base}",
+-        f"FD_SIZE={fd_size}"
++        f"FD_SIZE={fd_size}",
++        # HakiOS: the XNUP container that follows the FD goes to PAYLOAD_BASE (see BootShim.S)
++        f"CFLAGS=--target=aarch64-linux-gnu -DPAYLOAD_BASE={PAYLOAD_BASE}"
+     ]
+ 
+     # Compile Boot Shim
