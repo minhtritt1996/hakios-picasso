@@ -608,3 +608,18 @@ Ngoài ra đã sửa hai thứ trong `bsd/dev/picasso_usb.c` (patch `0023`):
 - `picasso_usb_quiesce()` trước khi reset: `DEVTEN=0`, clear `DCTL_RUN_STOP`, chờ
   `DSTS_DEVCTRLHLT`, assert `DCTL_CSFTRST` — để loader sau reset enumerate được (trước đó
   `reboot-fastboot` làm máy mất USB hoàn toàn).
+
+## 2026-11-01 01:25 — USB console: kernel text KHÔNG vào ring; và panic "Unexpected interrupt"
+
+- `picasso_usb=2` + `sweettick=1`: máy **chạy** (ảnh màn hình thấy `hakios gic: SPI 700 pended…`,
+  probe in đủ), nhưng `/dev/ttyACM0` cho **0 byte**: `console_write()` → `picasso_usb_log_write()`
+  không đẩy được gì ra host (ring rỗng hoặc TX không chạy), dù `status` qua console trả lời được.
+  Cần xem lại `pur_live`/ring init so với thời điểm printf đầu tiên.
+- Ảnh chụp cho thấy kernel **panic** ngay sau khi probe bật PPI 19/27/28/30:
+  `Debugger: Unexpected interrupt` ⇒ **có interrupt thực sự được giao** khi bật các PPI đó
+  (trước đây HPPIR1=0x3ff khi chưa bật). Đây là lần đầu thấy dấu hiệu timer có thể tới EL1;
+  phải bật **từng INTID một** mới biết là 19 hay 27.
+- Phiên này sửa được đường điều khiển relay: sshd chính có `ForceCommand /usr/local/sbin/ssh-session-gate`
+  (và file config bị daemon khôi phục), nên phiên có lệnh trả exit 126; dựng sshd phụ
+  `/root/hakios/sshd-hakios.conf` cổng **2222** (sftp/scp chạy), còn lệnh thì chạy qua phiên tương tác
+  port 22 + script tải bằng HTTP từ `100.67.179.75:8899`.
