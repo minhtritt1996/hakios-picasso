@@ -1,7 +1,7 @@
 #!/bin/bash
 # Vong thu chuanc hoa: cho loader, (tuy chon) nap system.apfs, chay kernel, roi lay log.
 #
-#   hakios/quick.sh [SECS] [--full] [--mfb] [-- <cmdline extra>]
+#   quick.sh [SECS] [--full] [--mfb] [-- <cmdline extra>]
 #
 #   SECS   thoi gian kernel chay (mac dinh 60)
 #   --full nap userland/system.apfs (2,3 GB) vao RAM truoc khi chay

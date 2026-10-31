@@ -45,7 +45,7 @@ IPA/GSI, mpss/smem/imem, PAS ids, tên firmware (`*_ipa_fws`), panel, touch, PMI
 ## Kế hoạch
 
 1. **Thu dữ liệu máy** (khi nối điện thoại, Android/recovery):
-   `hakios/pull-picasso-fdt.sh` → `hakios/picasso/fdt.dtb`, cmdline, soc_id, partitions.
+   pull-picasso-fdt.sh` → `picasso/fdt.dtb`, cmdline, soc_id, partitions.
 2. **Dựng skeleton device repo** `hakios-picasso` theo mẫu `hakios-sm7325`
    (`device.conf`, `soc.args`, `configs/`, `uefi/` trỏ tới picasso UEFI).
    SoC layer mới: `--soc sm7250` (HakiOS chưa có SM7250).
@@ -57,7 +57,7 @@ IPA/GSI, mpss/smem/imem, PAS ids, tên firmware (`*_ipa_fws`), panel, touch, PMI
 
 ## Ghi chú
 
-- Nhánh này **không** sửa `xnu/patches` của agy; mọi thay đổi HakiOS nằm dưới `hakios/`.
+- Nhánh này **không** sửa `xnu/patches` của agy; mọi thay đổi HakiOS nằm dưới `.
 - Repo tham chiếu đã clone: `/home/tritm/hakios-u` (core, nhánh `u-boot`),
   `/home/tritm/hakios-sm7325` (device + SoC layer mẫu).
 
@@ -68,9 +68,9 @@ IPA/GSI, mpss/smem/imem, PAS ids, tên firmware (`*_ipa_fws`), panel, touch, PMI
 | Firmware | `hakios-mu` = uefi_picasso + `hakios-uefi/hakios.patch` + `files/` + `patches/0002` → `Build/picassoPkg/RELEASE_CLANGPDB/FV/SILICIUM_UEFI.fd` (2 MiB) |
 | Loader | `hakios-u/xnuloader/loader.efi`, build bằng clang-15 + lld-link-15, có `platform_picasso` (`patches/0001`) |
 | Container | `xnuloader/mkpayload.py` → loader.efi + kernel + cmdline + usb |
-| Boot image | `hakios/build-bootimg.py` → gzip(BootShim + FD + XNUP) + picasso.dtb, header v1 (**7.720.960 B**) |
+| Boot image | `build-bootimg.py` → gzip(BootShim + FD + XNUP) + picasso.dtb, header v1 (**7.720.960 B**) |
 
-Chi tiết trong `hakios/README.md` mục dưới; boot image hiện tại ở `/tmp/hakios-picasso-boot.img`.
+Chi tiết trong `HANDOFF.md` mục dưới; boot image hiện tại ở `/tmp/hakios-picasso-boot.img`.
 Backup `boot` trước khi thử: `ad6ea9d0bea679c70c7c3801bbf50939` (128 MiB, trên `/sdcard` của máy).
 
 ## Kết quả trên máy (2026-10-31 07:58)
@@ -96,7 +96,7 @@ Kernel `prebuilt` (redwood/sc7280) **treo cứng tại entry** — phải build 
 - `patches/0001`/`0002`: platform_picasso + bỏ UniXNUPkg/DarwinBootPkg + `-DPAYLOAD_BLOCK` cho BootShim.
 
 ### Vòng lặp test
-`hakios/xl-run.sh [SECS] [args...]` — stage payload + `oem run` + `get_staged` (không dùng `xl` vì
+xl-run.sh [SECS] [args...]` — stage payload + `oem run` + `get_staged` (không dùng `xl` vì
 `xl enter` cần ảnh U-Boot/Silicium và `getvar` dễ treo). Sau kernel treo phải **power-cycle**;
 kernel trả về bình thường thì loader vẫn sống.
 
@@ -188,7 +188,7 @@ CP92 CP100 CP101 CP109 CP112 CP113 CP114 CP115 CP116        (rồi dừng)
 scheduler, hoặc vùng nhớ mà DT/loader dựng cho picasso khác redwood).
 
 Cách chạy lại: `make kernel`, `fastboot reboot` (loader lên), rồi
-`RAMDISK=prebuilt/userland/hello bash hakios/xl-run.sh 40 "-v debug=0x8 rd=md0 hv_wdt_pet=1 cpus=1 $(cat devices/picasso/soc.args|grep .|tr '\n' ' ')"`
+`RAMDISK=prebuilt/userland/hello bash xl-run.sh 40 "-v debug=0x8 rd=md0 hv_wdt_pet=1 cpus=1 $(cat devices/picasso/soc.args|grep .|tr '\n' ' ')"`
 → đọc các `CPnn` trong log.
 
 ## 2026-10-31 11:25 — ROOT CAUSE: `redzone` không khởi tạo (UB) — kernel picasso BOOT TỚI DARWIN USERLAND
@@ -244,7 +244,7 @@ không in gì). `make qemu-open`/`run.sh` dùng ảnh 2,3 GB: dùng `qemu/run-da
 phần cứng thật), nên bước kiểm tiếp theo **phải chạy trên picasso**:
 
 ```
-bash hakios/phone-darwin.sh          # flash loader-only -> nạp system.apfs 2,3 GB -> chạy kernel fix + root.apfs
+bash phone-darwin.sh          # flash loader-only -> nạp system.apfs 2,3 GB -> chạy kernel fix + root.apfs
 ```
 
 ## 2026-10-31 12:05 — TRÊN MÁY THẬT: Darwin kernel chạy qua BSD init, framebuffer attach
@@ -349,7 +349,7 @@ mountroot → init.
    init self-test toàn bộ `[ ok ]` — file I/O, mmap/page-in, fork/exec/pipe, **dyld + dyld shared cache**,
    devfs (`/dev/md0`, `/dev/disk0`, `/dev/hakios-touch`, `/dev/hakios-audio`), `/dev/random` thật.
 
-### Ba fix đã tìm ra (trong `hakios/patches/`)
+### Ba fix đã tìm ra (trong `patches/`)
 | Patch | Nội dung |
 |---|---|
 | `0012-xnu-zone-redzone-init.patch` | `uint16_t redzone = 0;` trong `zone_create_ext()` — UB khiến clang Linux bỏ store `z_elem_size` ⇒ zone VM rỗng ⇒ deadlock `kmem_init` (`VM boostrap: 0 maps`). Fix: `102 maps`, kernel boot được. |
@@ -400,7 +400,7 @@ kiểm tra qua `userland/root/<path>` (thư mục staging) thay vì quét ảnh.
 
 ```
 cd /home/tritm/ios
-bash hakios/quick.sh 60 --full --mfb        # nạp system.apfs 2,3GB, chạy kernel, có mfb=1
+bash quick.sh 60 --full --mfb        # nạp system.apfs 2,3GB, chạy kernel, có mfb=1
 ```
 Sau đó:
 - Nếu kernel panic/trả về: script tự `oem log` + in các dòng `HAKIOS/HAKIOSI/launchd/panic`.

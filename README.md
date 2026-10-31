@@ -7,15 +7,15 @@ The ios-sweet port this work started from lives on the `agy` branch and is untou
 
 | Path | What |
 |---|---|
-| `hakios/README.md` | the handoff: what runs on the phone, what does not, and every number measured |
-| `hakios/patches/` | the fix series, in the order they were found (see the table in the README) |
-| `hakios/quick.sh` | the iteration loop: wait for the loader, optionally upload the 2.3 GB userland, run, fetch the log |
-| `hakios/phone-darwin.sh`, `hakios/bringup-run.sh`, `hakios/fast-run.sh`, `hakios/xl-run.sh` | the same with different steps (flash a boot image, kernel only, stage a payload) |
-| `hakios/read-logdump.sh` | read the loader's log of the last run from the phone's `logdump` partition (recovery) |
-| `hakios/build-bootimg.py` | pack BootShim + Mu-Silicium FD (with HakiOS's XnuLoader) + an XNUP container + the DTB into a boot image |
-| `hakios/pull-picasso-fdt.sh` | pull the phone's own device tree and SoC data (`hakios/picasso/soc.args`) |
-| `hakios/picasso-device/` | the device repository of the port (the same content as `hakios-device-picasso`) |
-| `hakios/upstream-question.md` | the questions for HakiOS's authors, with the measurements behind them |
+| `HANDOFF.md` | the handoff: what runs on the phone, what does not, and every number measured |
+| `patches/` | the fix series, in the order they were found (see the table in the README) |
+| `quick.sh` | the iteration loop: wait for the loader, optionally upload the 2.3 GB userland, run, fetch the log |
+| phone-darwin.sh`, bringup-run.sh`, fast-run.sh`, xl-run.sh` | the same with different steps (flash a boot image, kernel only, stage a payload) |
+| read-logdump.sh` | read the loader's log of the last run from the phone's `logdump` partition (recovery) |
+| `build-bootimg.py` | pack BootShim + Mu-Silicium FD (with HakiOS's XnuLoader) + an XNUP container + the DTB into a boot image |
+| pull-picasso-fdt.sh` | pull the phone's own device tree and SoC data (`picasso/soc.args`) |
+| `picasso-device/` | the device repository of the port (the same content as `hakios-device-picasso`) |
+| upstream-question.md` | the questions for HakiOS's authors, with the measurements behind them |
 
 The upstream work (the platform entry for picasso, two kernel fixes, the launchd plist permissions) is in the fork
 `minhtritt1996/hakios-xnu-kernel`, branch `picasso`, and the device repository is
@@ -27,7 +27,7 @@ The upstream work (the platform entry for picasso, two kernel fixes, the launchd
 |---|---|---|
 | [oosexgang/hakios-xnu-kernel](https://github.com/oosexgang/hakios-xnu-kernel) | HakiOS itself (XNU + its drivers, loader, tools, docs) | upstream |
 | [minhtritt1996/hakios-xnu-kernel](https://github.com/minhtritt1996/hakios-xnu-kernel) `picasso` | our fork: the picasso platform entry in `xnuloader/loader.c`, the host build fixes, the two kernel fixes (`redzone`, the RAM-disk `IOBSD` wait), the `mfb=1` gate, the launchd plist permissions, and the `devices/manifest.conf` block | fork of the above; a pull request to upstream carries these commits |
-| [minhtritt1996/hakios-device-picasso](https://github.com/minhtritt1996/hakios-device-picasso) | the device repository of the port (`device.conf` with what works on the phone, `configs/`, `soc/`, `soc.args`, `pull-firmware.sh`) | referenced from the fork's manifest at a locked revision; `hakios/picasso-device/` here is a copy of it |
+| [minhtritt1996/hakios-device-picasso](https://github.com/minhtritt1996/hakios-device-picasso) | the device repository of the port (`device.conf` with what works on the phone, `configs/`, `soc/`, `soc.args`, `pull-firmware.sh`) | referenced from the fork's manifest at a locked revision; `picasso-device/` here is a copy of it |
 | [oosexgang/hakios-uefi](https://github.com/oosexgang/hakios-uefi) | HakiOS's UEFI (Mu-Silicium + its XnuLoader) | applied on top of the picasso Mu-Silicium tree (`YinCQL/uefi_picasso`) to build the boot image |
-| [Project-Silicium/Mu-Silicium](https://github.com/Project-Silicium/Mu-Silicium) / [YinCQL/uefi_picasso](https://github.com/YinCQL/uefi_picasso) | the UEFI firmware and its picasso platform | the `SILICIUM_UEFI.fd` that `hakios/build-bootimg.py` packs |
-| this repository | the HakiOS-on-picasso work of the session: the measured numbers (`hakios/README.md`), the fix series (`hakios/patches/`), the iteration scripts, the SoC data of the phone | standalone (not a fork); the ios-sweet port it started from is the `agy` branch |
+| [Project-Silicium/Mu-Silicium](https://github.com/Project-Silicium/Mu-Silicium) / [YinCQL/uefi_picasso](https://github.com/YinCQL/uefi_picasso) | the UEFI firmware and its picasso platform | the `SILICIUM_UEFI.fd` that `build-bootimg.py` packs |
+| this repository | the HakiOS-on-picasso work of the session: the measured numbers (`HANDOFF.md`), the fix series (`patches/`), the iteration scripts, the SoC data of the phone | standalone (not a fork); the ios-sweet port it started from is the `agy` branch |

@@ -32,7 +32,7 @@ H6/H7/H8 = 0   zone_count_free(vm_map_zone / entry / holes) SAU zone_cram_early
    đang được tạo)? Có cần thêm bước/SoC hook nào cho SM7250 (ví dụ khác biệt PMAP/`pmap_virtual_region`)?
 3. Nếu có thể, cho biết log kernel đầy đủ của một lần boot redwood ngay sau `VM boostrap` để so sánh thứ tự.
 
-Chi tiết tái lập: `hakios/README.md` mục "2026-10-31 10:05"; nhánh `hakios` của repo này; fork
+Chi tiết tái lập: `HANDOFF.md` mục "2026-10-31 10:05"; nhánh `hakios` của repo này; fork
 `minhtritt1996/hakios-xnu-kernel` nhánh `picasso` (platform + build fix).
 
 ## Số liệu bổ sung (zalloc / zcram) — 2026-10-31 10:40
