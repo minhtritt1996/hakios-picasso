@@ -18,12 +18,12 @@ else
 	fi
 fi
 for i in $(seq 1 20); do
-	adb devices 2>/dev/null | grep -q recovery && { echo "readlog: recovery up"; break; }
+	adb -s f9f3d7b0 devices 2>/dev/null | grep -q recovery && { echo "readlog: recovery up"; break; }
 	sleep 3
 done
-adb devices 2>/dev/null | grep -q recovery || { echo "readlog: recovery khong len (adb)"; exit 2; }
+adb -s f9f3d7b0 devices 2>/dev/null | grep -q recovery || { echo "readlog: recovery khong len (adb)"; exit 2; }
 
-adb exec-out "dd if=/dev/block/by-name/logdump bs=1048576 2>/dev/null" > $D/logdump.raw
+adb -s f9f3d7b0 exec-out "dd if=/dev/block/by-name/logdump bs=1048576 2>/dev/null" > $D/logdump.raw
 echo "readlog: logdump $(stat -c %s $D/logdump.raw) B"
 echo "---- cac dong dang chu y ----"
 tr -d '\0' < $D/logdump.raw | grep -aE "probe:|HAKIOSI|HAKIOS: (setconf|IOFindBSDRoot|root|VFS|utask|load_init)|launchd|ignition|panic\(cpu|kernel returned|resident image" | tail -40
