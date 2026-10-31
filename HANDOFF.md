@@ -553,3 +553,26 @@ Không phải bug XNU; là cấu hình bảo mật của firmware/hypervisor.
    `osfmk/arm64/sleh.c:1962` dùng khi IRQ là PPI 27) + `task_vtimer_check`. Không cần secure, nhưng
    phải tự lo preemption/AST và đảm bảo không ăn hết CPU0.
    `ml_cause_interrupt()` trong XNU arm64 là no-op, nên không dùng SGI để tự ngắt được.
+
+## 2026-10-31 22:45 — TIMER CHẠY: sweettick qua SPI 700 (IOSleep trả về 101 ms trên máy)
+
+Vì PPI 27 là group 0 (secure) và NS không đổi được (GICD_TYPER.SecurityExtn=1), tick được đưa vào
+bằng **SPI do phần mềm pend**, đúng cách `YinCQL/UniXNU-picasso` né cho IPI
+(`drivers/ArmCpu/ArmCpu.cpp`: "IPIs are software-pended SPIs … ICC_SGI1R_EL1 generates nothing on this board"):
+
+- `gic_v3_spi_pend(intid)` (osfmk/arm64/gic_v3_irq.c): `GICD_ISPENDR`.
+- `sweettick_start()` / `sweettick_poll()` (osfmk/arm64/machine_routines.c), boot-arg **sweettick=1**:
+  attach SPI **700** (edge, group 1, priority 0xa0, routed to this CPU) qua `gic_v3_spi_attach()`, tắt
+  `CNTV_CTL` (vô dụng), rồi `cpu_idle()` poll `mach_absolute_time()` mỗi 1 ms và pend SPI.
+- handler của SPI gọi `rtclock_intr(TRUE)` — đúng đường `sleh.c:1962` dùng cho PPI 27.
+
+Đo trên máy (ảnh màn hình, boot-arg `gicprobe=1 sweettick=1`):
+```
+sweettick: SPI 700 pended every 1 ms
+HAKIOS gic: IOSleep(100) returned after 101322 us
+```
+⇒ sleep/timeout/`mach_wait_until` giờ hoạt động. **Bẫy**: INTID phải **< 991** (`GICD_TYPER ITLines 960`);
+1016 (số UniXNU dùng cho IPI) nằm ngoài dải và bị GIC bỏ qua — lần đầu chọn 1016 thì IOSleep treo.
+
+Việc tiếp: chạy full userland (system.apfs resident + `sweettick=1`) → init phải qua `test_time` và
+launchd phải spawn; sau đó xem lại SpringBoard ("failed to find the main CADisplay").
