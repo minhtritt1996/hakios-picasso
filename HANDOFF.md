@@ -594,3 +594,17 @@ Upstream đang làm đúng chỗ ta tắc (UI/CoreAnimation trên máy thật):
 Ghi chú công cụ: `scp/sftp` lên relay oneplus-9r hỏng (kể cả file 6 B) → dùng **HTTP server trên máy
 làm việc** (`100.67.179.75:8899`) mà relay `curl` về; ssh lệnh trực tiếp lên relay trả exit 126, phải
 mở phiên tương tác rồi gõ lệnh có nhịp.
+
+## 2026-11-01 00:45 — USB console cần tick mới enumerate được
+
+Bật `picasso_usb=2` mà **không có `sweettick=1`** thì console không lên: màn hình spam
+`PICASSO USB: ep0 cmd 9 timeout` / `ep0 rebuild failed` (START NEW CONFIG hỏng) vì thread poller của
+driver không được schedule khi kernel không có timer — driver chỉ đẩy event ring từ chính console
+output, không đủ cho EP0.
+⇒ Mọi lần boot có USB console phải kèm `sweettick=1`.
+
+Ngoài ra đã sửa hai thứ trong `bsd/dev/picasso_usb.c` (patch `0023`):
+- trace của driver **mặc định tắt** (chỉ `picasso_usb_trace=1`), để log kernel không bị đè;
+- `picasso_usb_quiesce()` trước khi reset: `DEVTEN=0`, clear `DCTL_RUN_STOP`, chờ
+  `DSTS_DEVCTRLHLT`, assert `DCTL_CSFTRST` — để loader sau reset enumerate được (trước đó
+  `reboot-fastboot` làm máy mất USB hoàn toàn).
