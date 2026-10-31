@@ -576,3 +576,21 @@ HAKIOS gic: IOSleep(100) returned after 101322 us
 
 Việc tiếp: chạy full userland (system.apfs resident + `sweettick=1`) → init phải qua `test_time` và
 launchd phải spawn; sau đó xem lại SpringBoard ("failed to find the main CADisplay").
+
+## 2026-11-01 00:25 — học từ upstream oosexgang/hakios-xnu-kernel (≥100 commit từ 25/10)
+
+Upstream đang làm đúng chỗ ta tắc (UI/CoreAnimation trên máy thật):
+
+- `MiniIOMobileFramebuffer: IOMFBDisplayRefresh` — khoảng làm mới mà **window server** dùng để nhịp khung
+  hình; thiếu nó CoreAnimation coi panel là 60 Hz. **Đã lấy nguyên file upstream** vào cây ta
+  (+144/−21 dòng, không thêm include) — kernel build OK, `strings` có `IOMFBDisplayRefresh`.
+  Patch: `patches/0022-miniomobileframebuffer-iomfbdisplayrefresh.patch`.
+- `fps_info` (userland/src/fps_info.m) — in `CADisplay` (mode/preferred/current), `UIScreen`,
+  MobileGestalt: trả lời thẳng "SpringBoard không tìm thấy CADisplay" là thiếu cái gì.
+  Đã thêm vào `userland/build.sh` (link QuartzCore/UIKit/MobileGestalt); `root/bin/fps_info` build OK.
+- Còn đáng lấy sau: `cpus=4` (bốn core lớn), `caenv=`, `fb_ca_hz=`, `mkhighrate.py`, IOSurface wrap,
+  `eagl.c` ghi chú copy IOSurface.
+
+Ghi chú công cụ: `scp/sftp` lên relay oneplus-9r hỏng (kể cả file 6 B) → dùng **HTTP server trên máy
+làm việc** (`100.67.179.75:8899`) mà relay `curl` về; ssh lệnh trực tiếp lên relay trả exit 126, phải
+mở phiên tương tác rồi gõ lệnh có nhịp.
