@@ -492,3 +492,45 @@ có ở phía window server nhưng client (`[CADisplay mainDisplay]`) không th�
 **Đọc message trực tiếp**: crash handler tính slide bằng cách quét `_dyld_image_count()` /
 `_dyld_get_image_vmaddr_slide()` tìm image chứa pc, rồi `vm_read_overwrite` tại
 `0x1dd147900 + slide` (con trỏ message) — không cần symbol cho cache.
+
+## 2026-10-31 22:20 — ROOT CAUSE của timer: PPI là Group 0, NS không đổi được
+
+Đo trên máy (probe `gicprobe=1`, ảnh màn hình với font 1,5×), tại bsd_init sau inittodr:
+
+```
+HAKIOS probe: counter 200000052 ns ints 1 igrpen1 0x1 pmr 0xf0 sre 0x1 cntv_ctl 0x5 cntfrq 0
+HAKIOS gic: hppir1 0x3ff rpr 0xff ctlr 0x8440
+HAKIOS gic: GICD ctlr 0x12 isenabler0 0 igroupr0 0 igrpmodr0 0 icactiver0 0
+HAKIOS gic: GICR isenabler0 0x08020000 icpendr0 0x10000000 igroupr0 0 icactiver0 0 waker 0
+HAKIOS gic: IGROUPR0 was 0, wrote ffffffff, reads 0
+HAKIOS gic: GICD_CTLR was 0x12, tried EnableGrp0, reads 0x12
+HAKIOS gic: after the writes hppir1 0x3ff
+```
+
+Đọc: PPI 27 (virtual timer) **đã enable** ở redistributor (bit 27 của ISENABLER0), PPI 28 pending,
+`ICC_IGRPEN1=1`, PMR=0xf0, SRE=1, `CNTV_CTL=0x5` (enable, unmasked, ISTATUS=1) — tất cả đúng, nhưng
+`ICC_HPPIR1 = 0x3ff` (spurious) và `GICR_IGROUPR0 = 0` ⇒ **mọi SGI/PPI là Group 0**, trong khi
+`GICD_CTLR = 0x12` chỉ bật EnableGrp1NS (bit EnableGrp0 = 0) ⇒ interrupt bị bỏ im lặng.
+
+Và NS **không sửa được**: ghi `GICR_IGROUPR0 = 0xffffffff` đọc lại vẫn 0; ghi `GICD_CTLR |= 1`
+(EnableGrp0) đọc lại vẫn 0x12. Tức group/secure config do XBL/QTEE (hoặc hypervisor Gunyah) giữ, XNU ở
+EL1 NS không với tới. Đây là gốc của "kernel chạy nhưng timer/usleep chết" — không phải lỗi code XNU.
+
+Hướng đi tiếp (chưa làm):
+1. **So với Linux trên cùng máy** (Droidian): kernel Linux GICv3 cũng ghi `GICR_IGROUPR0 = ~0` lúc boot;
+   nếu Linux chạy được timer thì hoặc nó chạy ở chế độ DS=1, hoặc nó dùng **virtual CPU interface**
+   (GICv3 virtualization của Gunyah: `ICH_*`/`ICV_*` với HCR_EL2.IMO=1). Phải biết cái nào trước khi sửa.
+2. Nếu là virtualized: XNU phải dùng `ICV_*` thay `ICC_*` (thay đổi lớn ở `osfmk/arm64/gic_v3_irq.c`).
+3. Nếu là Group 0 thật: cần secure side (patch UEFI/QTEE không khả thi) → dùng nguồn IRQ khác là **SPI**
+   (Qualcomm QTIMER), vì group của SPI nằm ở `GICD_IGROUPRn` (NS được ghi nếu SPI không secure).
+
+**Lưu ý công cụ (đã trả giá hôm nay):**
+- `PE_parse_boot_argn(name, NULL, 0)` LUÔN trả FALSE: phải truyền `int flag` và đọc `flag`.
+- Đừng đọc `ICC_HPPIR0_EL1` / `ICC_IGRPEN0_EL1`: group-0 register, đọc từ EL1 sẽ trap và kernel chết
+  im lặng (không in gì, máy về loader).
+- `loader_cp_hex` treo trên port này; dùng `printf` (log kernel).
+- Kernel **không sống quá ~65 s** nếu không pet watchdog hypervisor: `smc #0` với x0=0x86000007
+  (`hv_wdt_pet` chỉ chạy bằng thread_call ⇒ cần timer ⇒ không bao giờ chạy trên port này).
+- Loader chỉ nhận `stage`/`oem run`/`oem log`/`get_staged`/`getvar`/`reboot`; **không có `boot`**.
+- Font console 1,5× (`osfmk/console/video_console.c`, commit `b5209df` sau khi revert/restore) **chạy tốt
+  trên máy thật**; các lần "không có gì trên màn hình" trước đó là do probe chết trước khi in.
