@@ -31,3 +31,16 @@ The upstream work (the platform entry for picasso, two kernel fixes, the launchd
 | [oosexgang/hakios-uefi](https://github.com/oosexgang/hakios-uefi) | HakiOS's UEFI (Mu-Silicium + its XnuLoader) | applied on top of the picasso Mu-Silicium tree (`YinCQL/uefi_picasso`) to build the boot image |
 | [Project-Silicium/Mu-Silicium](https://github.com/Project-Silicium/Mu-Silicium) / [YinCQL/uefi_picasso](https://github.com/YinCQL/uefi_picasso) | the UEFI firmware and its picasso platform | the `SILICIUM_UEFI.fd` that `build-bootimg.py` packs |
 | this repository | the HakiOS-on-picasso work of the session: the measured numbers (`HANDOFF.md`), the fix series (`patches/`), the iteration scripts, the SoC data of the phone | standalone (not a fork); the ios-sweet port it started from is the `agy` branch |
+
+## Where to work
+
+| Path | What |
+|---|---|
+| `/home/tritm/hakios` | **this repository** — the port's own work: the handoff, the fix series, the scripts |
+| `/home/tritm/hakios-u` | a clone of HakiOS itself (upstream `main`), the tree the kernel and the images are built in (`make kernel`, `userland/build.sh`) |
+| `/home/tritm/hakios-fork` | the clone of the fork `minhtritt1996/hakios-xnu-kernel`, branch `picasso` (what a pull request carries) |
+| `/home/tritm/hakios-device-picasso` | the clone of the device repository |
+| `/home/tritm/hakios-mu` | Mu-Silicium (picasso) with HakiOS's XnuLoader applied; its `SILICIUM_UEFI.fd` is what the boot images pack |
+| `/home/tritm/ios` | the ios-sweet port this work started from (its own branches; nothing of the HakiOS work is there any more) |
+
+The scripts here take the HakiOS tree from `$HAKIOS` (default `/home/tritm/hakios-u`).
