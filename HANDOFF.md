@@ -640,3 +640,23 @@ Việc tiếp, theo thứ tự:
 2. Khi console ổn định: chạy `probe-q7` (bật từng INTID 19/27/28 một) → chốt timer.
 3. Rồi tới `CADisplay`/SpringBoard với `MiniIOMobileFramebuffer` + `IOMFBDisplayRefresh` đã lấy từ
    upstream (patch `0022`) và `fps_info` (đã thêm vào userland/build.sh).
+
+## 2026-11-01 02:05 — Console USB: CHẠY (mở cổng sớm 50 ms) + timer PPI bị loại dứt điểm
+
+Nguyên nhân console "0 byte": driver gửi ring ngay khi có log (`ring=5301 sent=5301`), nhưng tty không có
+người đọc thì Linux **huỷ** dữ liệu; `cat` của ta mở muộn hơn burst ~1 s. Sửa: vòng chờ node
+`/dev/ttyACM0` với `sleep 0.05` (mở trong ~50 ms). Từ đây log kernel đọc được qua USB, không cần ảnh.
+
+Đo được (log qua console, `probe-qA`):
+```
+HAKIOS gic: intid 19 enabled, pend 0 -> 0 hppir1 0x3ff
+HAKIOS gic: intid 27 enabled, pend 0 -> 0 hppir1 0x3ff
+HAKIOS gic: intid 28 enabled, pend 0 -> 0 hppir1 0x3ff
+HAKIOS gic: intid 30 enabled, pend 0 -> 0 hppir1 0x3ff
+HAKIOS gic: GICR isenabler0 0xc020000 icpendr0 0x10040000 igroupr0 0
+```
+⇒ Timer PPI **không tới được EL1** (kể cả INTID 19 như DT Linux của UniXNU nói) vì group 0/secure.
+Kết luận: dùng **sweettick (SPI 700)** làm nguồn tick; bỏ hướng PPI.
+
+Việc tiếp: chạy full userland (`system.apfs` + `root.apfs`) với `sweettick=1 picasso_usb=2 mfb=1`,
+đọc log qua `/dev/ttyACM0` — phải thấy `-- time --`, `slept 200 ms …`, `=== 36 checks ===`, `launchd`.
