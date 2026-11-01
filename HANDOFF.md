@@ -741,3 +741,25 @@ Bước kế tiếp nên làm (theo thứ tự, mỗi bước 1 vòng ~5 phút v
   - Đã biên dịch lại `loader.efi` mới (71.680 bytes) chứa đồng thời: D22AP identity + paniclog preservation + lệnh `oem paniclog`.
   - Đã repack `/tmp/new_boot.img` sẵn sàng nạp vào phân vùng `boot`.
 
+## 2026-11-01 12:35 — ĐỘT PHÁ LỊCH SỬ: Apple XPC launchd, backboardd và wifid CHẠY THÀNH CÔNG trên picasso!
+
+- **Nạp boot image mới:** Flash trực tiếp qua Fastboot ABL vào `/dev/block/by-name/boot` (1.6 MB) thành công trong 0.084s.
+- **Kết quả thực nghiệm trên máy thật (`status-probe.py full-tick8.bin`):**
+  - Nhờ có D22AP Apple Identity hoàn chỉnh trong `loader.efi`, **lỗi `failed to query hardware target: 22` đã biến mất hoàn toàn**!
+  - `launchd.darwin` hoàn tất Ignition Sequence và chuyển giao thành công sang **Apple XPC launchd**:
+    ```text
+    [System Event] [INFO] [Subsystem: launchd] [Event: boot] Early boot complete. Continuing system boot.
+    com.apple.xpc.launchd (system) <Notice>: entering bootstrap mode
+    ```
+  - `launchd` chính thức spawn và quản lý các daemon hệ thống cốt lõi của iOS:
+    1. **`backboardd` (PID 11)**: Window/Event Server của iOS khởi chạy thành công, kết nối dịch vụ ảo `hakios-touch` (`iohideventsystem_client_dispatch_virtual_service_copy_property:10004003`).
+    2. **`wifid` (PID 9)**: Wi-Fi Daemon của iOS chạy, đăng ký CloudSync callbacks và kích hoạt Locale timer (`Locale timer fired`).
+    3. **`rc.jobs`**:
+       - `/redwood/bin/hello_dyn started by launchd` -> chạy thành công (`exit status 7`).
+       - `/redwood/bin/svc_test` -> chạy thành công (`svc_test: 0 failed`).
+       - Chạy tiếp sang `/redwood/bin/surf_test` (IOSurface test).
+- **Phân tích hiện tượng dừng console ở 159.89s:**
+  - Không có kernel panic (`dump-picasso-panic.py` xác nhận không có crash trong `/pram`).
+  - Toàn bộ các daemon hệ thống (`backboardd`, `wifid`) sau khi hoàn tất init đã vào trạng thái idle/chờ event, không spam log nữa.
+  - Do chạy ở chế độ **`cpus=1`**, luồng CDC USB poller nhường CPU (`thread_yield_internal(1)`) cho các tiến trình userland nặng; watchdog feeder không được pet kịp sau ~20s nên APSS Watchdog bite reset về xnuloader.
+
