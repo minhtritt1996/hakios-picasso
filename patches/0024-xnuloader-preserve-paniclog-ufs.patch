@@ -1,0 +1,74 @@
+From 2bc0e37f9de0a2d10ae1fd5c6476a26a35d27ca9 Mon Sep 17 00:00:00 2001
+From: minhtritt1996 <minhtritt1996@users.noreply.github.com>
+Date: Sun, 1 Nov 2026 12:03:50 +0700
+Subject: [PATCH] xnuloader: preserve Apple embedded panic log across warm
+ reboots into logdump
+
+Recognize Apple embedded panic log header ('FUNK') in /pram (PANIC_LOG_BASE)
+across warm resets caused by kernel panic or hardware watchdog bites.
+Instead of wiping the partition with a fresh empty boot log on startup,
+flush the extracted panic log buffer into UFS partition logdump.
+
+Also add fastboot 'oem paniclog' command to stage the raw 512 KB /pram
+region for direct host retrieval via 'fastboot get_staged'.
+---
+ xnuloader/loader.c | 29 ++++++++++++++++++++++++++++-
+ 1 file changed, 28 insertions(+), 1 deletion(-)
+
+diff --git a/xnuloader/loader.c b/xnuloader/loader.c
+index 2611f94..47480f5 100644
+--- a/xnuloader/loader.c
++++ b/xnuloader/loader.c
+@@ -41,6 +41,21 @@ struct payload_entry { char name[16]; uint32_t size; uint32_t reserved; };
+ #define PANIC_LOG_BASE      (PAYLOAD_BASE + PAYLOAD_MAX_SIZE - 0x100000ULL)
+ #define PAYLOAD_MAX_SIZE    0x04000000ULL         /* RAM reserved for the payload in the UEFI memory map */
+ 
++#define EMBEDDED_PANIC_MAGIC   0x46554E4Bu        /* 'FUNK': Apple embedded panic log magic */
++
++struct embedded_panic_header {
++	uint32_t eph_magic;
++	uint32_t eph_crc;
++	uint32_t eph_version;
++	uint32_t eph_panic_flags;
++	uint32_t eph_panic_log_offset;
++	uint32_t eph_panic_log_len;
++	uint32_t eph_stackshot_offset;
++	uint32_t eph_stackshot_len;
++	uint32_t eph_other_log_offset;
++	uint32_t eph_other_log_len;
++};
++
+ /* ------------------------------------------------------------------------ */
+ /* XNU structures (pexpert/pexpert/arm64/boot.h, mach-o/loader.h)           */
+ 
+@@ -4000,6 +4015,11 @@ fb_command(char *cmd)
+ 			/* the firmware's memory map into the log (then "oem log" and fetch it) */
+ 			print_memory_map();
+ 			fb_reply("OKAY", "");
++		} else if (starts_with(cmd, "oem paniclog")) {
++			/* Stage the raw 512 KB /pram panic log region for host extraction */
++			staged_data = (const char *)PANIC_LOG_BASE;
++			staged_len = PANIC_LOG_SIZE;
++			fb_reply("OKAY", "");
+ 		} else if (starts_with(cmd, "oem log")) {
+ 			if (busy && running_live != NULL) {
+ 				compose_live_log(running_live, running_slide);
+@@ -4372,7 +4392,14 @@ efi_main(efi_handle image, efi_system_table *st)
+ 
+ 	int have_payload = parse_payload(&pi, 0);
+ 	if (have_payload && pi.usb_mode && usb_start()) {
+-		flush_log();
++		const struct embedded_panic_header *hdr = (const struct embedded_panic_header *)PANIC_LOG_BASE;
++		if (hdr->eph_magic == EMBEDDED_PANIC_MAGIC) {
++			print("[!] DETECTED PREVIOUS KERNEL PANIC in /pram (version %d, flags 0x%x, log_len %d)\n",
++			    (uint64_t)hdr->eph_version, (uint64_t)hdr->eph_panic_flags, (uint64_t)hdr->eph_panic_log_len);
++			write_logs((const char *)PANIC_LOG_BASE, PANIC_LOG_SIZE);
++		} else {
++			flush_log();
++		}
+ 		usb_command_loop();
+ 	}
+ 
+-- 
+2.47.3
+

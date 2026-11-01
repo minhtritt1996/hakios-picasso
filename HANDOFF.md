@@ -684,3 +684,22 @@ Bước kế tiếp nên làm (theo thứ tự, mỗi bước 1 vòng ~5 phút v
 2. Nếu TX chết: cho poller chạy ở thread priority cao hơn hoặc đẩy TX từ ngữ cảnh ngắt.
 3. Nếu waiter không dậy: kiểm `rtclock_intr(TRUE)` có `timer_resync_deadlines()` cho thread userland
    (so với đường PPI 27 trong `sleh.c`), có thể cần gọi thêm `cpu_tick`/`ast` như nhánh PPI.
+
+## 2026-11-01 12:00 — Bảo tồn Panic Log qua warm reset vào UFS `logdump` + lệnh `fastboot oem paniclog` (Thành công)
+
+- **Vấn đề đã giải quyết**: Khi kernel panic hoặc treo khiến APSS Watchdog bite reset SoC sau 15 s,
+  kernel không kịp return về loader. Loader cũ khi khởi động lại gọi `flush_log()` ghi đè 4096 byte log
+  trống vào sector 0 của partition `logdump` và zero vùng `/pram` (`0xF3F00000`), làm mất hoàn toàn dấu vết crash.
+- **Khắc phục (patch `0024`)**:
+  - `loader.c` nhận diện header `struct embedded_panic_header` của Apple (`EMBEDDED_PANIC_MAGIC` `0x46554E4B` / `"FUNK"`).
+  - Khi boot, nếu phát hiện panic log còn nguyên trong DRAM `/pram`, loader gọi `write_logs()` ghi toàn bộ 512 KB
+    vào phân vùng UFS `logdump` (verify khớp 100%) và giữ trong buffer staging.
+  - Thêm lệnh Fastboot OEM `fastboot oem paniclog`: stage vùng nhớ 512 KB `/pram` để host kéo trực tiếp bằng
+    `fastboot get_staged panic_pram.bin` (chỉ mất ~18 ms qua USB).
+- **Kiểm chứng thực tế (`panic-probe.py`)**:
+  - Gửi `panic-test`, kernel panic và SoC reboot.
+  - Sau reset, loader in: `[!] DETECTED PREVIOUS KERNEL PANIC in /pram (version 4, flags 0x8040, log_len 2236)`.
+  - Phân vùng UFS `logdump` nhận đủ 528.384 bytes log.
+  - Script `dump-picasso-panic.py --file /tmp/panic_pram.bin` parse ra đầy đủ panic caller, backtrace, boot-args và nested panic string.
+  - Đã nạp boot image mới chứa loader cập nhật vào phân vùng `boot` của điện thoại.
+
