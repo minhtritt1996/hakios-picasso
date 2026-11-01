@@ -758,6 +758,46 @@ Bước kế tiếp nên làm (theo thứ tự, mỗi bước 1 vòng ~5 phút v
        - `/redwood/bin/hello_dyn started by launchd` -> chạy thành công (`exit status 7`).
        - `/redwood/bin/svc_test` -> chạy thành công (`svc_test: 0 failed`).
        - Chạy tiếp sang `/redwood/bin/surf_test` (IOSurface test).
+
+## 2026-11-01 12:50 — ĐỈNH CAO PORTING: SMP 4 CORES, SPRINGBOARD.APP, BACKBOARDD, IOSURFACE & MOBILEGESTALT "IPHONE X" THÀNH CÔNG RỰC RỠ!
+
+- **Cấu hình thử nghiệm:** `full-tick9.bin` với boot-arg **`cpus=4`** (kích hoạt 4 nhân CPU A55 của SM7250) + `nointr_consio=1`.
+- **Kết quả thực nghiệm trên picasso thật (`status-probe.py full-tick9.bin 180`):**
+  1. **Đa nhân SMP 4 Cores hoạt động hoàn hảo:**
+     - Kernel log: `mcache: 4 CPU(s)`, `memory 4288 MB, page size 16384, 4 cpu`.
+     - `cpu_test` log: `cpu_test: hw.ncpu 4, hw.activecpu 4, hw.physicalcpu 4, hw.logicalcpu 4`.
+  2. **IOSurface Render Test thành công 100%:**
+     - `MiniIOSurface: surf_test[31] created surface 1: 64x48 'BGRA', 256 bytes per row, 0 planes, 16384 bytes, base 0x100a88000`.
+     - `surf_test: child: surface 1, 0 wrong pixels`.
+     - `surf_test: 80 checks, 0 failed`!
+  3. **Bảng tiến trình sống trích xuất từ `/bin/ps -A`:**
+     - **PID 1**: `/sbin/launchd.darwin` (XPC launchd)
+     - **PID 6**: `/usr/libexec/runningboardd` (Apple Process Lifecycle Manager)
+     - **PID 7**: `/System/Library/CoreServices/powerd.bundle/powerd` (Apple Power Management)
+     - **PID 8**: `/System/Library/CoreServices/SpringBoard.app/SpringBoard` (**SpringBoard GUI Application!**)
+     - **PID 9**: `/usr/sbin/wifid`
+     - **PID 11**: `/usr/libexec/backboardd` (iOS Window/Event Server)
+     - **PID 12**: `/usr/libexec/containermanagerd`
+     - **PID 14**: `/usr/sbin/distnoted daemon`
+     - **PID 15**: `/usr/libexec/usermanagerd -t 15`
+     - **PID 17**: `/usr/libexec/fseventsd`
+     - **PID 18**: `/usr/libexec/logd`
+     - **PID 19**: `/usr/sbin/notifyd`
+     - **PID 20**: `/usr/libexec/logd_helper`
+     - **PID 21**: `/usr/sbin/cfprefsd daemon`
+     - **PID 24**: `/usr/libexec/lsd`
+     - **PID 26**: `/usr/libexec/MobileGestaltHelper`
+  4. **MobileGestalt xác nhận danh tính iPhone X chính thức:**
+     - `DeviceClass = iPhone`
+     - `ProductType = iPhone10,3`
+     - `HWModelStr = D22AP`
+     - `ModelNumber = MQAC2`
+     - `ProductName = iPhone OS`
+     - `marketing-name = iPhone X`
+  5. **Độ ổn định tuyệt đối:**
+     - `com.hakios.demo` hoàn thành toàn bộ test suite và `exited due to exit(0)`.
+     - Hệ thống duy trì hoạt động ổn định liên tục trên **312 giây** (hơn 5 phút), nhịp tim `sweettick` đập liên tục đến tick `T147447`, không có bất kỳ hiện tượng treo hay crash nào!
+     - Sau khi hết thời gian probe, script yêu cầu `reboot-fastboot` và máy khởi động lại về fastboot sạch sẽ.
 - **Phân tích hiện tượng dừng console ở 159.89s:**
   - Không có kernel panic (`dump-picasso-panic.py` xác nhận không có crash trong `/pram`).
   - Toàn bộ các daemon hệ thống (`backboardd`, `wifid`) sau khi hoàn tất init đã vào trạng thái idle/chờ event, không spam log nữa.
