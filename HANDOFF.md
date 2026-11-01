@@ -703,3 +703,41 @@ Bước kế tiếp nên làm (theo thứ tự, mỗi bước 1 vòng ~5 phút v
   - Script `dump-picasso-panic.py --file /tmp/panic_pram.bin` parse ra đầy đủ panic caller, backtrace, boot-args và nested panic string.
   - Đã nạp boot image mới chứa loader cập nhật vào phân vùng `boot` của điện thoại.
 
+## 2026-11-01 12:25 — Vượt qua hoàn toàn điểm nghẽn "before usleep" (36/36 checks OK) & Khởi chạy launchd.darwin
+
+- **Phát hiện nguyên nhân gốc rễ gây sập nguồn tại `before usleep`:**
+  - Nhờ cơ chế lưu panic log của Loader vừa bổ sung, log crash tại `before usleep` được trích xuất trọn vẹn:
+    ```text
+    panic(cpu 0 caller 0xfffffff0073e33a8): Console I/O from interrupt-disabled context @serial_console.c:168
+    ```
+  - Callstack Mach-O: `_ud_thread` -> `_sleh_irq` -> `_gic_irq_handler` (`sweettick_intr`) -> `_printf` -> `_console_printbuf_clear` -> `__cnputs` -> `console_io_allowed()`.
+  - Ngắt `sweettick_intr` (SPI 700) định kỳ in log hoặc chấm `.` trong ISR khi ngắt CPU đang tắt. Kernel XNU bản Development lập tức kích hoạt panic vì `allow_printf_from_interrupts_disabled_context` mặc định là `false`.
+- **Khắc phục:**
+  - Bổ sung boot-arg **`nointr_consio=1`** (điều khiển tunable `allow_printf_from_interrupts_disabled_context` trong `serial_console.c`).
+  - Đóng gói container payload mới **`full-tick8.bin`**.
+- **Kết quả thực nghiệm trên picasso thật (`status-probe.py`):**
+  - Vượt qua `usleep(200000)`:
+    ```text
+    HAKIOSI: time: before usleep
+    .
+    HAKIOSI: time: after usleep
+    HAKIOSI: time: after gettimeofday
+      slept 200 ms, the clock advanced 213 ms
+    [ ok ] sleep and wall clock agree
+    === 36 checks, 0 failed ===
+    ```
+  - Toàn bộ 36 bài kiểm tra subsystem của `/redwood/sbin/init` thành công tuyệt đối (mmap, anon mem 64MB, fork/exec, dyld + shared cache, devfs, `/dev/random`, timer).
+  - `/redwood/sbin/init` chạy tiếp đến `/redwood/etc/rc` và thực hiện:
+    ```text
+    exec /sbin/launchd.darwin
+    Darwin Ignition Sequence Version 1.0.0: Mon Apr 24 20:19:10 PDT 2023; root:libignition-51~1538/libignition_core/RELEASE_ARM64
+    libignition: 1: arguments: ignition level 0x5
+    pid 1 exited -- exit reason namespace 35 subcode 0x6, description failed to query hardware target: 22
+    panic(cpu 0 caller 0xfffffff00778d274): initproc failed to start -- exit reason namespace 35 subcode 0x6 description: failed to query hardware target: 22
+    ```
+- **Xử lý `failed to query hardware target: 22`:**
+  - `launchd.darwin` (`libignition`) yêu cầu thông tin nhận diện phần cứng Apple trong DeviceTree (`target-type`, `model`, `compatible`...). Do bản loader vừa build dùng `identity.h` placeholder (rỗng) nên `libignition` báo lỗi 22 (`EINVAL`).
+  - Đã trích xuất và tái tạo toàn bộ `identity.h` chuẩn (D22AP / iPhone10,3: 6 root props, 61 product props, 2 haptics, 43 camera) từ binary prebuilt.
+  - Đã biên dịch lại `loader.efi` mới (71.680 bytes) chứa đồng thời: D22AP identity + paniclog preservation + lệnh `oem paniclog`.
+  - Đã repack `/tmp/new_boot.img` sẵn sàng nạp vào phân vùng `boot`.
+
