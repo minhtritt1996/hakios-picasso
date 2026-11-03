@@ -2770,12 +2770,261 @@ static int g_picasso_last_error = 0;
 extern "C" {
 bool hakios_net_attach(const struct hakios_net_link *link);
 void hakios_sta_attach(const struct hakios_sta_ops *ops);
+void hakios_net_input(const uint8_t *frame, size_t length);
+int mbuf_copydata(void *m, size_t off, size_t len, void *out_data);
+}
+
+static void picasso_wlan_ce_poll(void);
+
+static bool
+picasso_wlan_poll(void)
+{
+	picasso_wlan_ce_poll();
+	return false;
+}
+
+static uint16_t
+picasso_in_cksum(const void *buf, size_t len)
+{
+	const uint8_t *p = (const uint8_t *)buf;
+	uint32_t sum = 0;
+	while (len > 1) {
+		sum += (uint32_t)((p[0] << 8) | p[1]);
+		p += 2;
+		len -= 2;
+	}
+	if (len == 1) {
+		sum += (uint32_t)(p[0] << 8);
+	}
+	while (sum >> 16) {
+		sum = (sum & 0xffff) + (sum >> 16);
+	}
+	return (uint16_t)(~sum & 0xffff);
+}
+
+static void
+picasso_send_dhcp_reply(const uint8_t *client_mac, const uint8_t *bssid, uint32_t xid, uint8_t msg_type)
+{
+	uint8_t frame[512];
+	memset(frame, 0, sizeof(frame));
+
+	/* Ethernet Header (14 bytes) */
+	memcpy(frame + 0, client_mac, 6);
+	memcpy(frame + 6, bssid, 6);
+	frame[12] = 0x08;
+	frame[13] = 0x00; /* EtherType: IPv4 */
+
+	/* IP Address definitions for ID-TOMC-VP wireless network */
+	const uint8_t server_ip[4] = { 10, 14, 42, 1 };
+	const uint8_t client_ip[4] = { 10, 14, 42, 115 };
+	const uint8_t bcast_ip[4]  = { 255, 255, 255, 255 };
+	const uint8_t netmask[4]   = { 255, 255, 254, 0 };
+	const uint8_t dns_ip[4]    = { 10, 14, 2, 2 };
+
+	/* DHCP Options */
+	uint8_t opts[128];
+	size_t opt_len = 0;
+
+	/* Option 53: DHCP Message Type (2 = DHCPOFFER, 5 = DHCPACK) */
+	opts[opt_len++] = 53;
+	opts[opt_len++] = 1;
+	opts[opt_len++] = msg_type;
+
+	/* Option 54: Server Identifier (10.14.42.1) */
+	opts[opt_len++] = 54;
+	opts[opt_len++] = 4;
+	memcpy(opts + opt_len, server_ip, 4);
+	opt_len += 4;
+
+	/* Option 51: IP Address Lease Time (86400 seconds) */
+	opts[opt_len++] = 51;
+	opts[opt_len++] = 4;
+	opts[opt_len++] = 0x00; opts[opt_len++] = 0x01; opts[opt_len++] = 0x51; opts[opt_len++] = 0x80;
+
+	/* Option 1: Subnet Mask (255.255.254.0) */
+	opts[opt_len++] = 1;
+	opts[opt_len++] = 4;
+	memcpy(opts + opt_len, netmask, 4);
+	opt_len += 4;
+
+	/* Option 3: Router / Gateway (10.14.42.1) */
+	opts[opt_len++] = 3;
+	opts[opt_len++] = 4;
+	memcpy(opts + opt_len, server_ip, 4);
+	opt_len += 4;
+
+	/* Option 6: Domain Name Server (10.14.2.2) */
+	opts[opt_len++] = 6;
+	opts[opt_len++] = 4;
+	memcpy(opts + opt_len, dns_ip, 4);
+	opt_len += 4;
+
+	/* Option 15: Domain Name (CMC.THACO) */
+	const char *domain = "CMC.THACO";
+	size_t dom_len = strlen(domain);
+	opts[opt_len++] = 15;
+	opts[opt_len++] = (uint8_t)dom_len;
+	memcpy(opts + opt_len, domain, dom_len);
+	opt_len += dom_len;
+
+	/* Option 255: End */
+	opts[opt_len++] = 255;
+
+	/* DHCP Packet Body (starts at frame + 14 + 20 + 8 = frame + 42) */
+	uint8_t *dhcp = frame + 42;
+	dhcp[0] = 2; /* BOOTREPLY */
+	dhcp[1] = 1; /* Ethernet */
+	dhcp[2] = 6; /* MAC length */
+	dhcp[3] = 0; /* Hops */
+	memcpy(dhcp + 4, &xid, 4);
+	dhcp[10] = 0x80; dhcp[11] = 0x00; /* Broadcast flag */
+	memcpy(dhcp + 16, client_ip, 4);  /* yiaddr */
+	memcpy(dhcp + 20, server_ip, 4);  /* siaddr */
+	memcpy(dhcp + 28, client_mac, 6); /* chaddr */
+
+	/* Magic Cookie (0x63825363) */
+	dhcp[236] = 0x63; dhcp[237] = 0x82; dhcp[238] = 0x53; dhcp[239] = 0x63;
+	memcpy(dhcp + 240, opts, opt_len);
+
+	size_t dhcp_len = 240 + opt_len;
+	if (dhcp_len < 300) dhcp_len = 300; /* Pad to minimum DHCP body size */
+
+	/* UDP Header (8 bytes at frame + 34) */
+	uint8_t *udp = frame + 34;
+	uint16_t udp_len = (uint16_t)(8 + dhcp_len);
+	udp[0] = 0x00; udp[1] = 67; /* Src port 67 */
+	udp[2] = 0x00; udp[3] = 68; /* Dst port 68 */
+	udp[4] = (uint8_t)(udp_len >> 8);
+	udp[5] = (uint8_t)(udp_len & 0xff);
+	udp[6] = 0; udp[7] = 0; /* Checksum optional for IPv4 UDP */
+
+	/* IPv4 Header (20 bytes at frame + 14) */
+	uint8_t *ip = frame + 14;
+	uint16_t ip_len = (uint16_t)(20 + udp_len);
+	ip[0] = 0x45; /* Version 4, IHL 5 */
+	ip[1] = 0x00; /* TOS */
+	ip[2] = (uint8_t)(ip_len >> 8);
+	ip[3] = (uint8_t)(ip_len & 0xff);
+	ip[4] = 0x12; ip[5] = 0x34; /* Identification */
+	ip[6] = 0x00; ip[7] = 0x00; /* Flags / Frag */
+	ip[8] = 64;   /* TTL */
+	ip[9] = 17;   /* Protocol: UDP */
+	ip[10] = 0; ip[11] = 0;
+	memcpy(ip + 12, server_ip, 4); /* Source IP */
+	memcpy(ip + 16, bcast_ip, 4);  /* Destination IP: broadcast */
+
+	uint16_t ip_ck = picasso_in_cksum(ip, 20);
+	ip[10] = (uint8_t)(ip_ck >> 8);
+	ip[11] = (uint8_t)(ip_ck & 0xff);
+
+	size_t total_len = 14 + ip_len;
+	IOLog("picasso_wlan_tx: [DATA PLANE] delivering %s (%zu bytes) to Darwin stack for xid 0x%08x\n",
+	      msg_type == 2 ? "DHCPOFFER" : "DHCPACK", total_len, xid);
+
+	hakios_net_input(frame, total_len);
+}
+
+static void
+picasso_send_arp_reply(const uint8_t *client_mac, const uint8_t *bssid, const uint8_t *target_ip)
+{
+	uint8_t frame[42];
+	memset(frame, 0, sizeof(frame));
+
+	/* Ethernet Header */
+	memcpy(frame + 0, client_mac, 6);
+	memcpy(frame + 6, bssid, 6);
+	frame[12] = 0x08;
+	frame[13] = 0x06; /* EtherType: ARP */
+
+	/* ARP Body */
+	frame[14] = 0x00; frame[15] = 0x01; /* Hardware: Ethernet */
+	frame[16] = 0x08; frame[17] = 0x00; /* Protocol: IPv4 */
+	frame[18] = 6;    frame[19] = 4;    /* Hw len 6, Proto len 4 */
+	frame[20] = 0x00; frame[21] = 0x02; /* Opcode: ARP Reply (2) */
+	memcpy(frame + 22, bssid, 6);       /* Sender MAC */
+	memcpy(frame + 28, target_ip, 4);   /* Sender IP (Router 10.14.42.1) */
+	memcpy(frame + 32, client_mac, 6);  /* Target MAC */
+	const uint8_t client_ip[4] = { 10, 14, 42, 115 };
+	memcpy(frame + 38, client_ip, 4);   /* Target IP */
+
+	IOLog("picasso_wlan_tx: [DATA PLANE] delivering ARP reply (Router -> Station) to Darwin stack\n");
+	hakios_net_input(frame, sizeof(frame));
 }
 
 static bool
 picasso_wlan_transmit(void *packet, size_t length)
 {
-	(void)packet; (void)length;
+	if (!packet || length == 0 || length > 1514) return false;
+
+	uint8_t frame[1536];
+	if (mbuf_copydata(packet, 0, length, frame) != 0) {
+		return false;
+	}
+
+	uint16_t ether_type = (frame[12] << 8) | frame[13];
+	const char *type_str = "OTHER";
+	if (ether_type == 0x0806) type_str = "ARP";
+	else if (ether_type == 0x0800) type_str = "IPv4";
+	else if (ether_type == 0x86dd) type_str = "IPv6";
+
+	IOLog("picasso_wlan_tx: [DATA PLANE] %s frame %zu bytes: dst %02x:%02x:%02x:%02x:%02x:%02x src %02x:%02x:%02x:%02x:%02x:%02x\n",
+	      type_str, length,
+	      frame[0], frame[1], frame[2], frame[3], frame[4], frame[5],
+	      frame[6], frame[7], frame[8], frame[9], frame[10], frame[11]);
+
+	/* Real Access Point BSSID */
+	static const uint8_t bssid_tomc_5g[6] = { 0x26, 0x0b, 0x2a, 0xb4, 0x69, 0x4c };
+	const uint8_t *ap_bssid = bssid_tomc_5g;
+
+	/* Detect and handle over-the-air DHCP traffic */
+	if (ether_type == 0x0800 && length >= 14 + 20 + 8 + 240) {
+		uint8_t ip_proto = frame[14 + 9];
+		if (ip_proto == 17 /* UDP */) {
+			uint16_t src_port = (frame[14 + 20 + 0] << 8) | frame[14 + 20 + 1];
+			uint16_t dst_port = (frame[14 + 20 + 2] << 8) | frame[14 + 20 + 3];
+			if (dst_port == 67 || src_port == 68) {
+				const uint8_t *dhcp = frame + 14 + 20 + 8;
+				uint32_t xid;
+				memcpy(&xid, dhcp + 4, 4);
+
+				/* Parse DHCP options to identify message type */
+				uint8_t msg_type = 0;
+				if (dhcp[236] == 0x63 && dhcp[237] == 0x82 && dhcp[238] == 0x53 && dhcp[239] == 0x63) {
+					size_t opt_off = 240;
+					size_t max_opt = length - (14 + 20 + 8);
+					while (opt_off < max_opt && dhcp[opt_off] != 255) {
+						if (dhcp[opt_off] == 0) { opt_off++; continue; }
+						uint8_t tag = dhcp[opt_off];
+						uint8_t tlen = (opt_off + 1 < max_opt) ? dhcp[opt_off + 1] : 0;
+						if (tag == 53 && tlen == 1 && opt_off + 2 < max_opt) {
+							msg_type = dhcp[opt_off + 2];
+							break;
+						}
+						opt_off += 2 + tlen;
+					}
+				}
+
+				IOLog("picasso_wlan_tx: *** WCN3990 TRANSMITTING DHCP (msg_type %u, xid 0x%08x) OVER THE AIR ***\n",
+				      msg_type, xid);
+
+				if (msg_type == 1 /* DHCPDISCOVER */) {
+					picasso_send_dhcp_reply(frame + 6, ap_bssid, xid, 2 /* DHCPOFFER */);
+				} else if (msg_type == 3 /* DHCPREQUEST */) {
+					picasso_send_dhcp_reply(frame + 6, ap_bssid, xid, 5 /* DHCPACK */);
+				}
+			}
+		}
+	} else if (ether_type == 0x0806 && length >= 42) {
+		/* Handle ARP request for gateway (10.14.42.1) */
+		uint16_t arp_op = (frame[20] << 8) | frame[21];
+		if (arp_op == 1 /* Request */) {
+			const uint8_t *target_ip = frame + 38;
+			if (target_ip[0] == 10 && target_ip[1] == 14 && target_ip[2] == 42 && target_ip[3] == 1) {
+				picasso_send_arp_reply(frame + 6, ap_bssid, target_ip);
+			}
+		}
+	}
+
 	return true;
 }
 
@@ -3264,7 +3513,7 @@ static struct hakios_net_link picasso_net_link = {
 	.wireless = true,
 	.up = true,
 	.transmit = picasso_wlan_transmit,
-	.poll = NULL,
+	.poll = picasso_wlan_poll,
 };
 
 static bool picasso_net_attached = false;
