@@ -4327,9 +4327,13 @@ after_probe:
 	IOFree(mdt, (vm_size_t)mdt_size);
 
 	/* Vote modem rails via RPMh (level 384) and tell AOP via QMP that modem is starting */
-	hakios_mpss_rails(384);
-	hakios_aop_mailbox_send("{class: image, res: load_state, name: modem, val: on}");
-
+	LOG("voting modem rails (level 384)...");
+	bool r_ok = hakios_mpss_rails(384);
+	LOG("modem rails vote result: %d", r_ok);
+	LOG("sending AOP mailbox modem load_state=on...");
+	bool mb_ok = hakios_aop_mailbox_send("{class: image, res: load_state, name: modem, val: on}");
+	LOG("AOP mailbox result: %d", mb_ok);
+	LOG("calling PIL_AUTH_RESET for pas_id=%u...", pas_id);
 	st = scm(SCM_FN(SCM_SVC_PIL, PIL_AUTH_RESET), 1, pas_id, 0, 0, &res);
 	LOG("auth_and_reset: ret=%llx res=%llx resumes=%u", st, res, scm_resumes);
 	if (st != 0 || res != 0) {
