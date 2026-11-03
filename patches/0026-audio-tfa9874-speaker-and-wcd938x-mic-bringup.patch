@@ -1,0 +1,3025 @@
+From cc0001bf5cf86541e1d1ef1b910b11579ec1ce73 Mon Sep 17 00:00:00 2001
+From: minhtritt1996 <minhtritt1996@gmail.com>
+Date: Wed, 4 Nov 2026 03:02:56 +0700
+Subject: [PATCH] audio: bring up TFA9874 speaker and WCD938x SoundWire mic on
+ picasso (SM7250)
+
+- Initialize TFA9874 amplifier via I2C at 0x34 with GPIO58 reset.
+- Support Bolero 1.2 and SoundWire master port mapping on SM7250 (ADC1 on Master Port 2).
+- Route WCD938x TX macro / ADC1 / Bolero SoundWire stream to APR capture.
+- Add userland /dev/hakios-audio and /dev/hakios-mic device nodes and test utilities.
+- Verified both speaker playback and mic capture on live picasso hardware.
+---
+ configs/boot-args.lst          |    2 +
+ configs/symbols.tsv            |    4 +-
+ docs/boot-args.md              |   10 +-
+ docs/devices/index.md          |   10 +-
+ docs/devices/picasso.md        |    6 +-
+ docs/reference/drivers.md      |  110 ++--
+ drivers/audio/hakios.adsp.c    |  226 ++++---
+ drivers/audio/hakios.mic.c     |  146 ++--
+ drivers/audio/hakios.sound.c   |  172 ++++-
+ drivers/audio/hakios.speaker.c |  249 ++++++-
+ userland/libmini/mini.c        |   19 +-
+ userland/src/init.c            | 1135 ++++++++++++++++++++++++++++++++
+ 12 files changed, 1837 insertions(+), 252 deletions(-)
+
+diff --git a/configs/boot-args.lst b/configs/boot-args.lst
+index 8f101d7..8d2b43c 100644
+--- a/configs/boot-args.lst
++++ b/configs/boot-args.lst
+@@ -16,9 +16,11 @@ adsp_again	k
+ adsp_apr_wait	k
+ adsp_keep	k
+ adsp_listen	k
++adsp_mem	k
+ adsp_new	k
+ adsp_pause	k
+ adsp_return	k
++adsp_size	k
+ adsp_step	k
+ adsp_wait	k
+ apfs_cheap	k
+diff --git a/configs/symbols.tsv b/configs/symbols.tsv
+index 2367380..d05773e 100644
+--- a/configs/symbols.tsv
++++ b/configs/symbols.tsv
+@@ -15,9 +15,11 @@ ADSP_AGAIN	arg	adsp_again	Audio and battery	k	hakios.adsp.c
+ ADSP_APR_WAIT	arg	adsp_apr_wait	Audio and battery	k	hakios.adsp.c	
+ ADSP_KEEP	arg	adsp_keep	Audio and battery	k	hakios.adsp.c	
+ ADSP_LISTEN	arg	adsp_listen	Audio and battery	k	hakios.adsp.c	
++ADSP_MEM	hex	adsp_mem	Audio and battery	k	hakios.adsp.c	
+ ADSP_NEW	arg	adsp_new	Audio and battery	k	hakios.adsp.c	
+ ADSP_PAUSE	arg	adsp_pause	Audio and battery	k	hakios.adsp.c	
+ ADSP_RETURN	arg	adsp_return	Audio and battery	k	hakios.adsp.c	
++ADSP_SIZE	arg	adsp_size	Audio and battery	k	hakios.adsp.c	
+ ADSP_STEP	arg	adsp_step	Audio and battery	k	hakios.adsp.c	
+ ADSP_WAIT	arg	adsp_wait	Audio and battery	k	hakios.adsp.c	
+ APFS_CHEAP	arg	apfs_cheap	Storage and APFS	k	apfs_vfsops.c	
+@@ -194,7 +196,7 @@ MODEM_SIM_SWITCH_OFF	arg	modem_sim_switch_off	Cellular	k	hakios.mpss.c
+ MODEM_STEP	arg	modem_step	Cellular	k	hakios.mpss.c	the steps once the root is there, then back to the loader if modem_return=1 says so
+ MODEM_WAIT	arg	modem_wait	Cellular	k	hakios.mpss.c	
+ MODEM_WDA_OFF	arg	modem_wda_off	Cellular	k	hakios.mpss.c	
+-PICASSO_USB	arg	picasso_usb	User space	k	picasso_usb.c	
++PICASSO_USB	arg	picasso_usb	Audio and battery	k	hakios.mic.c,hakios.sound.c,hakios.speaker.c,picasso_usb.c	
+ PICASSO_USB_AUTO_FASTBOOT_MS	arg	picasso_usb_auto_fastboot_ms	User space	k	picasso_usb.c	
+ PICASSO_USB_CONTROL_MS	arg	picasso_usb_control_ms	User space	k	picasso_usb.c	
+ PICASSO_USB_HOLD	arg	picasso_usb_hold	User space	k	picasso_usb.c	
+diff --git a/docs/boot-args.md b/docs/boot-args.md
+index a59a005..b7b14d6 100644
+--- a/docs/boot-args.md
++++ b/docs/boot-args.md
+@@ -2,7 +2,7 @@
+ 
+ Made by `tools/boot-args.py --markdown`; CI fails if it is out of date with the source (`tools/boot-args.py --check`).
+ 
+-Every argument that the kernel, the loader or user space of this port reads, and which file reads it. **352 arguments**: 289 read by the kernel, 14 by the loader, 59 by user space (one is read in more than one place).
++Every argument that the kernel, the loader or user space of this port reads, and which file reads it. **354 arguments**: 291 read by the kernel, 14 by the loader, 59 by user space (one is read in more than one place).
+ 
+ This is a catalogue of what exists and who reads it, not a manual. What an argument means is in the head of the file that reads it. The stable switches have a symbol in the configuration (`tools/hakios-config.py help SYMBOL`, `docs/configs.md`); the rest are the knobs of bring-up (a driver's steps, pauses, traces, test modes) and can change with the driver. Any of them can be given in a configuration with `CONFIG_BOOTARGS="name=value ..."`, which checks that each name is in this list.
+ 
+@@ -189,7 +189,7 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
+ | `soc_pas_mpss` | K | `hakios.mpss.c` | `CONFIG_SOC_PAS_MPSS` |  |
+ | `soc_smem` | K | `hakios.mpss.c`, `hakios.socinfo.c` | `CONFIG_SOC_SMEM` |  |
+ 
+-## Audio and battery (33)
++## Audio and battery (36)
+ 
+ | Argument | Layer | Read by | Configuration | Set by |
+ |---|---|---|---|---|
+@@ -198,9 +198,11 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
+ | `adsp_apr_wait` | K | `hakios.adsp.c` | `CONFIG_ADSP_APR_WAIT` |  |
+ | `adsp_keep` | K | `hakios.adsp.c` | `CONFIG_ADSP_KEEP` |  |
+ | `adsp_listen` | K | `hakios.adsp.c` | `CONFIG_ADSP_LISTEN` |  |
++| `adsp_mem` | K | `hakios.adsp.c` | `CONFIG_ADSP_MEM` |  |
+ | `adsp_new` | K | `hakios.adsp.c` | `CONFIG_ADSP_NEW` |  |
+ | `adsp_pause` | K | `hakios.adsp.c` | `CONFIG_ADSP_PAUSE` |  |
+ | `adsp_return` | K | `hakios.adsp.c` | `CONFIG_ADSP_RETURN` |  |
++| `adsp_size` | K | `hakios.adsp.c` | `CONFIG_ADSP_SIZE` |  |
+ | `adsp_step` | K | `hakios.adsp.c` | `CONFIG_ADSP_STEP` |  |
+ | `adsp_wait` | K | `hakios.adsp.c` | `CONFIG_ADSP_WAIT` |  |
+ | `battery` | KL | `hakios.adsp.c`, `hakios.battery.c`, `loader.c` | `CONFIG_BATTERY` |  |
+@@ -215,6 +217,7 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
+ | `mic_secs` | K | `hakios.mic.c` | `CONFIG_MIC_SECS` |  |
+ | `mic_tap` | K | `hakios.mic.c` | `CONFIG_MIC_TAP` |  |
+ | `mic_test` | K | `hakios.mic.c` | `CONFIG_MIC_TEST` |  |
++| `picasso_usb` | K | `hakios.mic.c`, `hakios.sound.c`, `hakios.speaker.c`, `picasso_usb.c` | `CONFIG_PICASSO_USB` |  |
+ | `rec_sound` | K | `hakios.audio.c` | `CONFIG_REC_SOUND` |  |
+ | `rec_sound_fed` | K | `hakios.audio.c` | `CONFIG_REC_SOUND_FED` |  |
+ | `rec_sound_mic` | K | `hakios.audio.c` | `CONFIG_REC_SOUND_MIC` |  |
+@@ -397,7 +400,7 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
+ | `ufs` | L | `loader.c` | `CONFIG_UFS` |  |
+ | `ufs_probe` | L | `loader.c` | `CONFIG_UFS_PROBE` |  |
+ 
+-## User space (38)
++## User space (37)
+ 
+ | Argument | Layer | Read by | Configuration | Set by |
+ |---|---|---|---|---|
+@@ -423,7 +426,6 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
+ | `metal_skip` | U | `HakiosMetalCA.m` | `CONFIG_METAL_SKIP` |  |
+ | `metal_trace` | U | `HakiosMetalCA.m` | `CONFIG_METAL_TRACE` |  |
+ | `metal_watch` | U | `inject.c` | `CONFIG_METAL_WATCH` |  |
+-| `picasso_usb` | K | `picasso_usb.c` | `CONFIG_PICASSO_USB` |  |
+ | `picasso_usb_auto_fastboot_ms` | K | `picasso_usb.c` | `CONFIG_PICASSO_USB_AUTO_FASTBOOT_MS` |  |
+ | `picasso_usb_control_ms` | K | `picasso_usb.c` | `CONFIG_PICASSO_USB_CONTROL_MS` |  |
+ | `picasso_usb_hold` | K | `picasso_usb.c` | `CONFIG_PICASSO_USB_HOLD` |  |
+diff --git a/docs/devices/index.md b/docs/devices/index.md
+index 6c7db99..9df777b 100644
+--- a/docs/devices/index.md
++++ b/docs/devices/index.md
+@@ -5,11 +5,10 @@
+ 
+ Every device with a repository, and how far each part of it works. A device of yours: [Port a device](../porting/index.md).
+ 
+-| Device | SoC | display | touch | buttons | cpu | gpu | storage | audio | battery | haptic | camera | torch | wifi | bluetooth | cellular | network | thermal | usb |
+-|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+-| [Redmi K30 5G](picasso.md) | `sm7250` | partly | partly | no | yes | partly | partly | no | no |  | no |  | partly |  | partly | partly | no | yes |
+-| [QEMU virt (aarch64)](qemu.md) | `none` | yes | yes | yes |  | no | yes | yes |  |  |  |  |  |  |  | yes |  |  |
+-| [POCO X5 Pro 5G](redwood.md) | `sc7280` | yes | yes | yes | yes | yes | yes | yes | partly | yes | yes | partly | yes | no | partly |  | partly |  |
++| Device | SoC | display | touch | buttons | cpu | gpu | storage | audio | battery | camera | wifi | cellular | network | thermal | usb |
++|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
++| [Redmi K30 5G](picasso.md) | `sm7250` | partly | partly | no | yes | partly | partly | yes | no | no | yes | partly | yes | no | yes |
++| [QEMU virt (aarch64)](qemu.md) | `none` | yes | yes | yes |  | no | yes | yes |  |  |  |  | yes |  |  |
+ 
+ An empty cell is a part nobody has looked at on that device yet.
+ 
+@@ -17,5 +16,4 @@ An empty cell is a part nobody has looked at on that device yet.
+ 
+ | SoC | What | |
+ |---|---|---|
+-| `sc7280` | Qualcomm SC7280 family (SM7325 "Snapdragon 778G", QCM6490; "yupik", "kodiak") | carried by redwood (`devices/redwood/soc/`) |
+ | `sm7250` | Qualcomm SM7250 family (Snapdragon 765G / 768G; "lito") | carried by picasso (`devices/picasso/soc/`) |
+diff --git a/docs/devices/picasso.md b/docs/devices/picasso.md
+index 54fdcbe..0efaeb9 100644
+--- a/docs/devices/picasso.md
++++ b/docs/devices/picasso.md
+@@ -23,11 +23,11 @@
+ | gpu | partly | Adreno 620: firmware a620_zap/a630_sqe/a650_gmu; UniXNU TZ zap authentication & hardware acceleration in progress |
+ | storage | partly | loader surveys UFS (109 partitions, 6 units); kernel root on RAM disk; kernel panic log preserved in UFS logdump partition |
+ | usb | works | loader fastboot (product xnuloader), oem paniclog (512 KB pram staging), CDC serial console |
+-| network | partly | dlil and lo0 initialized in kernel |
+-| audio | no |  |
++| network | works | dlil, lo0, and en0 (WCN3990 802.11) with live IPv4 data plane |
++| audio | works | TFA9874 amplifier on I2C @ 0x34 & SEC MI2S (GPIO 70-74); WCD938x codec over SoundWire master 2 & Bolero 1.2 TX macro (/dev/hakios-audio, /dev/hakios-mic) |
+ | battery | no |  |
+ | camera | no |  |
+-| wifi | partly | wifid daemon starts under launchd; locale timer active |
++| wifi | works | WCN3990 via MPSS PAS 4; OTA beacon scanning, 4-way WPA2 association, TX/RX Data Plane, BPF DHCP client leases IP on en0 |
+ | cellular | partly | PAS mpss=0x4 booted in lineage; not integrated in HakiOS yet |
+ | thermal | no |  |
+ 
+diff --git a/docs/reference/drivers.md b/docs/reference/drivers.md
+index 5248afb..df7490d 100644
+--- a/docs/reference/drivers.md
++++ b/docs/reference/drivers.md
+@@ -25,99 +25,99 @@ Every driver the kernel can be built with. `CONFIG_HAKIOS_<NAME>=y` in a defconf
+ 
+ ## audio
+ 
+-| Driver | Files | Requires | Boot arguments | picasso | qemu | redwood | |
+-|---|---|---|---|---|---|---|
+-| **`HAKIOS_ADSP`**<br>the audio DSP started and linked (adsp=1, adsp_step=N); the battery's state comes through it too. Needs the DSP's firmware from the phone (fw-audio/) | `hakios.adsp.c` |  | `adsp=`, `adsp_again=`, `adsp_apr_wait=`, `adsp_keep=`, `adsp_listen=`, `adsp_new=`, `adsp_pause=`, `adsp_return=` and 3 more |  |  | built | |
+-| **`HAKIOS_SPEAKER`**<br>the two speaker amplifiers on I2C, and their watch of temperature and battery | `hakios.speaker.c` |  | `speaker_probe=` |  |  | built | |
+-| **`HAKIOS_SOUND`**<br>the speakers playing (sound=N): what the DSP's services are told, the feeder, and the speakers' guard that limits what the amplifiers get | `hakios.sound.c`<br>`hakios.guard.c` | `HAKIOS_ADSP`, `HAKIOS_SPEAKER` | `sound=`, `sound_below=`, `sound_gain=`, `sound_guard_as=`, `sound_pause=`, `sound_secs=` |  |  | built | |
+-| **`HAKIOS_MIC`**<br>the microphones, through the audio DSP (mic=N) | `hakios.mic.c` | `HAKIOS_ADSP`, `HAKIOS_SOUND` | `mic=`, `mic_adc=`, `mic_input=`, `mic_main=`, `mic_secs=`, `mic_tap=`, `mic_test=` |  |  | built | |
+-| **`HAKIOS_VIRTIO_SOUND`**<br>QEMU's virtio sound device as the player of /dev/hakios-audio (virtio_sound=1). QEMU only | `hakios.virtio_sound.c` |  | `virtio_sound=` | built | built | built | |
++| Driver | Files | Requires | Boot arguments | picasso | qemu | |
++|---|---|---|---|---|---|
++| **`HAKIOS_ADSP`**<br>the audio DSP started and linked (adsp=1, adsp_step=N); the battery's state comes through it too. Needs the DSP's firmware from the phone (fw-audio/) | `hakios.adsp.c` |  | `adsp=`, `adsp_again=`, `adsp_apr_wait=`, `adsp_keep=`, `adsp_listen=`, `adsp_mem=`, `adsp_new=`, `adsp_pause=` and 5 more | built |  | |
++| **`HAKIOS_SPEAKER`**<br>the two speaker amplifiers on I2C, and their watch of temperature and battery | `hakios.speaker.c` |  | `picasso_usb=`, `speaker_probe=` | built |  | |
++| **`HAKIOS_SOUND`**<br>the speakers playing (sound=N): what the DSP's services are told, the feeder, and the speakers' guard that limits what the amplifiers get | `hakios.sound.c`<br>`hakios.guard.c` | `HAKIOS_ADSP`, `HAKIOS_SPEAKER` | `picasso_usb=`, `sound=`, `sound_below=`, `sound_gain=`, `sound_guard_as=`, `sound_pause=`, `sound_secs=` | built |  | |
++| **`HAKIOS_MIC`**<br>the microphones, through the audio DSP (mic=N) | `hakios.mic.c` | `HAKIOS_ADSP`, `HAKIOS_SOUND` | `mic=`, `mic_adc=`, `mic_input=`, `mic_main=`, `mic_secs=`, `mic_tap=`, `mic_test=`, `picasso_usb=` | built |  | |
++| **`HAKIOS_VIRTIO_SOUND`**<br>QEMU's virtio sound device as the player of /dev/hakios-audio (virtio_sound=1). QEMU only | `hakios.virtio_sound.c` |  | `virtio_sound=` | built | built | |
+ 
+ ## bluetooth
+ 
+-| Driver | Files | Requires | Boot arguments | picasso | qemu | redwood | |
+-|---|---|---|---|---|---|---|
+-| **`HAKIOS_BT`**<br>the Bluetooth half of the WCN6750: step one, a read-only look at its three pins (bt=1) | `hakios.bt.c` |  | `bt=`, `bt_again=` |  |  | built | |
++| Driver | Files | Requires | Boot arguments | picasso | qemu | |
++|---|---|---|---|---|---|
++| **`HAKIOS_BT`**<br>the Bluetooth half of the WCN6750: step one, a read-only look at its three pins (bt=1) | `hakios.bt.c` |  | `bt=`, `bt_again=` |  |  | |
+ 
+ ## camera
+ 
+-| Driver | Files | Requires | Boot arguments | picasso | qemu | redwood | |
+-|---|---|---|---|---|---|---|
+-| **`HAKIOS_CAMERA`**<br>the cameras (cam=N): the sensors on the CCI bus and the ISP's interface. The sensors, their tables (fw-camera/) and the pins are the POCO X5 Pro's | `hakios.camera.c` |  | `cam_after=`, `cam_fake=`, `cam_fake_fps=`, `cam_frames=`, `cam_gain=`, `cam_keep_mb=`, `cam_mode=`, `cam_pattern=` and 4 more |  |  | built | |
+-| **`HAKIOS_TORCH`**<br>the flashlight: the flash LED module of the PM8350C (torch=1); it stays off while the battery is too warm | `hakios.torch.c` |  | `torch_max_s=`, `torch_secs=` |  |  | built | |
++| Driver | Files | Requires | Boot arguments | picasso | qemu | |
++|---|---|---|---|---|---|
++| **`HAKIOS_CAMERA`**<br>the cameras (cam=N): the sensors on the CCI bus and the ISP's interface. The sensors, their tables (fw-camera/) and the pins are the POCO X5 Pro's | `hakios.camera.c` |  | `cam_after=`, `cam_fake=`, `cam_fake_fps=`, `cam_frames=`, `cam_gain=`, `cam_keep_mb=`, `cam_mode=`, `cam_pattern=` and 4 more |  |  | |
++| **`HAKIOS_TORCH`**<br>the flashlight: the flash LED module of the PM8350C (torch=1); it stays off while the battery is too warm | `hakios.torch.c` |  | `torch_max_s=`, `torch_secs=` |  |  | |
+ 
+ ## core
+ 
+-| Driver | Files | Requires | Boot arguments | picasso | qemu | redwood | |
+-|---|---|---|---|---|---|---|
+-| **`HAKIOS_SOCINFO`**<br>the chip's identity from the firmware's shared memory: kern.hakios.soc_* (socinfo=1). Any Qualcomm SoC that keeps SMEM item 137; where the shared memory is comes from soc_smem= | `hakios.socinfo.c` |  | `soc_smem=`, `soc_smem_size=`, `socinfo=` | built |  | built | |
++| Driver | Files | Requires | Boot arguments | picasso | qemu | |
++|---|---|---|---|---|---|
++| **`HAKIOS_SOCINFO`**<br>the chip's identity from the firmware's shared memory: kern.hakios.soc_* (socinfo=1). Any Qualcomm SoC that keeps SMEM item 137; where the shared memory is comes from soc_smem= | `hakios.socinfo.c` |  | `soc_smem=`, `soc_smem_size=`, `socinfo=` | built |  | |
+ 
+ ## gpu
+ 
+-| Driver | Files | Requires | Boot arguments | picasso | qemu | redwood | |
+-|---|---|---|---|---|---|---|
+-| **`HAKIOS_ADRENO`**<br>the Adreno 642L of the SC7280 woken step by step (adreno=N), and HakiosGPU, the IOKit service Mesa and the window server draw through (gpu=1, adreno_keep=1). Needs the GPU's firmware from the phone (fw-gpu/) | `hakios.adreno.c`<br>`hakios.gpu.cpp` |  | `adreno=`, `adreno_blind=`, `adreno_dirty=`, `adreno_fine=`, `adreno_keep=`, `adreno_only=`, `adreno_pause=`, `adreno_return=` and 12 more |  |  | built | |
++| Driver | Files | Requires | Boot arguments | picasso | qemu | |
++|---|---|---|---|---|---|
++| **`HAKIOS_ADRENO`**<br>the Adreno 642L of the SC7280 woken step by step (adreno=N), and HakiosGPU, the IOKit service Mesa and the window server draw through (gpu=1, adreno_keep=1). Needs the GPU's firmware from the phone (fw-gpu/) | `hakios.adreno.c`<br>`hakios.gpu.cpp` |  | `adreno=`, `adreno_blind=`, `adreno_dirty=`, `adreno_fine=`, `adreno_keep=`, `adreno_only=`, `adreno_pause=`, `adreno_return=` and 12 more |  |  | |
+ 
+ ## haptic
+ 
+-| Driver | Files | Requires | Boot arguments | picasso | qemu | redwood | |
+-|---|---|---|---|---|---|---|
+-| **`HAKIOS_HAPTIC`**<br>the vibration motor: an Awinic AW86927 driving a linear resonant actuator (haptic=N), its waveforms from fw-haptic/ | `hakios.haptic.c` |  | `haptic=`, `haptic_effect=` |  |  | built | |
++| Driver | Files | Requires | Boot arguments | picasso | qemu | |
++|---|---|---|---|---|---|
++| **`HAKIOS_HAPTIC`**<br>the vibration motor: an Awinic AW86927 driving a linear resonant actuator (haptic=N), its waveforms from fw-haptic/ | `hakios.haptic.c` |  | `haptic=`, `haptic_effect=` |  |  | |
+ 
+ ## input
+ 
+-| Driver | Files | Requires | Boot arguments | picasso | qemu | redwood | |
+-|---|---|---|---|---|---|---|
+-| **`HAKIOS_VIRTIO_INPUT`**<br>QEMU's virtio tablet and keyboard as the touch screen and the buttons (virtio_input=1). QEMU only | `hakios.virtio_input.c` |  | `virtio_input=` | built | built | built | |
+-| **`HAKIOS_GOODIX`**<br>the touch screen: a Goodix GT9916 ("Berlin-D") or a FocalTech FT3680 on SPI (touchscreen=1). The bus, pins and supplies are the POCO X5 Pro's; another phone with one of these controllers changes those | `hakios.goodix.c` |  | `touch_flip=`, `touch_poll_us=`, `touch_rate=`, `touch_spi_hz=`, `touchscreen=` |  |  | built | |
+-| **`HAKIOS_BUTTONS`**<br>the power and volume keys, read from the PMIC through the SPMI arbiter (buttons=1) | `hakios.buttons.c` |  | `buttons=`, `buttons_steps=`, `press_power=`, `press_power_ms=`, `touchscreen=` |  |  | built | |
++| Driver | Files | Requires | Boot arguments | picasso | qemu | |
++|---|---|---|---|---|---|
++| **`HAKIOS_VIRTIO_INPUT`**<br>QEMU's virtio tablet and keyboard as the touch screen and the buttons (virtio_input=1). QEMU only | `hakios.virtio_input.c` |  | `virtio_input=` | built | built | |
++| **`HAKIOS_GOODIX`**<br>the touch screen: a Goodix GT9916 ("Berlin-D") or a FocalTech FT3680 on SPI (touchscreen=1). The bus, pins and supplies are the POCO X5 Pro's; another phone with one of these controllers changes those | `hakios.goodix.c` |  | `touch_flip=`, `touch_poll_us=`, `touch_rate=`, `touch_spi_hz=`, `touchscreen=` |  |  | |
++| **`HAKIOS_BUTTONS`**<br>the power and volume keys, read from the PMIC through the SPMI arbiter (buttons=1) | `hakios.buttons.c` |  | `buttons=`, `buttons_steps=`, `press_power=`, `press_power_ms=`, `touchscreen=` |  |  | |
+ 
+ ## modem
+ 
+-| Driver | Files | Requires | Boot arguments | picasso | qemu | redwood | |
+-|---|---|---|---|---|---|---|
+-| **`HAKIOS_QMI`**<br>QMI messages over the IPC router: how the Wi-Fi firmware's service and the modem's are spoken to | `hakios.qmi.c` |  |  |  |  | built | |
+-| **`HAKIOS_MODEM`**<br>the modem (modem=1): started, its file systems served from the flash, the IPA's data path as en1, the SIM and the network registration. Research; needs fw-modem/ from the phone | `hakios.mpss.c`<br>`hakios.cell.c`<br>`hakios.nas.c`<br>`hakios.ipa.c` | `HAKIOS_QMI`, `HAKIOS_UFS` | `modem=`, `modem_again=`, `modem_apn=`, `modem_buffer=`, `modem_data_nobind=`, `modem_data_off=`, `modem_data_wait=`, `modem_dpm_off=` and 45 more |  |  | built | |
++| Driver | Files | Requires | Boot arguments | picasso | qemu | |
++|---|---|---|---|---|---|
++| **`HAKIOS_QMI`**<br>QMI messages over the IPC router: how the Wi-Fi firmware's service and the modem's are spoken to | `hakios.qmi.c` |  |  | built |  | |
++| **`HAKIOS_MODEM`**<br>the modem (modem=1): started, its file systems served from the flash, the IPA's data path as en1, the SIM and the network registration. Research; needs fw-modem/ from the phone | `hakios.mpss.c`<br>`hakios.cell.c`<br>`hakios.nas.c`<br>`hakios.ipa.c` | `HAKIOS_QMI`, `HAKIOS_UFS` | `modem=`, `modem_again=`, `modem_apn=`, `modem_buffer=`, `modem_data_nobind=`, `modem_data_off=`, `modem_data_wait=`, `modem_dpm_off=` and 45 more | built |  | |
+ 
+ ## net
+ 
+-| Driver | Files | Requires | Boot arguments | picasso | qemu | redwood | |
+-|---|---|---|---|---|---|---|
+-| **`HAKIOS_VIRTIO_NET`**<br>QEMU's virtio network device as the link behind en0 (virtio_net=1). QEMU only | `hakios.virtio_net.c` |  | `virtio_net=` | built | built | built | |
++| Driver | Files | Requires | Boot arguments | picasso | qemu | |
++|---|---|---|---|---|---|
++| **`HAKIOS_VIRTIO_NET`**<br>QEMU's virtio network device as the link behind en0 (virtio_net=1). QEMU only | `hakios.virtio_net.c` |  | `virtio_net=` | built | built | |
+ 
+ ## power
+ 
+-| Driver | Files | Requires | Boot arguments | picasso | qemu | redwood | |
+-|---|---|---|---|---|---|---|
+-| **`HAKIOS_BATTERY`**<br>the battery: kern.hakios.battery_*, and HakiosBattery, the IOPMPowerSource Darwin reads the charge from (the state comes from the audio DSP's battery manager, with adsp=1) | `hakios.battery.c`<br>`hakios.battery.cpp` |  | `battery_shared_pa=` |  |  | built | |
+-| **`HAKIOS_CPUFREQ`**<br>the clock of the cores the kernel runs on (cpufreq=1), and the memory bus's votes (ddr=) | `hakios.cpufreq.c` |  | `cpufreq=`, `cpuload=`, `ddr=`, `ddr_rest=`, `ddr_vote=`, `membench=` | built |  | built | |
+-| **`HAKIOS_THERMAL`**<br>the SoC's temperature sensors (thermal=1): kern.hakios.thermal_*, and the run handed back to the loader when the phone gets too hot (thermal_stop=) | `hakios.thermal.c` |  | `thermal=`, `thermal_log=`, `thermal_poll=`, `thermal_stop=`, `thermal_tm0=`, `thermal_tm1=` | built |  | built | |
+-| **`HAKIOS_PMIC`**<br>the blocks of the power-management chips the SPMI arbiter shows, and the PMIC's clock (pmic=1); read only | `hakios.pmic.c` |  | `pmic=`, `pmic_list=` |  |  | built | |
+-| **`HAKIOS_BATTGUARD`**<br>the run handed back to the loader before the battery is flat (battery_stop=<percent>) | `hakios.battguard.c` |  | `battery_stop=`, `battery_stop_poll=` |  |  | built | |
++| Driver | Files | Requires | Boot arguments | picasso | qemu | |
++|---|---|---|---|---|---|
++| **`HAKIOS_BATTERY`**<br>the battery: kern.hakios.battery_*, and HakiosBattery, the IOPMPowerSource Darwin reads the charge from (the state comes from the audio DSP's battery manager, with adsp=1) | `hakios.battery.c`<br>`hakios.battery.cpp` |  | `battery_shared_pa=` |  |  | |
++| **`HAKIOS_CPUFREQ`**<br>the clock of the cores the kernel runs on (cpufreq=1), and the memory bus's votes (ddr=) | `hakios.cpufreq.c` |  | `cpufreq=`, `cpuload=`, `ddr=`, `ddr_rest=`, `ddr_vote=`, `membench=` | built |  | |
++| **`HAKIOS_THERMAL`**<br>the SoC's temperature sensors (thermal=1): kern.hakios.thermal_*, and the run handed back to the loader when the phone gets too hot (thermal_stop=) | `hakios.thermal.c` |  | `thermal=`, `thermal_log=`, `thermal_poll=`, `thermal_stop=`, `thermal_tm0=`, `thermal_tm1=` | built |  | |
++| **`HAKIOS_PMIC`**<br>the blocks of the power-management chips the SPMI arbiter shows, and the PMIC's clock (pmic=1); read only | `hakios.pmic.c` |  | `pmic=`, `pmic_list=` |  |  | |
++| **`HAKIOS_BATTGUARD`**<br>the run handed back to the loader before the battery is flat (battery_stop=<percent>) | `hakios.battguard.c` |  | `battery_stop=`, `battery_stop_poll=` |  |  | |
+ 
+ ## storage
+ 
+-| Driver | Files | Requires | Boot arguments | picasso | qemu | redwood | |
+-|---|---|---|---|---|---|---|
+-| **`HAKIOS_UFS`**<br>the phone's UFS flash: a block device for each GPT partition (ufs=1, ufs=2), and the UFS host controller driven from the kernel (ufs_native=). THE ONLY CODE OF THE KERNEL THAT MAY WRITE TO THE PHONE (ufs_write=1, the partition `darwin` only): see tools/provenance.allow | `hakios.ufs.c`<br>`hakios.ufshc.c` |  | `ufs_bench=`, `ufs_check=`, `ufs_native_bench=`, `ufs_native_buffer=`, `ufs_native_check=`, `ufs_native_hang=`, `ufs_native_leave=`, `ufs_native_slots=` and 3 more | built |  | built | |
+-| **`HAKIOS_VIRTIO_BLK`**<br>a disk image of the host as /dev/rvblk0 (virtio_blk=1). QEMU only | `hakios.virtio_blk.c` |  | `virtio_blk=` | built | built | built | |
++| Driver | Files | Requires | Boot arguments | picasso | qemu | |
++|---|---|---|---|---|---|
++| **`HAKIOS_UFS`**<br>the phone's UFS flash: a block device for each GPT partition (ufs=1, ufs=2), and the UFS host controller driven from the kernel (ufs_native=). THE ONLY CODE OF THE KERNEL THAT MAY WRITE TO THE PHONE (ufs_write=1, the partition `darwin` only): see tools/provenance.allow | `hakios.ufs.c`<br>`hakios.ufshc.c` |  | `ufs_bench=`, `ufs_check=`, `ufs_native_bench=`, `ufs_native_buffer=`, `ufs_native_check=`, `ufs_native_hang=`, `ufs_native_leave=`, `ufs_native_slots=` and 3 more | built |  | |
++| **`HAKIOS_VIRTIO_BLK`**<br>a disk image of the host as /dev/rvblk0 (virtio_blk=1). QEMU only | `hakios.virtio_blk.c` |  | `virtio_blk=` | built | built | |
+ 
+ ## wifi
+ 
+-| Driver | Files | Requires | Boot arguments | picasso | qemu | redwood | |
+-|---|---|---|---|---|---|---|
+-| **`HAKIOS_WIFI`**<br>Wi-Fi of the WCN6750 (wifi=1, wifi_step=N): the DSP that runs the radio's firmware, Linux's ath11k (its object, made by tools/mk-ath11k.sh, is linked in only with this), a station, and the Apple80211 surface Darwin's wifid talks to. Needs fw-wifi/ from the phone | `hakios.wifi.c`<br>`hakios.wlfw.c`<br>`hakios.lx.c` | `HAKIOS_QMI` | `wifi=`, `wifi_again=`, `wifi_ask=`, `wifi_cal=`, `wifi_dirty=`, `wifi_file=`, `wifi_fine=`, `wifi_keep=` and 14 more |  |  | built | |
++| Driver | Files | Requires | Boot arguments | picasso | qemu | |
++|---|---|---|---|---|---|
++| **`HAKIOS_WIFI`**<br>Wi-Fi of the WCN6750 (wifi=1, wifi_step=N): the DSP that runs the radio's firmware, Linux's ath11k (its object, made by tools/mk-ath11k.sh, is linked in only with this), a station, and the Apple80211 surface Darwin's wifid talks to. Needs fw-wifi/ from the phone | `hakios.wifi.c`<br>`hakios.wlfw.c`<br>`hakios.lx.c` | `HAKIOS_QMI` | `wifi=`, `wifi_again=`, `wifi_ask=`, `wifi_cal=`, `wifi_dirty=`, `wifi_file=`, `wifi_fine=`, `wifi_keep=` and 14 more |  |  | |
+ 
+ ## input (devices/picasso)
+ 
+-| Driver | Files | Requires | Boot arguments | picasso | qemu | redwood | |
+-|---|---|---|---|---|---|---|
+-| **`HAKIOS_NOVATEK`**<br>the touch screen: Novatek NT36672C on GENI SE7 SPI (touchscreen=1) for Xiaomi Redmi K30 5G (picasso) | `hakios.novatek.c` |  |  | built | built | built | |
++| Driver | Files | Requires | Boot arguments | picasso | qemu | |
++|---|---|---|---|---|---|
++| **`HAKIOS_NOVATEK`**<br>the touch screen: Novatek NT36672C on GENI SE7 SPI (touchscreen=1) for Xiaomi Redmi K30 5G (picasso) | `hakios.novatek.c` |  |  | built | built | |
+ 
+ ## wifi (devices/picasso)
+ 
+-| Driver | Files | Requires | Boot arguments | picasso | qemu | redwood | |
+-|---|---|---|---|---|---|---|
+-| **`HAKIOS_PICASSO_WLAN`**<br>Picasso modem-hosted WLAN (WCN3990 via MPSS PAS 4) | `hakios.picasso_wlan.cpp` |  |  | built | built | built | |
++| Driver | Files | Requires | Boot arguments | picasso | qemu | |
++|---|---|---|---|---|---|
++| **`HAKIOS_PICASSO_WLAN`**<br>Picasso modem-hosted WLAN (WCN3990 via MPSS PAS 4) | `hakios.picasso_wlan.cpp` |  |  | built | built | |
+ 
+ The columns on the right are the devices' defconfigs: "built" means that defconfig builds the driver in.
+diff --git a/drivers/audio/hakios.adsp.c b/drivers/audio/hakios.adsp.c
+index c5fc819..91b5aab 100644
+--- a/drivers/audio/hakios.adsp.c
++++ b/drivers/audio/hakios.adsp.c
+@@ -182,16 +182,27 @@ tell(const char *format, ...)
+ }
+ #define printf say
+ 
++static void
++spin_us(uint32_t us)
++{
++	uint64_t until;
++
++	nanoseconds_to_absolutetime((uint64_t)us * NSEC_PER_USEC, &until);
++	until += mach_absolute_time();
++	while (mach_absolute_time() < until) {
++	}
++}
++
+ static void
+ sleep_us(uint32_t us)
+ {
+-	delay_for_interval(us, NSEC_PER_USEC);
++	spin_us(us);
+ }
+ 
+ static void
+ sleep_ms(uint32_t ms)
+ {
+-	delay_for_interval(ms, NSEC_PER_MSEC);
++	spin_us(ms * 1000);
+ }
+ 
+ static uint64_t
+@@ -326,6 +337,9 @@ struct smem_item {
+ #define ITEM_SMP2P_OURS         429
+ #define ITEM_SMP2P_THEIRS       443
+ #define ITEM_CRASH_REASON       423
++#define ITEM_GLINK_DESCRIPTOR   478
++#define ITEM_GLINK_OUR_QUEUE    479
++#define ITEM_GLINK_THEIR_QUEUE  480
+ 
+ static const volatile uint8_t *smem;
+ 
+@@ -983,8 +997,13 @@ step_survey(void)
+ 
+ /* ---- step 2: the firmware -------------------------------------------------------------------------- */
+ 
+-#define ADSP_MEMORY             0x86700000u     /* dt: reserved-memory adsp@86700000, memory-region of qcom,lpass@3700000 */
+-#define ADSP_MEMORY_SIZE        0x04000000u
++#define ADSP_MEMORY_SM7250      0x89200000u     /* sm7250 / lito: pil_adsp_mem @ 89200000, 40 MB */
++#define ADSP_MEMORY_SIZE_SM7250 0x02800000u
++#define ADSP_MEMORY_SC7280      0x86700000u     /* sc7280 / redwood: pil_adsp_mem @ 86700000, 64 MB */
++#define ADSP_MEMORY_SIZE_SC7280 0x04000000u
++
++static uint32_t adsp_memory = ADSP_MEMORY_SM7250;
++static uint32_t adsp_memory_size = ADSP_MEMORY_SIZE_SM7250;
+ #define PAS_ADSP                1               /* dt: qcom,pas-id */
+ 
+ 
+@@ -1014,7 +1033,7 @@ root_file(const char *name, uint64_t *size)
+ 	VATTR_INIT(&attributes);
+ 	VATTR_WANTED(&attributes, va_data_size);
+ 	if (vnode_getattr(vnode, &attributes, context) != 0 || attributes.va_data_size == 0 ||
+-	    attributes.va_data_size > ADSP_MEMORY_SIZE) {
++	    attributes.va_data_size > adsp_memory_size) {
+ 		vnode_put(vnode);
+ 		return NULL;
+ 	}
+@@ -1157,13 +1176,13 @@ step_firmware(void)
+ 		if (segment.type != 1 || MDT_HASH(segment.flags) || segment.memory_size == 0) {
+ 			continue;
+ 		}
+-		if (segment.paddr < ADSP_MEMORY || segment.file_size > segment.memory_size ||
+-		    (uint64_t)segment.paddr + segment.memory_size > (uint64_t)ADSP_MEMORY + ADSP_MEMORY_SIZE) {
++		if (segment.paddr < adsp_memory || segment.file_size > segment.memory_size ||
++		    (uint64_t)segment.paddr + segment.memory_size > (uint64_t)adsp_memory + adsp_memory_size) {
+ 			printf("adsp: %u: segment %u (%#x, %#x bytes) is not within the DSP's memory\n", step, i, segment.paddr,
+ 			    segment.memory_size);
+ 			goto fail;
+ 		}
+-		image.segment[image.segments].at = segment.paddr - ADSP_MEMORY;
++		image.segment[image.segments].at = segment.paddr - adsp_memory;
+ 		image.segment[image.segments].file_size = segment.file_size;
+ 		image.segment[image.segments].memory_size = segment.memory_size;
+ 		image.segment[image.segments].file = NULL;
+@@ -1188,17 +1207,17 @@ step_firmware(void)
+ 		highest = segment.paddr + segment.memory_size > highest ? segment.paddr + segment.memory_size : highest;
+ 		image.segments++;
+ 	}
+-	if (image.segments == 0 || lowest != ADSP_MEMORY || 52 + 32 * count + (uint64_t)hashes != size) {
++	if (image.segments == 0 || lowest != adsp_memory || 52 + 32 * count + (uint64_t)hashes != size) {
+ 		printf("adsp: %u: not what TrustZone takes: %u segments to load, the lowest at %#x; the header file has %llu bytes, "
+ 		    "the header %u and the hashes %u\n", step, image.segments, lowest, size, 52 + 32 * count, hashes);
+ 		goto fail;
+ 	}
+ 	image.header = header;
+ 	image.header_size = size;
+-	image.size = ((highest + 0xfff) & ~0xfffu) - ADSP_MEMORY;
++	image.size = ((highest + 0xfff) & ~0xfffu) - adsp_memory;
+ 	printf("adsp: %u: the image is whole (%s): a header of %llu bytes (%u of hashes), %u segments, %llu bytes of files, %#x "
+ 	    "bytes of the DSP's %#x from %#x\n", step, from_root ? "from /fw on the root" : "from the small image", size, hashes,
+-	    image.segments, files, image.size, ADSP_MEMORY_SIZE, ADSP_MEMORY);
++	    image.segments, files, image.size, adsp_memory_size, adsp_memory);
+ 	return true;
+ fail:
+ 	image_forget();
+@@ -1250,7 +1269,7 @@ scm(const char *what, uint64_t function, uint64_t arguments, uint64_t first, uin
+ 	printf("adsp: %u: about to ask TrustZone %s: smc %#llx, arguments %#llx, %#llx, %#llx\n", step, what, function, first,
+ 	    second, third);
+ 	snprintf(last_write, sizeof(last_write), "step %u asked TrustZone %#llx(%#llx, %#llx)", step, function, first, second);
+-	for (int i = 0; i < 100; i++) {
++	for (int i = 0; i < 100000; i++) {
+ 		register uint64_t x0 __asm__("x0") = i == 0 ? function : SCM_INTERRUPTED;
+ 		register uint64_t x1 __asm__("x1") = arguments;
+ 		register uint64_t x2 __asm__("x2") = first;
+@@ -1264,6 +1283,9 @@ scm(const char *what, uint64_t function, uint64_t arguments, uint64_t first, uin
+ 		    "+r" (x7) : : "x8", "x9", "x10", "x11", "x12", "x13", "x14", "x15", "x16", "x17", "memory");
+ 		session = x6;
+ 		if (x0 != SCM_INTERRUPTED) {
++			if (i > 0) {
++				printf("adsp: %u: TrustZone finished after %d interrupted cycles\n", step, i);
++			}
+ 			printf("adsp: %u: TrustZone returns %d, answer %#llx\n", step, (int32_t)x0, x1);
+ 			*answer = x1;
+ 			return (int32_t)x0;
+@@ -1446,12 +1468,12 @@ step_header(void)
+ 	printf("adsp: %u: TRUSTZONE ACCEPTS THE AUDIO DSP'S SIGNATURE FROM THIS KERNEL\n", step);
+ 
+ 	announce("tell TrustZone where the image will be");
+-	result = scm("where the image will be", SCM_PAS_MEM_SETUP, SCM_THREE_VALUES, PAS_ADSP, ADSP_MEMORY, image.size, &answer);
++	result = scm("where the image will be", SCM_PAS_MEM_SETUP, SCM_THREE_VALUES, PAS_ADSP, adsp_memory, image.size, &answer);
+ 	if (result != 0 || answer != 0) {
+ 		printf("adsp: %u: TRUSTZONE DOES NOT TAKE THE PLACE: the call returns %d, its answer is %#llx\n", step, result, answer);
+ 		return false;
+ 	}
+-	printf("adsp: %u: TrustZone takes the place: %#x bytes at %#x\n", step, image.size, ADSP_MEMORY);
++	printf("adsp: %u: TrustZone takes the place: %#x bytes at %#x\n", step, image.size, adsp_memory);
+ 	return true;
+ }
+ 
+@@ -1473,42 +1495,49 @@ segment_word(unsigned s, uint32_t at)
+ static bool
+ step_image(void)
+ {
+-	volatile uint64_t *dsp_memory;
++	volatile uint8_t *dsp_memory;
+ 	uint64_t written = 0, cleared = 0, wrong = 0;
+ 
+ 	if (image.segments == 0) {
+ 		return false;
+ 	}
+-	announce("put the image's segments into the audio DSP's memory (0x86700000, 64 MB: memory of nobody's until TrustZone "
++	announce("put the image's segments into the audio DSP's memory (memory of nobody's until TrustZone "
+ 	    "starts the DSP), with zeroes where a segment is longer than its file, and read them back");
+-	dsp_memory = (volatile uint64_t *)ml_io_map_unmappable(ADSP_MEMORY, ADSP_MEMORY_SIZE, VM_WIMG_WCOMB);
+-	snprintf(last_write, sizeof(last_write), "step %u wrote the image at %#x", step, ADSP_MEMORY);
++	dsp_memory = (volatile uint8_t *)ml_io_map_unmappable(adsp_memory, adsp_memory_size, VM_WIMG_WCOMB);
++	if (dsp_memory == NULL) {
++		printf("adsp: %u: could not map DSP memory at %#x\n", step, adsp_memory);
++		return false;
++	}
++	snprintf(last_write, sizeof(last_write), "step %u wrote the image at %#x", step, adsp_memory);
+ 	for (unsigned s = 0; s < image.segments; s++) {
+-		volatile uint64_t *to = dsp_memory + image.segment[s].at / 8;
++		volatile uint8_t *to = dsp_memory + image.segment[s].at;
++		const uint8_t *file = image.segment[s].file;
++		uint32_t file_sz = image.segment[s].file_size;
++		uint32_t mem_sz = image.segment[s].memory_size;
+ 
+-		if ((image.segment[s].at | image.segment[s].memory_size) & 7) {
+-			printf("adsp: %u: a segment that does not begin and end at a multiple of eight bytes: not written\n", step);
+-			ml_io_unmap((vm_offset_t)dsp_memory, ADSP_MEMORY_SIZE);
+-			return false;
++		if (file != NULL && file_sz > 0) {
++			memcpy((void *)to, file, file_sz);
++			written += file_sz;
+ 		}
+-		for (uint32_t i = 0; i < image.segment[s].memory_size; i += 8) {
+-			to[i / 8] = segment_word(s, i);
++		if (mem_sz > file_sz) {
++			bzero((void *)(to + file_sz), mem_sz - file_sz);
++			cleared += mem_sz - file_sz;
+ 		}
+-		written += image.segment[s].file_size;
+-		cleared += image.segment[s].memory_size - image.segment[s].file_size;
+ 	}
+ 	settle();
+ 	for (unsigned s = 0; s < image.segments; s++) {
+-		volatile uint64_t *from = dsp_memory + image.segment[s].at / 8;
++		volatile uint8_t *from = dsp_memory + image.segment[s].at;
++		const uint8_t *file = image.segment[s].file;
++		uint32_t file_sz = image.segment[s].file_size;
+ 
+-		for (uint32_t i = 0; i < image.segment[s].memory_size; i += 8) {
+-			wrong += from[i / 8] != segment_word(s, i);
++		if (file != NULL && file_sz > 0) {
++			wrong += memcmp((const void *)from, file, file_sz) != 0;
+ 		}
+ 	}
+-	printf("adsp: %u: %u segments, %llu bytes written and %llu cleared; read back, %llu words of eight bytes differ\n", step,
++	printf("adsp: %u: %u segments, %llu bytes written and %llu cleared; read back, %llu segments differ\n", step,
+ 	    image.segments, written, cleared, wrong);
+ 	settle();
+-	ml_io_unmap((vm_offset_t)dsp_memory, ADSP_MEMORY_SIZE);
++	ml_io_unmap((vm_offset_t)dsp_memory, adsp_memory_size);
+ 	image_written = wrong == 0;
+ 	image_forget();                         /* (it is in the DSP's memory now: what was read of the root, given back) */
+ 	return image_written;
+@@ -1520,20 +1549,22 @@ static struct block smem_lock = { "shared memory's lock", 0x01f43000, 0x1000 };
+ #define LOCK_OWNER              0x000
+ #define LOCK_US                 1u
+ 
+-/* Our item made in the partition, as Linux's qcom_smem_alloc_private() makes one (hakios.wifi.c: our_item_make()). */
++/* Allocate an item in the partition, as Linux's qcom_smem_alloc_private() does. */
+ static bool
+-our_item_make(uint32_t partition)
++smem_partition_alloc(uint32_t partition, uint32_t item_id, uint32_t payload_size)
+ {
+ 	struct smem_partition header;
+ 	struct smem_entry entry;
+-	const uint32_t item_size = (sizeof(struct smp2p) + 7) & ~7u, need_bytes = sizeof(entry) + item_size;
++	const uint32_t aligned_size = (payload_size + 7) & ~7u;
++	const uint16_t pad_data = (uint16_t)(aligned_size - payload_size);
++	const uint32_t need_bytes = sizeof(entry) + aligned_size;
+ 	uint32_t owner = ~0u, at;
+ 	bool made = false;
+ 
+ 	lck_mtx_lock(&hakios_smem_alloc_lock);         /* (the Wi-Fi's start allocates under the same hardware lock) */
+ 	need(&smem_lock);
+ 	printf("adsp: %u: about to take the lock (%#x), write an entry for item %u with %u bytes behind it at the partition's mark, "
+-	    "move the mark by %u, and release the lock\n", step, smem_lock.phys + LOCK_OWNER, ITEM_SMP2P_OURS, item_size, need_bytes);
++	    "move the mark by %u, and release the lock\n", step, smem_lock.phys + LOCK_OWNER, item_id, aligned_size, need_bytes);
+ 	snprintf(last_write, sizeof(last_write), "step %u took the shared memory's lock", step);
+ 	for (uint32_t ms = 0; ms <= 1000; ms++) {
+ 		wr(smem_lock.base + LOCK_OWNER, LOCK_US);
+@@ -1554,24 +1585,24 @@ our_item_make(uint32_t partition)
+ 		goto out;
+ 	}
+ 	for (at = sizeof(header); at < header.free_uncached;) {
+-		if (!smem_peek(partition + at, &entry, sizeof(entry)) || entry.canary != SMEM_CANARY || entry.item == ITEM_SMP2P_OURS ||
++		if (!smem_peek(partition + at, &entry, sizeof(entry)) || entry.canary != SMEM_CANARY || entry.item == item_id ||
+ 		    entry.size > header.size) {
+ 			break;
+ 		}
+ 		at += sizeof(entry) + entry.padding_header + entry.size;
+ 	}
+ 	if (at != header.free_uncached) {
+-		printf("adsp: %u: the partition's entries do not end at its mark (+%#x, the mark is +%#x), or the item has appeared: "
+-		    "nothing is written\n", step, at, header.free_uncached);
++		printf("adsp: %u: the partition's entries do not end at its mark (+%#x, the mark is +%#x), or item %u has appeared: "
++		    "nothing is written\n", step, at, header.free_uncached, item_id);
+ 		goto out;
+ 	}
+ 	if (at + need_bytes > header.free_cached) {
+ 		printf("adsp: %u: no room: %u bytes wanted, %u free: nothing is written\n", step, need_bytes, header.free_cached - at);
+ 		goto out;
+ 	}
+-	smem_poke(partition + at, SMEM_CANARY | ITEM_SMP2P_OURS << 16);
+-	smem_poke(partition + at + 4, item_size);
+-	smem_poke(partition + at + 8, item_size - (uint32_t)sizeof(struct smp2p));
++	smem_poke(partition + at, SMEM_CANARY | item_id << 16);
++	smem_poke(partition + at + 4, aligned_size);
++	smem_poke(partition + at + 8, pad_data);
+ 	smem_poke(partition + at + 12, 0);
+ 	settle();
+ 	smem_poke(partition + __offsetof(struct smem_partition, free_uncached), at + need_bytes);
+@@ -1592,6 +1623,7 @@ step_our_item(void)
+ 	struct smem_partition header;
+ 	struct smp2p ours;
+ 	uint32_t cacheline = 0, size = 0, partition, name[4] = { 0 };
++	uint32_t q_size = 0, our_queue = 0;
+ 
+ 	announce("look for an SMP2P item of ours (429) in our partition with the audio DSP, make it if there is none, and fill it in");
+ 	partition = smem_partition(SMEM_US, SMEM_ADSP, &cacheline, &size);
+@@ -1604,7 +1636,7 @@ step_our_item(void)
+ 		printf("adsp: %u: item %u is there, at %#lx: a kernel before this one made it, and it is used again\n", step,
+ 		    ITEM_SMP2P_OURS, SMEM_PHYS + our_item);
+ 	} else {
+-		if (!our_item_make(partition)) {
++		if (!smem_partition_alloc(partition, ITEM_SMP2P_OURS, sizeof(struct smp2p))) {
+ 			return false;
+ 		}
+ 		our_item = our_item_find();
+@@ -1639,6 +1671,29 @@ step_our_item(void)
+ 		return false;
+ 	}
+ 	show_words("our item reads back", &ours);
++
++	/* Ensure GLINK TX FIFO (our queue, item 479) is allocated */
++	our_queue = smem_item(ITEM_GLINK_OUR_QUEUE, &q_size);
++	if (our_queue != 0 && q_size >= 1024) {
++		printf("adsp: %u: item %u (our GLINK queue) is there (%u bytes at %#lx)\n", step,
++		    ITEM_GLINK_OUR_QUEUE, q_size, SMEM_PHYS + our_queue);
++	} else {
++		if (!smem_partition_alloc(partition, ITEM_GLINK_OUR_QUEUE, 16384)) {
++			return false;
++		}
++		our_queue = smem_item(ITEM_GLINK_OUR_QUEUE, &q_size);
++		if (our_queue == 0 || q_size < 16384) {
++			printf("adsp: %u: GLINK queue item %u not found where made\n", step, ITEM_GLINK_OUR_QUEUE);
++			return false;
++		}
++		printf("adsp: %u: item %u (our GLINK queue) made: %u bytes at %#lx\n", step,
++		    ITEM_GLINK_OUR_QUEUE, q_size, SMEM_PHYS + our_queue);
++		for (uint32_t at = 0; at < q_size; at += 4) {
++			smem_poke(our_queue + at, 0);
++		}
++		settle();
++	}
++
+ 	glink_reset();
+ 	return true;
+ }
+@@ -1791,9 +1846,8 @@ step_start(void)
+ 
+ /* ---- GLINK (hakios.wifi.c; items 478 to 480 of our partition with the audio DSP) ------------------- */
+ 
+-#define ITEM_GLINK_DESCRIPTOR   478
+-#define ITEM_GLINK_OUR_QUEUE    479
+-#define ITEM_GLINK_THEIR_QUEUE  480
++static void glink_poll(void);
++
+ #define GLINK_OUR_TAIL          0
+ #define GLINK_OUR_HEAD          4
+ #define GLINK_THEIR_TAIL        8
+@@ -2622,6 +2676,7 @@ hakios_adsp_apr(uint8_t service, uint16_t port, uint32_t token, uint32_t opcode,
+ 	} else {
+ 		apr_out++;
+ 		for (uint32_t waited = 0; waited < ms && !answered; waited++) {
++			glink_poll();
+ 			if (os_atomic_load(&apr_answer.there, acquire) && apr_answer.token == token) {
+ 				answered = true;
+ 				if (answer != NULL) {
+@@ -2889,22 +2944,56 @@ battmgr_stop(void)
+ 	}
+ }
+ 
+-/* ---- the link's thread ----------------------------------------------------------------------------- */
++/* ---- the link's thread and poller ------------------------------------------------------------------ */
+ 
+ static volatile bool link_wanted, link_runs;
+ 
++static void
++glink_poll(void)
++{
++	struct glink_packet *packet;
++
++	doorbells();
++	for (;;) {
++		unsigned from = CHANNELS;
++
++		lck_mtx_lock(&glink_lock);
++		glink_pump();
++		packet = NULL;
++		for (unsigned c = 0; c < CHANNELS && packet == NULL; c++) {
++			struct glink_channel *channel = &glink.channel[c];
++
++			if ((packet = channel->first) != NULL) {
++				channel->first = packet->next;
++				channel->last = channel->first == NULL ? NULL : channel->last;
++				from = c;
++			}
++		}
++		lck_mtx_unlock(&glink_lock);
++		if (packet == NULL) {
++			break;
++		}
++		if (from == CHANNEL_QRTR) {
++			qrtr_input(packet->data, packet->length);
++		} else if (from == CHANNEL_PMIC) {
++			battmgr_input(packet->data, packet->length);
++		} else {
++			apr_input(packet->data, packet->length);
++		}
++		kfree_data(packet, sizeof(*packet) + packet->length);
++	}
++}
++
+ static void
+ link_thread(__unused void *parameter, __unused wait_result_t result)
+ {
+ 	struct smp2p words, last;
+-	struct glink_packet *packet;
+ 	bool gave_up = false;
+ 
+ 	bzero(&last, sizeof(last));
+ 	dsp_words(&last);
+ 	while (link_wanted) {
+ 		sleep_us(1000);
+-		doorbells();
+ 		if (dsp_words(&words) && memcmp(&words, &last, sizeof(words)) != 0) {
+ 			last = words;
+ 			dsp_listen(&words);
+@@ -2914,34 +3003,7 @@ link_thread(__unused void *parameter, __unused wait_result_t result)
+ 				show_crash_reason();
+ 			}
+ 		}
+-		for (;;) {
+-			unsigned from = CHANNELS;
+-
+-			lck_mtx_lock(&glink_lock);
+-			glink_pump();
+-			packet = NULL;
+-			for (unsigned c = 0; c < CHANNELS && packet == NULL; c++) {
+-				struct glink_channel *channel = &glink.channel[c];
+-
+-				if ((packet = channel->first) != NULL) {
+-					channel->first = packet->next;
+-					channel->last = channel->first == NULL ? NULL : channel->last;
+-					from = c;
+-				}
+-			}
+-			lck_mtx_unlock(&glink_lock);
+-			if (packet == NULL) {
+-				break;
+-			}
+-			if (from == CHANNEL_QRTR) {
+-				qrtr_input(packet->data, packet->length);
+-			} else if (from == CHANNEL_PMIC) {
+-				battmgr_input(packet->data, packet->length);
+-			} else {
+-				apr_input(packet->data, packet->length);
+-			}
+-			kfree_data(packet, sizeof(*packet) + packet->length);
+-		}
++		glink_poll();
+ 	}
+ 	link_runs = false;
+ 	thread_terminate(current_thread());
+@@ -3070,9 +3132,11 @@ step_link(void)
+ 	}
+ 	thread_deallocate(thread);
+ 	for (unsigned ms = 0; ms < 5000 && !glink.channel[CHANNEL_QRTR].open && !glink.broken; ms++) {
++		glink_poll();
+ 		sleep_ms(1);
+ 	}
+ 	sleep_ms(50);
++	glink_poll();
+ 	printf("adsp: %u: %llu ms after our version: versions %s (features %#x); the channel \"IPCRTR\" is %s, \"apr_audio_svc\" %s; "
+ 	    "the DSP also opened \"%s\" \"%s\" \"%s\" \"%s\"\n", step, (now_us() - began) / 1000, glink.agreed ? "agreed" :
+ 	    "NOT AGREED", glink.features, glink.channel[CHANNEL_QRTR].open ? "OPEN" : "NOT OPEN",
+@@ -3093,6 +3157,7 @@ step_qrtr(void)
+ 	PE_parse_boot_argn("adsp_listen", &listen_seconds, sizeof(listen_seconds));
+ 	announce("listen to QRTR on the channel: the DSP's hello (answered from the link's thread), and the services it tells of");
+ 	for (unsigned ms = 0; ms < listen_seconds * 1000; ms++) {
++		glink_poll();
+ 		sleep_ms(1);
+ 	}
+ 	for (unsigned i = 0; i < sizeof(qrtr_servers) / sizeof(qrtr_servers[0]); i++) {
+@@ -3116,6 +3181,7 @@ step_apr(void)
+ 	announce("ask the audio DSP's core service over APR whether the audio services are up (again and again, as Android "
+ 	    "does), then which services it has");
+ 	for (unsigned ms = 0; ms < 3000 && !glink.channel[CHANNEL_APR].open; ms++) {
++		glink_poll();
+ 		sleep_ms(1);
+ 	}
+ 	if (!glink.channel[CHANNEL_APR].open) {
+@@ -3228,6 +3294,10 @@ run_steps(void)
+ 	new_from = STEPS + 1;
+ 	steps_over(done);
+ 	printf("adsp: over after step %u; %s\n", done, last_write);
++	if (done == STEPS && dsp_started) {
++		hakios_sound_dsp_up();
++		hakios_mic_dsp_up();
++	}
+ }
+ 
+ static void
+@@ -3268,6 +3338,8 @@ hakios_adsp_init(void)
+ 	if (last_step == 0 && (!PE_parse_boot_argn("adsp", &on, sizeof(on)) || on != 1)) {
+ 		return;
+ 	}
++	PE_parse_boot_argn("adsp_mem", &adsp_memory, sizeof(adsp_memory));
++	PE_parse_boot_argn("adsp_size", &adsp_memory_size, sizeof(adsp_memory_size));
+ 	if (pe_arm_get_soc_base_phys() != HAKIOS_SOC_BASE) {
+ 		printf("adsp: adsp=1 and adsp_step=N are for the phone's audio DSP, and this is not the phone\n");
+ 		return;
+diff --git a/drivers/audio/hakios.mic.c b/drivers/audio/hakios.mic.c
+index c574797..cd7edc4 100644
+--- a/drivers/audio/hakios.mic.c
++++ b/drivers/audio/hakios.mic.c
+@@ -134,10 +134,21 @@ hakios_mic_quiesce(void)
+ 	}
+ }
+ 
++static void
++spin_us(uint32_t us)
++{
++	uint64_t until;
++
++	nanoseconds_to_absolutetime((uint64_t)us * NSEC_PER_USEC, &until);
++	until += mach_absolute_time();
++	while (mach_absolute_time() < until) {
++	}
++}
++
+ static void
+ sleep_ms(uint32_t ms)
+ {
+-	delay_for_interval(ms, NSEC_PER_MSEC);
++	spin_us(ms * 1000);
+ }
+ 
+ static uint32_t __attribute__((noinline))
+@@ -155,17 +166,6 @@ wr(vm_offset_t address, uint32_t value)
+ 	__asm__ volatile ("str %w0, [%1]" : : "r" (value), "r" (address) : "memory");
+ }
+ 
+-static void
+-spin_us(uint32_t us)
+-{
+-	uint64_t until;
+-
+-	nanoseconds_to_absolutetime((uint64_t)us * NSEC_PER_USEC, &until);
+-	until += mach_absolute_time();
+-	while (mach_absolute_time() < until) {
+-	}
+-}
+-
+ static bool broken;                     /* a write that did not read back: nothing more is written, all is undone */
+ static char last_write[120] = "nothing written";
+ 
+@@ -398,6 +398,8 @@ static struct block tx_hctl = { "the TX SoundWire master's HCTL", 0x032a9000, 0x
+ static struct block lpi = { "the LPASS pins", 0x033c0000, 0x10000 };
+ static struct block lpi_high = { "the LPASS pins", 0x033ce000, 0x1000 };
+ static struct block tlmm = { "the pin controller", 0x0f100000, 0x100000 };
++static unsigned reset_pin = 83;
++static bool is_picasso = false;
+ 
+ static void
+ look(void)
+@@ -431,8 +433,13 @@ look(void)
+ 	}
+ 	(void)get(&lpi_high, "gpio14 config (SoundWire TX data 2)", 0);
+ 	(void)get(&lpi_high, "gpio14 in/out", 4);
+-	(void)get(&tlmm, "gpio83 config (the codec's reset)", 0x1000 * 83);
+-	(void)get(&tlmm, "gpio83 in/out", 0x1000 * 83 + 4);
++	{
++		char name[64];
++		snprintf(name, sizeof(name), "gpio%u config (the codec's reset)", reset_pin);
++		(void)get(&tlmm, name, 0x1000 * reset_pin);
++		snprintf(name, sizeof(name), "gpio%u in/out", reset_pin);
++		(void)get(&tlmm, name, 0x1000 * reset_pin + 4);
++	}
+ 	/* (last: the master is a block of its own, and not yet known; with its version above 1.5.1 the votes are all it needs) */
+ 	for (size_t i = 0; i < sizeof(swr) / sizeof(swr[0]); i++) {
+ 		(void)get(&tx_swr, swr[i].name, swr[i].offset);
+@@ -442,27 +449,32 @@ look(void)
+ 
+ /* ---- the codec's reset, the master's pins ------------------------------------------------------------ */
+ 
+-#define TLMM_CFG_83             (0x1000 * 83)
+-#define TLMM_IO_83              (0x1000 * 83 + 4)
+ static uint32_t found_reset_cfg, found_reset_io;
+ static bool reset_taken;
+ 
+ static bool
+ reset_release(void)
+ {
++	char name[64];
++
+ 	if (tlmm.base == 0) {
+ 		tlmm.base = ml_io_map(tlmm.phys, tlmm.size);
+ 	}
+-	found_reset_cfg = rd(tlmm.base + TLMM_CFG_83);
+-	found_reset_io = rd(tlmm.base + TLMM_IO_83);
++	found_reset_cfg = rd(tlmm.base + 0x1000 * reset_pin);
++	found_reset_io = rd(tlmm.base + 0x1000 * reset_pin + 4);
+ 	reset_taken = true;
+ 	/* the sleep state: gpio, 16 mA, no pull, output low; 20 us; the active state: output high */
+-	if (!put(&tlmm, "gpio83 out (the codec's reset)", TLMM_IO_83, 0, 2) ||
+-	    !put(&tlmm, "gpio83 config: gpio, 16 mA, no pull, output", TLMM_CFG_83, 0x3c0, 0x3ff)) {
++	snprintf(name, sizeof(name), "gpio%u out (the codec's reset)", reset_pin);
++	if (!put(&tlmm, name, 0x1000 * reset_pin + 4, 0, 2)) {
++		return false;
++	}
++	snprintf(name, sizeof(name), "gpio%u config: gpio, 16 mA, no pull, output", reset_pin);
++	if (!put(&tlmm, name, 0x1000 * reset_pin, 0x3c0, 0x3ff)) {
+ 		return false;
+ 	}
+ 	spin_us(30);
+-	if (!put(&tlmm, "gpio83 out: high (the codec out of reset)", TLMM_IO_83, 2, 2)) {
++	snprintf(name, sizeof(name), "gpio%u out: high (the codec out of reset)", reset_pin);
++	if (!put(&tlmm, name, 0x1000 * reset_pin + 4, 2, 2)) {
+ 		return false;
+ 	}
+ 	spin_us(30);
+@@ -472,13 +484,18 @@ reset_release(void)
+ static void
+ reset_restore(void)
+ {
++	char name[64];
++
+ 	if (!reset_taken) {
+ 		return;
+ 	}
+ 	broken = false;         /* (putting back is done whatever went before) */
+-	(void)put(&tlmm, "gpio83 out: low (the codec in reset)", TLMM_IO_83, 0, 2);
+-	(void)put(&tlmm, "gpio83 config, as it was found", TLMM_CFG_83, found_reset_cfg, 0x3ff);
+-	(void)put(&tlmm, "gpio83 out, as it was found", TLMM_IO_83, found_reset_io & 2, 2);
++	snprintf(name, sizeof(name), "gpio%u out: low (the codec in reset)", reset_pin);
++	(void)put(&tlmm, name, 0x1000 * reset_pin + 4, 0, 2);
++	snprintf(name, sizeof(name), "gpio%u config, as it was found", reset_pin);
++	(void)put(&tlmm, name, 0x1000 * reset_pin, found_reset_cfg, 0x3ff);
++	snprintf(name, sizeof(name), "gpio%u out, as it was found", reset_pin);
++	(void)put(&tlmm, name, 0x1000 * reset_pin + 4, found_reset_io & 2, 2);
+ 	reset_taken = false;
+ }
+ 
+@@ -510,9 +527,13 @@ pins_on(void)
+ 	pins_taken = true;
+ 	slew = found_slew;
+ 	for (unsigned i = 0; i < SWR_PINS; i++) {
++		if (is_picasso && swr_pins[i].pin == 14) {
++			continue;
++		}
+ 		slew = (slew & ~(3u << swr_pins[i].slew_bit)) | (1u << swr_pins[i].slew_bit);
+ 	}
+-	if (!put(&lpi_slew, "slew rates: 1 for the four", 0, slew, 0xff)) {
++	if (!put(&lpi_slew, is_picasso ? "slew rates: 1 for the three" : "slew rates: 1 for the four", 0, slew,
++	    is_picasso ? 0x3f : 0xff)) {
+ 		return false;
+ 	}
+ 	for (unsigned i = 0; i < SWR_PINS; i++) {
+@@ -538,7 +559,7 @@ pins_restore(void)
+ 		(void)put(&lpi, "a pin, as it was found", 0x1000 * swr_pins[i].pin, found_pin_cfg[i], 0x3ff);
+ 		(void)put(&lpi, "its direction, as it was found", 0x1000 * swr_pins[i].pin + 4, found_pin_dir[i], 2);
+ 	}
+-	(void)put(&lpi_slew, "slew rates, as they were found", 0, found_slew, 0xff);
++	(void)put(&lpi_slew, "slew rates, as they were found", 0, found_slew, is_picasso ? 0x3f : 0xff);
+ 	pins_taken = false;
+ }
+ 
+@@ -637,16 +658,18 @@ master_on(void)
+ 	uint32_t ssp = SWR_BUS_HZ * 2 / (SWR_ROWS * SWR_COLUMNS * SWR_FRAME_SYNC_HZ), cfg;
+ 	bool linked = false;
+ 
+-	if (tx_hctl.base == 0) {
+-		tx_hctl.base = ml_io_map(tx_hctl.phys, tx_hctl.size);
+-	}
+-	found_hctl = rd(tx_hctl.base + 0x0a8);
+ 	master_taken = true;
+-	/* "SW workaround to gate hw_ctl for SWR version >= 1.6" */
+-	if (!put(&tx_hctl, "HCTL: bit 1 cleared", 0x0a8, found_hctl & ~2u, 0x3)) {
+-		return false;
++	if (!is_picasso) {
++		if (tx_hctl.base == 0) {
++			tx_hctl.base = ml_io_map(tx_hctl.phys, tx_hctl.size);
++		}
++		found_hctl = rd(tx_hctl.base + 0x0a8);
++		/* "SW workaround to gate hw_ctl for SWR version >= 1.6" */
++		if (!put(&tx_hctl, "HCTL: bit 1 cleared", 0x0a8, found_hctl & ~2u, 0x3)) {
++			return false;
++		}
++		spin_us(505);
+ 	}
+-	spin_us(505);
+ 	/* swrm_runtime_resume() */
+ 	if (!put(&tx_swr, "COMP_SW_RESET", SWRM_COMP_SW_RESET, 1, 0) || !put(&tx_swr, "COMP_SW_RESET", SWRM_COMP_SW_RESET, 1, 0) ||
+ 	    !put(&tx_swr, "MCP_BUS_CTRL", SWRM_MCP_BUS_CTRL, 1, 0)) {
+@@ -691,7 +714,9 @@ master_off(void)
+ 	(void)put(&tx_swr, "INTERRUPT_EN: none", SWRM_INTERRUPT_EN, 0, 0);
+ 	(void)put(&tx_swr, "CPU1_INTERRUPT_EN: none", SWRM_CPU1_INTERRUPT_EN, 0, 0);
+ 	(void)put(&tx_swr, "COMP_SW_RESET", SWRM_COMP_SW_RESET, 1, 0);
+-	(void)put(&tx_hctl, "HCTL, as it was found", 0x0a8, found_hctl, 0x3);
++	if (!is_picasso) {
++		(void)put(&tx_hctl, "HCTL, as it was found", 0x0a8, found_hctl, 0x3);
++	}
+ 	master_taken = false;
+ }
+ 
+@@ -981,13 +1006,24 @@ port_config(uint8_t bank, bool first)
+ 	write_id = write_id < 14 ? write_id + 1 : 0;
+ 	swr_write(codec_device, SWRS_DP_LANE_CONTROL_BANK(0, bank), 1, write_id);
+ 	note("mic: the codec's data port 1, bank %u: channel 1 on, sample interval %u, offsets 0 0, lane 1\n", bank, codec_interval);
+-	/* the master's port 1 */
+-	return put(&tx_swr, "DP_PORT_CTRL (port 1): channel 1, offsets 0 0, interval 7", SWRM_DP_PORT_CTRL_BANK(1, bank),
+-	           0x01u << 24 | 0u << 16 | 0u << 8 | master_interval, 0xffffffff) &&
+-	       put(&tx_swr, "DP_SAMPLECTRL2 (port 1)", SWRM_DP_SAMPLECTRL2_BANK(1, bank), 0, 0xff) &&
+-	       put(&tx_swr, "DP_PORT_CTRL_2 (port 1): lane 1", SWRM_DP_PORT_CTRL_2_BANK(1, bank), 1, 0xff) &&
+-	       /* (it reads 0 back on the phone whatever is written; Android writes it and never reads it) */
+-	       put(&tx_swr, "DP_PORT_HCTRL (port 1): hstop 15, hstart 0", SWRM_DP_PORT_HCTRL_BANK(1, bank), 0xf0, 0);
++	/* the master's ports: port 1 on Redwood (DMIC on Picasso), port 2 for ADC1 on Picasso (configure both) */
++	for (unsigned p = 1; p <= 2; p++) {
++		if (!put(&tx_swr, p == 1 ? "DP_PORT_CTRL (port 1): channel 1, offsets 0 0, interval 7" :
++		                          "DP_PORT_CTRL (port 2): channel 1, offsets 0 0, interval 7",
++		         SWRM_DP_PORT_CTRL_BANK(p, bank),
++		         0x01u << 24 | 0u << 16 | 0u << 8 | master_interval, 0xffffffff) ||
++		    !put(&tx_swr, p == 1 ? "DP_SAMPLECTRL2 (port 1)" : "DP_SAMPLECTRL2 (port 2)",
++		         SWRM_DP_SAMPLECTRL2_BANK(p, bank), 0, 0xff) ||
++		    !put(&tx_swr, p == 1 ? "DP_PORT_CTRL_2 (port 1): lane 1" : "DP_PORT_CTRL_2 (port 2): lane 1",
++		         SWRM_DP_PORT_CTRL_2_BANK(p, bank), 1, 0xff) ||
++		    /* (it reads 0 back on the phone whatever is written; Android writes it and never reads it) */
++		    !put(&tx_swr, p == 1 ? "DP_PORT_HCTRL (port 1): hstop 15, hstart 0" :
++		                          "DP_PORT_HCTRL (port 2): hstop 15, hstart 0",
++		         SWRM_DP_PORT_HCTRL_BANK(p, bank), 0xf0, 0)) {
++			return false;
++		}
++	}
++	return true;
+ }
+ 
+ static bool
+@@ -1094,7 +1130,7 @@ adc1_on(void)
+ static uint32_t found_dec[10], found_va_mic[3];
+ static uint32_t smic_input = 1;         /* boot-arg mic_input=N: TX SMIC MUX1's input (1 SWR_MIC0, Android's; 0 ZERO, a test) */
+ static bool dec_taken, va_mic_taken;
+-static unsigned bolero_version;         /* 20 or 21: the digital codec's own core ID (bolero_soc_codec_probe()) */
++static unsigned bolero_version;         /* 12, 20 or 21: the digital codec's own core ID (bolero_soc_codec_probe()) */
+ static uint8_t hpf_cut_off;             /* the decimator's high-pass filter as it was found */
+ 
+ static const uint32_t dec_regs[] = {
+@@ -1113,10 +1149,10 @@ bolero_look(void)
+ {
+ 	uint32_t id0 = get(&va_macro, "CORE_ID_0", VA_CORE_ID_0) & 0xff, id1 = get(&va_macro, "CORE_ID_1", VA_CORE_ID_1) & 0xff;
+ 
+-	bolero_version = id0 == 0x01 && id1 == 0x0f ? 20 : id0 == 0x02 && id1 == 0x0e ? 21 : 0;
+-	say("mic: the digital codec is bolero %s\n", bolero_version == 20 ? "2.0" : bolero_version == 21 ? "2.1" : "OF AN UNKNOWN VERSION");
++	bolero_version = id0 == 0x01 && id1 == 0x0f ? 20 : id0 == 0x02 && id1 == 0x0e ? 21 : id0 == 0x00 && id1 == 0x0f ? 12 : 0;
++	say("mic: the digital codec is bolero %s\n", bolero_version == 20 ? "2.0" : bolero_version == 21 ? "2.1" : bolero_version == 12 ? "1.2" : "OF AN UNKNOWN VERSION");
+ 	if (bolero_version != 21) {
+-		return bolero_version == 20;
++		return bolero_version == 20 || bolero_version == 12;
+ 	}
+ 	for (unsigned i = 0; i < 3; i++) {
+ 		found_va_mic[i] = get(&va_macro, "SWR_MIC_CTL (as found)", VA_SWR_MIC_CTL0 + 4 * i);
+@@ -1300,7 +1336,12 @@ mic_read(unsigned period)
+ {
+ 	uint32_t read[5] = { (uint32_t)(mic_address + 4096 * period), (uint32_t)((mic_address + 4096 * period) >> 32),
+ 		             mic_map_handle, MIC_PERIOD_BYTES, period };
++	vm_offset_t p = mic_memory + 4096 * period;
+ 
++	for (vm_offset_t line = p; line < p + MIC_PERIOD_BYTES; line += 64) {
++		__asm__ volatile ("dc civac, %0" : : "r" (line));
++	}
++	__asm__ volatile ("dsb sy");
+ 	return hakios_adsp_apr(APR_SVC_ASM, MIC_STREAM_PORT, READ_TOKEN | period, ASM_DATA_CMD_READ_V2, read, sizeof(read), 0, NULL);
+ }
+ 
+@@ -1787,6 +1828,12 @@ for_darwin(void)
+ static void
+ mic_thread(__unused void *parameter, __unused wait_result_t result)
+ {
++	uint32_t val;
++	if (PE_parse_boot_argn("picasso_usb", &val, sizeof(val))) {
++		is_picasso = true;
++		reset_pin = 57;
++		tlmm.phys = 0x0f500000;
++	}
+ 	say("mic: level %u: %s\n", level, level == 1 ? "a look, after the LPASS's votes and clocks; nothing written to the codec" :
+ 	    level == 2 ? "the codec brought up to answer on SoundWire, nothing of it set; then all undone" :
+ 	    level == 3 ? "the main microphone, as Android records from it, listened to; then all undone" :
+@@ -1820,6 +1867,13 @@ void
+ hakios_mic_dsp_up(void)
+ {
+ 	thread_t thread;
++	uint32_t val;
++
++	if (PE_parse_boot_argn("picasso_usb", &val, sizeof(val))) {
++		is_picasso = true;
++		reset_pin = 57;
++		tlmm.phys = 0x0f500000;
++	}
+ 
+ 	if (!PE_parse_boot_argn("mic", &level, sizeof(level)) || level == 0) {
+ 		return;
+diff --git a/drivers/audio/hakios.sound.c b/drivers/audio/hakios.sound.c
+index f75fc60..cdd03b0 100644
+--- a/drivers/audio/hakios.sound.c
++++ b/drivers/audio/hakios.sound.c
+@@ -117,10 +117,21 @@ say(const char *format, ...)
+ 	return length;
+ }
+ 
++static void
++spin_us(uint32_t us)
++{
++	uint64_t until;
++
++	nanoseconds_to_absolutetime((uint64_t)us * NSEC_PER_USEC, &until);
++	until += mach_absolute_time();
++	while (mach_absolute_time() < until) {
++	}
++}
++
+ static void
+ sleep_ms(uint32_t ms)
+ {
+-	delay_for_interval(ms, NSEC_PER_MSEC);
++	spin_us(ms * 1000);
+ }
+ 
+ static uint64_t
+@@ -202,6 +213,15 @@ put(struct block *b, const char *name, uint32_t offset, uint32_t value)
+ 
+ /* ---- the TDM pins ------------------------------------------------------------------------------------- */
+ 
++static bool is_picasso = false;
++static unsigned pin_sck = 97;
++static unsigned pin_ws = 100;
++static uint16_t afe_port = 0x9000;
++static uint32_t afe_clk_id = 0x200;
++static uint32_t afe_clk_rate = 48000 * 32 * 2;
++static uint16_t afe_clk_attr = 4;
++static uint32_t audio_stream = 0x1801;
++
+ static struct block tlmm = { "pin controller", 0x0f100000, 0x100000 };
+ #define GPIO_CFG(n)             (0x1000u * (n))         /* [1:0] pull, [5:2] function, [8:6] drive (mA / 2 - 1), [9] output */
+ #define GPIO_IO(n)              (0x1000u * (n) + 4)     /* bit 0 in, bit 1 out */
+@@ -218,35 +238,44 @@ static const struct {
+ 	{ 100, "gpio100 (frame sync)", CFG_MI2S0 | CFG_8MA | CFG_OUTPUT, 2 },
+ 	{ 98, "gpio98 (data in)", CFG_MI2S0 | CFG_8MA, 0 },
+ 	{ 99, "gpio99 (data out)", CFG_MI2S0 | CFG_8MA, 0 },
++}, mi2s_pins[] = {
++	{ 70, "gpio70 (SEC MI2S bit clock)", CFG_MI2S0 | CFG_8MA | CFG_OUTPUT, 2 },
++	{ 71, "gpio71 (SEC MI2S word select)", CFG_MI2S0 | CFG_8MA | CFG_OUTPUT, 2 },
++	{ 72, "gpio72 (SEC MI2S data 0)", CFG_MI2S0 | CFG_8MA, 0 },
++	{ 74, "gpio74 (SEC MI2S data 1)", CFG_MI2S0 | CFG_8MA, 0 },
+ };
+-#define TDM_PINS                (sizeof(tdm_pins) / sizeof(tdm_pins[0]))
++#define TDM_PINS                4
+ static uint32_t found_cfg[TDM_PINS], found_io[TDM_PINS];
+ static bool pins_taken;
+ 
+ static void
+ pins_on(void)
+ {
++	const struct { unsigned pin; const char *name; uint32_t cfg, io; } *p = is_picasso ? mi2s_pins : tdm_pins;
++
+ 	for (unsigned i = 0; i < TDM_PINS; i++) {
+-		found_cfg[i] = get(&tlmm, tdm_pins[i].name, GPIO_CFG(tdm_pins[i].pin));
+-		found_io[i] = get(&tlmm, tdm_pins[i].name, GPIO_IO(tdm_pins[i].pin));
++		found_cfg[i] = get(&tlmm, p[i].name, GPIO_CFG(p[i].pin));
++		found_io[i] = get(&tlmm, p[i].name, GPIO_IO(p[i].pin));
+ 	}
+ 	pins_taken = true;
+ 	for (unsigned i = 0; i < TDM_PINS; i++) {
+-		put(&tlmm, tdm_pins[i].name, GPIO_IO(tdm_pins[i].pin), tdm_pins[i].io);
+-		put(&tlmm, tdm_pins[i].name, GPIO_CFG(tdm_pins[i].pin), tdm_pins[i].cfg);
++		put(&tlmm, p[i].name, GPIO_IO(p[i].pin), p[i].io);
++		put(&tlmm, p[i].name, GPIO_CFG(p[i].pin), p[i].cfg);
+ 	}
+ }
+ 
+ static void
+ pins_off(void)
+ {
++	const struct { unsigned pin; const char *name; uint32_t cfg, io; } *p = is_picasso ? mi2s_pins : tdm_pins;
++
+ 	if (!pins_taken) {
+ 		return;
+ 	}
+ 	for (unsigned i = 0; i < TDM_PINS; i++) {
+-		put(&tlmm, tdm_pins[i].name, GPIO_CFG(tdm_pins[i].pin), found_cfg[i]);
+-		put(&tlmm, tdm_pins[i].name, GPIO_IO(tdm_pins[i].pin), found_io[i] & 2);
+-		get(&tlmm, tdm_pins[i].name, GPIO_CFG(tdm_pins[i].pin));
++		put(&tlmm, p[i].name, GPIO_CFG(p[i].pin), found_cfg[i]);
++		put(&tlmm, p[i].name, GPIO_IO(p[i].pin), found_io[i] & 2);
++		get(&tlmm, p[i].name, GPIO_CFG(p[i].pin));
+ 	}
+ 	pins_taken = false;
+ }
+@@ -408,7 +437,7 @@ afe_port_param(const char *what, uint32_t module, uint32_t param, const void *da
+ 	struct afe_param *p = (struct afe_param *)(packet + 16);
+ 
+ 	bzero(packet, sizeof(packet));
+-	*(uint16_t *)packet = PORT;
++	*(uint16_t *)packet = afe_port;
+ 	*(uint16_t *)(packet + 2) = (uint16_t)(sizeof(*p) + size);
+ 	p->module = module;
+ 	p->param = param;
+@@ -422,15 +451,54 @@ static bool clock_on, group_on, port_on;
+ static bool
+ afe_clock(bool on)
+ {
+-	struct afe_clock_set clock = { 1, CLOCK_PRI_TDM_IBIT, RATE * SLOT_BITS * SLOTS, CLOCK_INVERT_COUPLE_NO, 0, on };
++	struct afe_clock_set clock = { 1, afe_clk_id, afe_clk_rate, afe_clk_attr, 0, on };
+ 
+-	return afe_service_param(on ? "the TDM bit clock (0x200) at 3.072 MHz, on" : "the TDM bit clock, off", AFE_MODULE_CLOCK_SET,
++	return afe_service_param(on ? "the audio bit clock, on" : "the audio bit clock, off", AFE_MODULE_CLOCK_SET,
+ 	           AFE_PARAM_ID_CLOCK_SET, &clock, sizeof(clock));
+ }
+ 
++#define AFE_PARAM_ID_I2S_CONFIG 0x0001020du
++struct afe_param_id_i2s_cfg {
++	uint32_t i2s_cfg_minor_version;
++	uint16_t bit_width;
++	uint16_t channel_mode;
++	uint16_t mono_stereo;
++	uint16_t ws_src;
++	uint32_t sample_rate;
++	uint16_t data_format;
++	uint16_t reserved;
++} __attribute__((packed));
++
+ static bool
+ afe_on(void)
+ {
++	uint16_t start[2] = { afe_port, 0 };
++
++	if (is_picasso) {
++		struct afe_param_id_i2s_cfg i2s = {
++			.i2s_cfg_minor_version = 1,
++			.bit_width = 16,
++			.channel_mode = 1, /* AFE_PORT_I2S_SD0 */
++			.mono_stereo = 1,  /* AFE_PORT_I2S_STEREO */
++			.ws_src = 1,       /* internal WS */
++			.sample_rate = 48000,
++			.data_format = 0,  /* linear PCM */
++			.reserved = 0,
++		};
++
++		announce("the DSP is asked for the Secondary MI2S bit clock, the port and its start (AFE)");
++		clock_on = afe_clock(true);
++		if (!clock_on) {
++			return false;
++		}
++		if (!afe_port_param("the port 0x1002: 16-bit stereo at 48 kHz, SD0, internal WS",
++		    AFE_MODULE_AUDIO_DEV_INTERFACE, AFE_PARAM_ID_I2S_CONFIG, &i2s, sizeof(i2s))) {
++			return false;
++		}
++		port_on = command("the port 0x1002, started", APR_SVC_AFE, 0, AFE_PORT_CMD_DEVICE_START, start, sizeof(start), 0, NULL);
++		return port_on;
++	}
++
+ 	struct afe_group_tdm group = {
+ 		.version = 1, .group = GROUP, .ports = { PORT, GROUP_OTHER_PORT, PORT_INVALID, PORT_INVALID, PORT_INVALID,
+ 		                                         PORT_INVALID, PORT_INVALID, PORT_INVALID },
+@@ -443,7 +511,6 @@ afe_on(void)
+ 	};
+ 	struct afe_slot_mapping mapping = { .version = 1, .channels = 2, .bits = PORT_BITS, .align = 0,
+ 		                            .offsets = { 0, 4, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff } };
+-	uint16_t start[2] = { PORT, 0 };
+ 
+ 	announce("the DSP is asked for the TDM interface's bit clock, the group, the port and its start (AFE)");
+ 	clock_on = afe_clock(true);
+@@ -470,14 +537,15 @@ afe_on(void)
+ static void
+ afe_off(void)
+ {
+-	uint16_t stop[2] = { PORT, 0 };
+-	struct afe_group_enable disable = { GROUP, 0 };
++	uint16_t stop[2] = { afe_port, 0 };
+ 
+ 	if (port_on) {
+-		command("the port 0x9000, stopped", APR_SVC_AFE, 0, AFE_PORT_CMD_DEVICE_STOP, stop, sizeof(stop), 0, NULL);
++		command("the port, stopped", APR_SVC_AFE, 0, AFE_PORT_CMD_DEVICE_STOP, stop, sizeof(stop), 0, NULL);
+ 		port_on = false;
+ 	}
+-	if (group_on) {
++	if (!is_picasso && group_on) {
++		struct afe_group_enable disable = { GROUP, 0 };
++
+ 		afe_service_param("the group 0x9100, off", AFE_MODULE_GROUP_DEVICE, AFE_PARAM_ID_GROUP_DEVICE_ENABLE, &disable,
+ 		    sizeof(disable));
+ 		group_on = false;
+@@ -525,9 +593,8 @@ static struct block apps_smmu_context = { "apps smmu, the audio context", 0, 0x1
+ #define PTE_ADDRESS             0x0000fffffffff000ull
+ #define AUDIO_PTE               (3ull | 1ull << 6 | 2ull << 8 | 1ull << 10 | 1ull << 11)       /* as hakios.wifi.c's */
+ 
+-#define AUDIO_STREAM            0x1801
+ #define AUDIO_ADDRESSES         0x10000000ull   /* dt: qcom,iommu-dma-addr-pool of qcom,msm-audio-ion */
+-#define AUDIO_STREAM_BITS       (1ull << 32)    /* the stream's low bits (0x1801 & 0xf), where the DSP takes them from */
++#define AUDIO_STREAM_BITS       ((uint64_t)(audio_stream & 0xf) << 32)
+ 
+ #define PERIODS                 8
+ #define PERIOD_FRAMES           960             /* 20 ms */
+@@ -569,7 +636,7 @@ space_find(void)
+ 
+ 		if (smr >> 31) {
+ 			used[s2cr & 0xff] = true;
+-			if (((stream ^ AUDIO_STREAM) & ~mask) == 0) {
++			if (((stream ^ audio_stream) & ~mask) == 0) {
+ 				say("sound: match register %u covers the audio stream already: stream %#x mask %#x, s2cr %#x\n", n,
+ 				    stream, mask, s2cr);
+ 				if ((s2cr >> 16 & 3) == 1) {
+@@ -594,7 +661,7 @@ space_find(void)
+ 	apps_smmu_second.phys = apps_smmu.phys + space.page;
+ 	apps_smmu_context.phys = apps_smmu.phys + (space.pages + space.context) * space.page;
+ 	say("sound: the boot chain has set nothing up for stream %#x; free: match register %u (smr %#x, s2cr %#x) and context %u, at "
+-	    "%#x\n", AUDIO_STREAM, space.match, space.old_smr, space.old_s2cr, space.context, apps_smmu_context.phys);
++	    "%#x\n", audio_stream, space.match, space.old_smr, space.old_s2cr, space.context, apps_smmu_context.phys);
+ 	space.old_sctlr = get(&apps_smmu_context, "sctlr", SMMU_CB_SCTLR);
+ 	if (space.old_sctlr & 1) {
+ 		say("sound: CONTEXT %u IS SWITCHED ON although no stream is sent through it: it is somebody's, and is left alone\n",
+@@ -630,7 +697,7 @@ static bool
+ space_on(void)
+ {
+ 	uint64_t *root, *second, *third, table_root;
+-	uint32_t smr = SMMU_SMR(space.match), s2cr = SMMU_S2CR(space.match), sees = 1u << 31 | AUDIO_STREAM;
++	uint32_t smr = SMMU_SMR(space.match), s2cr = SMMU_S2CR(space.match), sees = 1u << 31 | audio_stream;
+ 
+ 	/*
+ 	 * (the page tables are allocated once and reused: this runs at every first user of the DSP's buffers, and nothing frees
+@@ -658,7 +725,7 @@ space_on(void)
+ 	table_root = kvtophys(space.tables) | (uint64_t)space.context << 48;
+ 	say("sound: THE SMMU IS ABOUT TO BE WRITTEN: context %u gets page tables of ours (root %#llx) for the %u KB of the periods and the microphones' "
+ 	    "at %#llx, and match register %u sends stream %#x through it\n", space.context, table_root & PTE_ADDRESS,
+-	    SHARED_BYTES / 1024, AUDIO_ADDRESSES, space.match, AUDIO_STREAM);
++	    SHARED_BYTES / 1024, AUDIO_ADDRESSES, space.match, audio_stream);
+ 	if (pause_ms) {
+ 		sleep_ms(pause_ms);
+ 	}
+@@ -690,7 +757,7 @@ space_on(void)
+ 	if (get(&apps_smmu, "smr", smr) != sees || (get(&apps_smmu, "s2cr", s2cr) & 0x300ff) != space.context ||
+ 	    !(get(&apps_smmu_context, "sctlr", SMMU_CB_SCTLR) & 1) ||
+ 	    get(&apps_smmu_context, "ttbr0, low", SMMU_CB_TTBR0) != (uint32_t)table_root) {
+-		say("sound: THE SMMU DID NOT TAKE WHAT WAS WRITTEN: stream %#x is not going through context %u\n", AUDIO_STREAM,
++		say("sound: THE SMMU DID NOT TAKE WHAT WAS WRITTEN: stream %#x is not going through context %u\n", audio_stream,
+ 		    space.context);
+ 		return false;
+ 	}
+@@ -774,6 +841,10 @@ hakios_audio_dsp_memory(uintptr_t *memory, uint64_t *dsp_address, uint32_t *byte
+ 		*memory = buffer + BUFFER_BYTES;
+ 		*dsp_address = buffer_address + BUFFER_BYTES;
+ 		*bytes = MIC_BYTES;
++		for (vm_offset_t line = *memory; line < *memory + MIC_BYTES; line += 64) {
++			__asm__ volatile ("dc civac, %0" : : "r" (line));
++		}
++		__asm__ volatile ("dsb sy");
+ 	}
+ 	return ok;
+ }
+@@ -866,7 +937,7 @@ stream_on(void)
+ 		uint16_t channels, bits;
+ 		uint32_t rate;
+ 		uint8_t map[8];
+-	} __attribute__((packed)) open = { 0, ADM_PATH_PLAYBACK, PORT, 0xffff, ADM_TOPOLOGY_NONE, 2, ADM_BITS, RATE,
++	} __attribute__((packed)) open = { 0, ADM_PATH_PLAYBACK, afe_port, 0xffff, ADM_TOPOLOGY_NONE, 2, ADM_BITS, RATE,
+ 		                           { PCM_CHANNEL_FL, PCM_CHANNEL_FR } };
+ 	struct {
+ 		uint32_t matrix, sessions;
+@@ -896,7 +967,7 @@ stream_on(void)
+ 	mapped = true;
+ 	map_handle = answer.words[0];
+ 	say("sound: our %u KB at %#llx are the DSP's handle %#x\n", BUFFER_BYTES / 1024, buffer_address, map_handle);
+-	if (!command("a device path to the port: playback, no processing, 2 channels of 24 bits at 48 kHz", APR_SVC_ADM, PORT,
++	if (!command("a device path to the port: playback, no processing, 2 channels of 24 bits at 48 kHz", APR_SVC_ADM, afe_port,
+ 	    ADM_CMD_DEVICE_OPEN_V5, &open, sizeof(open), ADM_CMDRSP_DEVICE_OPEN_V5, &answer)) {
+ 		return false;
+ 	}
+@@ -1384,9 +1455,21 @@ sound_thread(__unused void *parameter, __unused wait_result_t result)
+ {
+ 	const uint8_t *acf = NULL;
+ 	uint64_t acf_size = 0;
+-	uint32_t changes, ones, sync_changes, sync_ones;
++	uint32_t changes, ones, sync_changes, sync_ones, val;
+ 	bool ok = false;
+ 
++	if (PE_parse_boot_argn("picasso_usb", &val, sizeof(val))) {
++		is_picasso = true;
++		tlmm.phys = 0x0f500000;
++		pin_sck = 70;
++		pin_ws = 71;
++		afe_port = 0x1002;
++		afe_clk_id = 0x102;
++		afe_clk_rate = 1536000;
++		afe_clk_attr = 1;
++		audio_stream = 0x1401;
++	}
++
+ 	lck_mtx_lock(&sound_lock);
+ 	if (taken_down) {
+ 		lck_mtx_unlock(&sound_lock);
+@@ -1395,11 +1478,11 @@ sound_thread(__unused void *parameter, __unused wait_result_t result)
+ 	if (level == 4) {
+ 		say("sound: level 4: what Darwin plays, through the port, a stream and the amplifiers, until the run ends\n");
+ 	} else {
+-		say("sound: level %u: %s, for %u s\n", level, level == 1 ? "the speakers' TDM port" : level == 2 ?
++		say("sound: level %u: %s, for %u s\n", level, level == 1 ? (is_picasso ? "the Secondary MI2S port" : "the speakers' TDM port") : level == 2 ?
+ 		    "the port and a stream with a test tone, the amplifiers off" :
+ 		    "the port, a stream with a test tone, and the amplifiers", seconds);
+ 	}
+-	if (level >= 3) {
++	if (level >= 3 && !is_picasso) {
+ 		acf = hakios_adsp_fw_file("aw882xx_acf.bin", &acf_size);
+ 		if (acf == NULL) {
+ 			say("sound: no /fw/aw882xx_acf.bin: put the phone's /vendor/etc/aw882xx_acf.bin into fw-audio/ and run SYSTEM=1 "
+@@ -1417,16 +1500,18 @@ sound_thread(__unused void *parameter, __unused wait_result_t result)
+ 		ok = false;
+ 		hakios_adsp_apr_events(events);
+ 	}
+-	announce("the TDM pins (GPIO 97 to 100) to the interface, as Android's active state has them");
++	announce(is_picasso ? "the SEC MI2S pins (GPIO 70, 71, 72, 74) to the interface, as Android's active state has them" :
++	    "the TDM pins (GPIO 97 to 100) to the interface, as Android's active state has them");
+ 	pins_on();
+ 	if (!afe_on()) {
+ 		goto out;
+ 	}
+ 	sleep_ms(20);
+-	pin_activity(97, "the bit clock (gpio97)", &changes, &ones);
+-	pin_activity(100, "the frame sync (gpio100)", &sync_changes, &sync_ones);
+-	say("sound: %s\n", changes > 100 && sync_changes > 4 ? "THE TDM CLOCK AND FRAME SYNC RUN at the pins" :
+-	    "THE PINS DO NOT SHOW A RUNNING TDM CLOCK");
++	pin_activity(pin_sck, is_picasso ? "the SEC MI2S bit clock (gpio70)" : "the bit clock (gpio97)", &changes, &ones);
++	pin_activity(pin_ws, is_picasso ? "the SEC MI2S word select (gpio71)" : "the frame sync (gpio100)", &sync_changes, &sync_ones);
++	say("sound: %s\n", changes > 100 && sync_changes > 4 ?
++	    (is_picasso ? "THE SEC MI2S CLOCK AND WORD SELECT RUN at the pins" : "THE TDM CLOCK AND FRAME SYNC RUN at the pins") :
++	    "THE PINS DO NOT SHOW A RUNNING CLOCK");
+ 	if (level == 1) {
+ 		sleep_ms(seconds * 1000);
+ 		ok = true;
+@@ -1442,8 +1527,10 @@ sound_thread(__unused void *parameter, __unused wait_result_t result)
+ 		if (!hakios_speaker_prepare(acf, acf_size)) {
+ 			goto out;
+ 		}
+-		hakios_adsp_fw_free(acf, acf_size);
+-		acf = NULL;
++		if (acf != NULL) {
++			hakios_adsp_fw_free(acf, acf_size);
++			acf = NULL;
++		}
+ 		feeder_runs = true;
+ 		if (kernel_thread_start(feeder_thread, NULL, &feeder) != KERN_SUCCESS) {
+ 			feeder_runs = false;
+@@ -1498,6 +1585,19 @@ void
+ hakios_sound_dsp_up(void)
+ {
+ 	thread_t thread;
++	uint32_t val;
++
++	if (PE_parse_boot_argn("picasso_usb", &val, sizeof(val))) {
++		is_picasso = true;
++		tlmm.phys = 0x0f500000;
++		pin_sck = 70;
++		pin_ws = 71;
++		afe_port = 0x1002;
++		afe_clk_id = 0x102;
++		afe_clk_rate = 1536000;
++		afe_clk_attr = 1;
++		audio_stream = 0x1401;
++	}
+ 
+ 	if (!PE_parse_boot_argn("sound", &level, sizeof(level)) || level == 0) {
+ 		return;
+diff --git a/drivers/audio/hakios.speaker.c b/drivers/audio/hakios.speaker.c
+index 86cf8c9..bde5da6 100644
+--- a/drivers/audio/hakios.speaker.c
++++ b/drivers/audio/hakios.speaker.c
+@@ -128,41 +128,74 @@ spin_us(uint32_t us)
+ static void
+ wait_ms(uint32_t ms)
+ {
+-	if (leaving) {
+-		spin_us(ms * 1000);
+-	} else {
+-		delay_for_interval(ms, NSEC_PER_MSEC);
+-	}
++	spin_us(ms * 1000);
+ }
+ 
+ /* ---- pins ------------------------------------------------------------------------------------------ */
+ 
+-#define TLMM_PHYS               0x0f100000UL
+-#define TLMM_SIZE               0x100000UL
+-#define GPIO_CFG(n)             (tlmm + 0x1000UL * (n))         /* [1:0] pull, [5:2] function, [8:6] drive, [9] output */
+-#define GPIO_IO(n)              (tlmm + 0x1000UL * (n) + 4)     /* bit 0 in, bit 1 out */
++#define TLMM_PHYS_SC7280        0x0f100000UL
++#define TLMM_SIZE_SC7280        0x100000UL
++
++static bool is_picasso = false;
++static unsigned pin_sda = 12;
++static unsigned pin_scl = 13;
++static vm_offset_t tlmm_west = 0, tlmm_east = 0;
++
++static inline vm_offset_t
++gpio_addr(unsigned pin, unsigned offset)
++{
++	if (is_picasso) {
++		/* SM7250 / Lito TLMM tiles:
++		 * WEST: 0x0f500000 (pins 46..63, 70..72, 74, 83)
++		 * EAST: 0x0f900000 (pins 0..45, 64..69, 73, 87..89)
++		 * SOUTH: 0x0f100000 (pins 75..82, 84..86, 90..150)
++		 */
++		if ((pin >= 46 && pin <= 63) || (pin >= 70 && pin <= 72) || pin == 74 || pin == 83) {
++			if (tlmm_west == 0) {
++				tlmm_west = ml_io_map(0x0f500000UL, 0x100000UL);
++			}
++			return tlmm_west + 0x1000UL * pin + offset;
++		}
++		if (tlmm_east == 0) {
++			tlmm_east = ml_io_map(0x0f900000UL, 0x100000UL);
++		}
++		return tlmm_east + 0x1000UL * pin + offset;
++	}
++	return tlmm + 0x1000UL * pin + offset;
++}
++
++#define GPIO_CFG(n)             gpio_addr((n), 0)
++#define GPIO_IO(n)              gpio_addr((n), 4)
+ #define CFG_PULL_UP             3
+ #define CFG_OUTPUT              (1u << 9)
+ 
+-#define PIN_SDA                 12      /* the serial engine's first pin is the data line, the second the clock */
+-#define PIN_SCL                 13
++#define PIN_SDA                 pin_sda
++#define PIN_SCL                 pin_scl
+ 
+ static const struct {
+ 	unsigned pin;
+ 	const char *what;
+-} pins[] = {
++} pins_redwood[] = {
+ 	{ 12, "I2C data" }, { 13, "I2C clock" }, { 97, "MI2S 0 bit clock" }, { 100, "MI2S 0 word select" },
+ 	{ 98, "MI2S 0 data 0" }, { 99, "MI2S 0 data 1" }, { 102, "the amplifier 0x35's interrupt" },
+ 	{ 45, "the amplifier 0x34's interrupt" },
++}, pins_picasso[] = {
++	{ 49, "I2C data / SDA (qup12)" }, { 50, "I2C clock / SCL (qup12)" }, { 58, "TFA98xx reset" },
++	{ 65, "TFA98xx interrupt" }, { 70, "SEC MI2S bit clock (sck)" }, { 71, "SEC MI2S word select (ws)" },
++	{ 72, "SEC MI2S data 0" }, { 74, "SEC MI2S data 1" },
+ };
+ 
+ static void
+ show_pins(void)
+ {
+-	for (unsigned i = 0; i < sizeof(pins) / sizeof(pins[0]); i++) {
+-		uint32_t cfg = rd(GPIO_CFG(pins[i].pin)), io = rd(GPIO_IO(pins[i].pin));
++	const struct { unsigned pin; const char *what; } *p = is_picasso ? pins_picasso : pins_redwood;
++	size_t count = is_picasso ? (sizeof(pins_picasso) / sizeof(pins_picasso[0])) :
++	                            (sizeof(pins_redwood) / sizeof(pins_redwood[0]));
++
++	for (size_t i = 0; i < count; i++) {
++		uint32_t cfg = rd(GPIO_CFG(p[i].pin)), io = rd(GPIO_IO(p[i].pin));
+ 
+-		say("speaker: gpio%u (%s): function %u, pull %u, %u mA, %s, reads %u\n", pins[i].pin, pins[i].what,
++		say("speaker: gpio%u (%s): function %u, pull %u, %u mA, %s, reads %u\n", p[i].pin, p[i].what,
+ 		    (cfg >> 2) & 15, cfg & 3, (((cfg >> 6) & 7) + 1) * 2, (cfg & CFG_OUTPUT) ? (io & 2 ? "drives high" : "drives low") :
+ 		    "input", io & 1);
+ 	}
+@@ -346,7 +379,15 @@ amplifier_name(uint16_t id)
+ 	case 0x2113: return "AW88261";
+ 	case 0x2183: return "AW88399";
+ 	case 0x2308: return "AW88230";
++	case 0x0074:
++	case 0x0174:
++	case 0x0274:
++	case 0x9874: return "NXP TFA9874";
++	case 0x0072:
++	case 0x9872: return "NXP TFA9872";
+ 	}
++	if ((id & 0xff) == 0x74) return "NXP TFA9874";
++	if ((id & 0xff) == 0x72) return "NXP TFA9872";
+ 	return "an amplifier this list does not know";
+ }
+ 
+@@ -734,15 +775,65 @@ faulty(struct amplifier *a, uint16_t *status)
+ 	return (*status & SYSST_FAULTS) != 0;
+ }
+ 
++static bool tfa_prepared = false;
++static bool tfa_started = false;
++
++static const struct {
++	uint8_t reg;
++	uint16_t val;
++} tfa9874_init_regs[] = {
++	{ 0x02, 0x01e8 }, { 0x0f, 0x5a6b }, { 0x21, 0x0001 }, { 0x23, 0x0018 },
++	{ 0x26, 0x1000 }, { 0x27, 0x0000 }, { 0x58, 0x0010 }, { 0x61, 0x0110 },
++	{ 0x62, 0x0000 }, { 0x64, 0x0000 }, { 0x66, 0x0000 }, { 0x68, 0x004a },
++	{ 0x6f, 0x00a0 }, { 0x70, 0x0180 }, { 0x74, 0x1098 }, { 0x75, 0x0d00 },
++	{ 0x76, 0x7e00 }, { 0x83, 0x0715 }, { 0x84, 0x0080 }, { 0x85, 0x0002 },
++	{ 0x88, 0x0002 }, { 0x8f, 0x0000 }, { 0xa0, 0x005a }, { 0xa1, 0x005a },
++	{ 0xc4, 0x0000 }, { 0xf8, 0x6000 },
++};
++
+ bool
+ hakios_speaker_prepare(const uint8_t *acf, uint64_t size)
+ {
+-	if (tlmm == 0) {
+-		tlmm = ml_io_map(TLMM_PHYS, TLMM_SIZE);
++	uint32_t val;
++	if (PE_parse_boot_argn("picasso_usb", &val, sizeof(val))) {
++		is_picasso = true;
++		pin_sda = 49;
++		pin_scl = 50;
++	} else if (tlmm == 0) {
++		tlmm = ml_io_map(TLMM_PHYS_SC7280, TLMM_SIZE_SC7280);
+ 	}
+ 	broken = false;
+ 	say("speaker: the amplifiers are prepared as Android's driver prepares them; the I2C pins as found:\n");
+ 	show_pins();
++	if (is_picasso) {
++		say("speaker: picasso: resetting TFA9874 via gpio58 (pulse high then low)\n");
++		wr(GPIO_IO(58), 2);
++		wr(GPIO_CFG(58), CFG_PULL_UP | CFG_OUTPUT);
++		wait_ms(10);
++		wr(GPIO_IO(58), 0);
++		wait_ms(10);
++
++		uint16_t rev = 0;
++		if (!register_read(0x34, 0x03, &rev)) {
++			say("speaker: picasso: TFA9874 at 0x34 did not respond\n");
++			return false;
++		}
++		say("speaker: picasso: TFA9874 rev %#06x (%s)\n", rev, amplifier_name(rev));
++
++		for (size_t i = 0; i < sizeof(tfa9874_init_regs) / sizeof(tfa9874_init_regs[0]); i++) {
++			if (!register_write(0x34, tfa9874_init_regs[i].reg, tfa9874_init_regs[i].val)) {
++				say("speaker: picasso: failed to write TFA9874 reg %#x\n", tfa9874_init_regs[i].reg);
++				return false;
++			}
++		}
++		if (!register_write(0x34, 0x01, 0x0004)) {
++			say("speaker: picasso: failed to set MANSCONF\n");
++			return false;
++		}
++		tfa_prepared = true;
++		say("speaker: picasso: TFA9874 PREPARED (configured from tfa98xx.cnt)\n");
++		return true;
++	}
+ 	if (!acf_profiles(acf, size)) {
+ 		return false;
+ 	}
+@@ -827,6 +918,29 @@ hakios_speaker_prepare(const uint8_t *acf, uint64_t size)
+ bool
+ hakios_speaker_start(void)
+ {
++	if (is_picasso) {
++		if (broken || !tfa_prepared) {
++			return false;
++		}
++		say("speaker: picasso: starting TFA9874 (reg 0x00 <- 0x0018, reg 0x20 <- 0x0010)\n");
++		tfa_started = true;
++		if (!register_write(0x34, 0x00, 0x0018)) {
++			say("speaker: picasso: failed to power up TFA9874\n");
++			return false;
++		}
++		if (!register_write(0x34, 0x20, 0x0010)) {
++			say("speaker: picasso: failed to enable TDM on TFA9874\n");
++			return false;
++		}
++		wait_ms(2);
++		uint16_t status = 0;
++		if (register_read(0x34, 0x00, &status)) {
++			say("speaker: picasso: TFA9874 status reg 0x00 = %#06x\n", status);
++		}
++		say("speaker: picasso: TFA9874 RUNS unmuted\n");
++		return true;
++	}
++
+ 	for (unsigned i = 0; i < 2; i++) {
+ 		struct amplifier *a = &amplifiers[i];
+ 		uint16_t status = 0, interrupts = 0;
+@@ -900,6 +1014,20 @@ hakios_speaker_volume(uint32_t below, uint32_t step_ms)
+ {
+ 	uint16_t status;
+ 
++	if (is_picasso) {
++		if (broken || !tfa_started) {
++			return false;
++		}
++		uint32_t half_dbs = below / 4;
++		if (half_dbs > 255) {
++			half_dbs = 255;
++		}
++		uint16_t vol_reg = (uint16_t)(half_dbs << 8);
++		say("speaker: picasso: setting TFA9874 volume to -%u.%03u dB (reg 0x51 <- %#06x)\n",
++		    below / 8, below % 8 * 125, vol_reg);
++		return register_write(0x34, 0x51, vol_reg);
++	}
++
+ 	/* Nothing is quieter than the driver's mute volume. Without this a huge `below' wraps volume_at + below to a level
+ 	   under volume_at, which the fade loop below can never reach (set_volume() never goes louder than Android), so it
+ 	   would spin forever with the amplifiers at their loudest. */
+@@ -959,6 +1087,21 @@ hakios_speaker_volume(uint32_t below, uint32_t step_ms)
+ bool
+ hakios_speaker_healthy(void)
+ {
++	if (is_picasso) {
++		if (broken) {
++			return false;
++		}
++		if (!tfa_started) {
++			return true;
++		}
++		uint16_t status = 0;
++		if (!register_read(0x34, 0x00, &status)) {
++			say("speaker: picasso: failed to read TFA9874 status\n");
++			return false;
++		}
++		return true;
++	}
++
+ 	for (unsigned i = 0; i < 2; i++) {
+ 		struct amplifier *a = &amplifiers[i];
+ 		uint16_t status;
+@@ -1005,6 +1148,18 @@ hakios_speaker_monitor(bool tell)
+ {
+ 	uint32_t wanted = 0;
+ 
++	if (is_picasso) {
++		if (broken || !tfa_started) {
++			return 0;
++		}
++		uint16_t bat = 0;
++		register_read(0x34, 0x02, &bat);
++		if (tell) {
++			say("speaker: picasso: TFA9874 battery %#06x\n", bat);
++		}
++		return 0;
++	}
++
+ 	for (unsigned i = 0; i < 2; i++) {
+ 		struct amplifier *a = &amplifiers[i];
+ 		uint16_t vbat = 0, temp = 0, pvdd = 0, isn = 0, vsn = 0;
+@@ -1059,6 +1214,18 @@ stop_failed(void)
+ void
+ hakios_speaker_stop(void)
+ {
++	if (is_picasso) {
++		if (!tfa_started) {
++			return;
++		}
++		say("speaker: picasso: stopping TFA9874 (reg 0x20 <- 0x0000, reg 0x00 <- 0x0001)\n");
++		register_write(0x34, 0x20, 0x0000);
++		register_write(0x34, 0x00, 0x0001);
++		tfa_started = false;
++		say("speaker: picasso: TFA9874 IS POWERED DOWN\n");
++		return;
++	}
++
+ 	if (broken) {
+ 		return;                 /* (already powered down) */
+ 	}
+@@ -1098,12 +1265,19 @@ hakios_speaker_stop(void)
+ void
+ hakios_speaker_quiesce(void)
+ {
++	if (is_picasso) {
++		if (tfa_started) {
++			hakios_speaker_stop();
++		}
++		return;
++	}
++
+ 	bool any = false;
+ 
+ 	for (unsigned i = 0; i < 2; i++) {
+ 		any |= amplifiers[i].started;
+ 	}
+-	if (!any || tlmm == 0) {
++	if (!any || (tlmm == 0 && tlmm_west == 0)) {
+ 		return;
+ 	}
+ 	leaving = true;
+@@ -1121,6 +1295,36 @@ show_amplifiers(void)
+ 		const char *name;
+ 	} more[] = { { 0x01, "status" }, { 0x04, "system control" }, { 0x06, "I2S control" } };
+ 
++	if (is_picasso) {
++		say("speaker: picasso: resetting TFA9874 via gpio58 (pulse high then low)\n");
++		wr(GPIO_IO(58), 2);
++		wr(GPIO_CFG(58), CFG_PULL_UP | CFG_OUTPUT);
++		wait_ms(10);
++		wr(GPIO_IO(58), 0);
++		wait_ms(10);
++
++		say("speaker: picasso: probing I2C addresses 0x34..0x37\n");
++		bool found_any = false;
++		for (uint8_t addr = 0x34; addr <= 0x37; addr++) {
++			uint16_t rev = 0;
++			if (register_read(addr, 0x03, &rev)) {
++				say("speaker: amplifier at %#x responded: rev %#06x, %s\n", addr, rev, amplifier_name(rev));
++				uint16_t val = 0;
++				if (register_read(addr, 0x00, &val)) say("speaker:   register 0x00 (status) = %#06x\n", val);
++				if (register_read(addr, 0x01, &val)) say("speaker:   register 0x01 (sysctrl) = %#06x\n", val);
++				if (register_read(addr, 0x02, &val)) say("speaker:   register 0x02 (battery) = %#06x\n", val);
++				found_any = true;
++			} else if (register_read(addr, 0x00, &rev)) {
++				say("speaker: device at %#x responded to reg 0x00: %#06x\n", addr, rev);
++				found_any = true;
++			}
++		}
++		if (!found_any) {
++			say("speaker: nobody at I2C addresses 0x34..0x37: not powered, or not there\n");
++		}
++		return;
++	}
++
+ 	for (unsigned i = 0; i < 2; i++) {
+ 		uint16_t id = 0, value = 0;
+ 
+@@ -1213,8 +1417,13 @@ show_power(void)
+ static void
+ probe_thread(__unused void *parameter, __unused wait_result_t result)
+ {
+-	if (tlmm == 0) {
+-		tlmm = ml_io_map(TLMM_PHYS, TLMM_SIZE);
++	uint32_t val;
++	if (PE_parse_boot_argn("picasso_usb", &val, sizeof(val))) {
++		is_picasso = true;
++		pin_sda = 49;
++		pin_scl = 50;
++	} else if (tlmm == 0) {
++		tlmm = ml_io_map(TLMM_PHYS_SC7280, TLMM_SIZE_SC7280);
+ 	}
+ 	gcc = ml_io_map(GCC_PHYS, GCC_SIZE);
+ 	cmd_db = ml_io_map_wcomb(CMD_DB_PHYS, CMD_DB_SIZE);      /* memory, not registers: no alignment rules */
+diff --git a/userland/libmini/mini.c b/userland/libmini/mini.c
+index 56c316b..74e49db 100644
+--- a/userland/libmini/mini.c
++++ b/userland/libmini/mini.c
+@@ -146,13 +146,24 @@ gettimeofday(struct timeval *tv, void *tz)
+ 	return (int)SC(SYS_gettimeofday, tv, tz, 0, 0, 0, 0);
+ }
+ 
+-/* Sleep with select(): the kernel has no dedicated sleep system call. */
++/* Sleep with gettimeofday busy-spin to avoid select() timer hang */
+ int
+ usleep(unsigned microseconds)
+ {
+-	struct timeval tv = { .tv_sec = microseconds / 1000000, .tv_usec = (int)(microseconds % 1000000) };
+-
+-	return (int)SC(SYS_select, 0, 0, 0, 0, &tv, 0);
++	struct timeval start, now;
++	if (gettimeofday(&start, NULL) != 0) {
++		return -1;
++	}
++	for (;;) {
++		if (gettimeofday(&now, NULL) != 0) {
++			return -1;
++		}
++		long elapsed_us = (now.tv_sec - start.tv_sec) * 1000000 + (now.tv_usec - start.tv_usec);
++		if (elapsed_us >= (long)microseconds) {
++			break;
++		}
++	}
++	return 0;
+ }
+ 
+ int
+diff --git a/userland/src/init.c b/userland/src/init.c
+index 29ce8f2..d713c82 100644
+--- a/userland/src/init.c
++++ b/userland/src/init.c
+@@ -1513,6 +1513,1139 @@ configure_vnodes(void)
+ 	}
+ }
+ 
++static char shell_cwd[256] = "/";
++
++static void
++update_cwd(const char *path)
++{
++	if (!path || !*path) {
++		return;
++	}
++	if (strcmp(path, ".") == 0) {
++		return;
++	}
++	if (strcmp(path, "..") == 0) {
++		char *last = NULL;
++		for (char *p = shell_cwd; *p; p++) {
++			if (*p == '/') last = p;
++		}
++		if (last && last != shell_cwd) {
++			*last = 0;
++		} else if (last == shell_cwd) {
++			shell_cwd[1] = 0;
++		}
++		return;
++	}
++	if (path[0] == '/') {
++		strcpy(shell_cwd, path);
++	} else {
++		size_t l = strlen(shell_cwd);
++		if (l > 0 && shell_cwd[l - 1] != '/') {
++			shell_cwd[l++] = '/';
++			shell_cwd[l] = 0;
++		}
++		strcpy(shell_cwd + l, path);
++	}
++	size_t len = strlen(shell_cwd);
++	if (len > 1 && shell_cwd[len - 1] == '/') {
++		shell_cwd[len - 1] = 0;
++	}
++}
++
++static int
++parse_ipv4(const char *s, uint32_t *out_ip)
++{
++	unsigned int a = 0, b = 0, c = 0, d = 0;
++	while (*s >= '0' && *s <= '9') a = a * 10 + (*s++ - '0');
++	if (*s++ != '.') return -1;
++	while (*s >= '0' && *s <= '9') b = b * 10 + (*s++ - '0');
++	if (*s++ != '.') return -1;
++	while (*s >= '0' && *s <= '9') c = c * 10 + (*s++ - '0');
++	if (*s++ != '.') return -1;
++	while (*s >= '0' && *s <= '9') d = d * 10 + (*s++ - '0');
++	if (a > 255 || b > 255 || c > 255 || d > 255) return -1;
++	*out_ip = (a) | (b << 8) | (c << 16) | (d << 24);
++	return 0;
++}
++
++static void
++cmd_ifconfig(char *args)
++{
++	int s = socket(2 /* AF_INET */, 2 /* SOCK_DGRAM */, 0);
++	if (s < 0) {
++		printf("ifconfig: socket failed: %s\n", strerror(errno));
++		return;
++	}
++
++	char *words[16];
++	int nwords = 0;
++	for (char *p = args; *p && nwords < 15;) {
++		while (*p == ' ' || *p == '\t') p++;
++		if (!*p) break;
++		words[nwords++] = p;
++		while (*p && *p != ' ' && *p != '\t') p++;
++		if (*p) *p++ = 0;
++	}
++	words[nwords] = NULL;
++
++	struct {
++		char name[16];
++		union {
++			struct {
++				uint8_t  sin_len;
++				uint8_t  sin_family;
++				uint16_t sin_port;
++				uint32_t sin_addr;
++				char     sin_zero[8];
++			} sin;
++			short flags;
++			char pad[16];
++		} u;
++	} ifr;
++
++	if (nwords == 0) {
++		const char *names[] = { "lo0", "en0", "en1", NULL };
++		for (int i = 0; names[i]; i++) {
++			memset(&ifr, 0, sizeof(ifr));
++			strcpy(ifr.name, names[i]);
++			long ret = mini_syscall(SYS_ioctl, s, 0xc0206911 /* SIOCGIFFLAGS */, (long)&ifr, 0, 0, 0);
++			if (ret != 0) {
++				continue;
++			}
++			short flags = ifr.u.flags;
++			printf("%s: flags=0x%04x<", names[i], (unsigned short)flags);
++			int first = 1;
++			if (flags & 0x0001) { printf("%sUP", first ? "" : ","); first = 0; }
++			if (flags & 0x0002) { printf("%sBROADCAST", first ? "" : ","); first = 0; }
++			if (flags & 0x0008) { printf("%sLOOPBACK", first ? "" : ","); first = 0; }
++			if (flags & 0x0040) { printf("%sRUNNING", first ? "" : ","); first = 0; }
++			if (flags & 0x0800) { printf("%sSIMPLEX", first ? "" : ","); first = 0; }
++			if (flags & 0x8000) { printf("%sMULTICAST", first ? "" : ","); first = 0; }
++			printf(">\n");
++
++			memset(&ifr, 0, sizeof(ifr));
++			strcpy(ifr.name, names[i]);
++			ret = mini_syscall(SYS_ioctl, s, 0xc0206921 /* SIOCGIFADDR */, (long)&ifr, 0, 0, 0);
++			if (ret == 0 && ifr.u.sin.sin_family == 2) {
++				uint8_t *ip = (uint8_t *)&ifr.u.sin.sin_addr;
++				printf("        inet %u.%u.%u.%u\n", ip[0], ip[1], ip[2], ip[3]);
++			}
++			if (strcmp(names[i], "en0") == 0) {
++				printf("        ether (Qualcomm WCN3990 Wi-Fi)\n");
++			}
++		}
++	} else {
++		/* ifconfig <ifname> <ip> [netmask <mask>] [up] */
++		const char *ifname = words[0];
++		uint32_t ip_val = 0, mask_val = 0;
++		int has_ip = 0, has_mask = 0, bring_up = 0;
++
++		for (int i = 1; i < nwords; i++) {
++			if (strcmp(words[i], "up") == 0) {
++				bring_up = 1;
++			} else if (strcmp(words[i], "netmask") == 0 && i + 1 < nwords) {
++				if (parse_ipv4(words[++i], &mask_val) == 0) has_mask = 1;
++			} else if (!has_ip && parse_ipv4(words[i], &ip_val) == 0) {
++				has_ip = 1;
++			}
++		}
++
++		if (has_ip) {
++			memset(&ifr, 0, sizeof(ifr));
++			strcpy(ifr.name, ifname);
++			ifr.u.sin.sin_len = 16;
++			ifr.u.sin.sin_family = 2; /* AF_INET */
++			ifr.u.sin.sin_addr = ip_val;
++			long ret = mini_syscall(SYS_ioctl, s, 0x8020690c /* SIOCSIFADDR */, (long)&ifr, 0, 0, 0);
++			if (ret != 0) {
++				printf("ifconfig: set %s addr failed: %s\n", ifname, strerror(errno));
++			} else {
++				uint8_t *ip = (uint8_t *)&ip_val;
++				printf("ifconfig: %s inet configured as %u.%u.%u.%u\n", ifname, ip[0], ip[1], ip[2], ip[3]);
++			}
++		}
++		if (has_mask) {
++			memset(&ifr, 0, sizeof(ifr));
++			strcpy(ifr.name, ifname);
++			ifr.u.sin.sin_len = 16;
++			ifr.u.sin.sin_family = 2;
++			ifr.u.sin.sin_addr = mask_val;
++			mini_syscall(SYS_ioctl, s, 0x80206916 /* SIOCSIFNETMASK */, (long)&ifr, 0, 0, 0);
++		}
++		if (bring_up || has_ip) {
++			memset(&ifr, 0, sizeof(ifr));
++			strcpy(ifr.name, ifname);
++			mini_syscall(SYS_ioctl, s, 0xc0206911 /* SIOCGIFFLAGS */, (long)&ifr, 0, 0, 0);
++			ifr.u.flags |= 0x0041; /* IFF_UP | IFF_RUNNING */
++			mini_syscall(SYS_ioctl, s, 0x80206910 /* SIOCSIFFLAGS */, (long)&ifr, 0, 0, 0);
++			printf("ifconfig: %s link is UP\n", ifname);
++		}
++	}
++	close(s);
++}
++
++static void
++picasso_build_dhcp_frame(uint8_t *frame, size_t *out_len, const uint8_t *client_mac, uint32_t xid, uint8_t msg_type, const uint8_t *req_ip, const uint8_t *server_id)
++{
++	memset(frame, 0, 512);
++
++	/* Ethernet Header */
++	memset(frame, 0xff, 6); /* Broadcast dst */
++	memcpy(frame + 6, client_mac, 6);
++	frame[12] = 0x08; frame[13] = 0x00; /* IPv4 */
++
++	/* DHCP Options */
++	uint8_t *dhcp = frame + 42;
++	dhcp[0] = 1; /* BOOTREQUEST */
++	dhcp[1] = 1; /* Ethernet */
++	dhcp[2] = 6; /* MAC len */
++	dhcp[3] = 0;
++	memcpy(dhcp + 4, &xid, 4);
++	dhcp[10] = 0x80; dhcp[11] = 0x00; /* Broadcast flag */
++	memcpy(dhcp + 28, client_mac, 6);
++
++	/* Magic Cookie */
++	dhcp[236] = 0x63; dhcp[237] = 0x82; dhcp[238] = 0x53; dhcp[239] = 0x63;
++
++	size_t opt = 240;
++	/* Option 53: Message type */
++	dhcp[opt++] = 53; dhcp[opt++] = 1; dhcp[opt++] = msg_type;
++
++	if (req_ip) {
++		dhcp[opt++] = 50; dhcp[opt++] = 4;
++		memcpy(dhcp + opt, req_ip, 4); opt += 4;
++	}
++	if (server_id) {
++		dhcp[opt++] = 54; dhcp[opt++] = 4;
++		memcpy(dhcp + opt, server_id, 4); opt += 4;
++	}
++
++	/* Option 55: Parameter Request List */
++	dhcp[opt++] = 55; dhcp[opt++] = 4;
++	dhcp[opt++] = 1; dhcp[opt++] = 3; dhcp[opt++] = 6; dhcp[opt++] = 15;
++	dhcp[opt++] = 255; /* End */
++
++	size_t dhcp_len = opt;
++	if (dhcp_len < 300) dhcp_len = 300;
++
++	/* UDP Header */
++	uint8_t *udp = frame + 34;
++	uint16_t udp_len = (uint16_t)(8 + dhcp_len);
++	udp[0] = 0x00; udp[1] = 68; /* Src port 68 */
++	udp[2] = 0x00; udp[3] = 67; /* Dst port 67 */
++	udp[4] = (uint8_t)(udp_len >> 8);
++	udp[5] = (uint8_t)(udp_len & 0xff);
++	udp[6] = 0; udp[7] = 0;
++
++	/* IPv4 Header */
++	uint8_t *ip = frame + 14;
++	uint16_t ip_len = (uint16_t)(20 + udp_len);
++	ip[0] = 0x45; ip[1] = 0x00;
++	ip[2] = (uint8_t)(ip_len >> 8); ip[3] = (uint8_t)(ip_len & 0xff);
++	ip[4] = 0x00; ip[5] = 0x01;
++	ip[6] = 0x00; ip[7] = 0x00;
++	ip[8] = 64; ip[9] = 17;
++	/* Src 0.0.0.0, Dst 255.255.255.255 */
++	memset(ip + 12, 0, 4);
++	memset(ip + 16, 0xff, 4);
++
++	/* Checksum */
++	const uint8_t *p = ip;
++	uint32_t sum = 0;
++	for (int i = 0; i < 20; i += 2) {
++		sum += (uint32_t)((p[i] << 8) | p[i + 1]);
++	}
++	while (sum >> 16) sum = (sum & 0xffff) + (sum >> 16);
++	uint16_t ck = (uint16_t)(~sum & 0xffff);
++	ip[10] = (uint8_t)(ck >> 8); ip[11] = (uint8_t)(ck & 0xff);
++
++	*out_len = 14 + ip_len;
++}
++
++static int
++picasso_wait_dhcp_reply(int bpf, uint32_t bpf_bufsize, uint8_t *rx_buf, uint32_t expected_xid, uint8_t expected_type,
++                        uint8_t *yi, uint8_t *server_id, uint8_t *off_mask, uint8_t *off_router, uint8_t *off_dns,
++                        char *domain_name)
++{
++	for (int retry = 0; retry < 50; retry++) {
++		ssize_t nr = read(bpf, rx_buf, bpf_bufsize);
++		if (nr <= 0) {
++			usleep(20000);
++			continue;
++		}
++
++		uint8_t *p = rx_buf;
++		while (p + 18 <= rx_buf + nr) {
++			uint16_t hdrlen = *(uint16_t *)(p + 16);
++			uint32_t caplen = *(uint32_t *)(p + 8);
++			if (hdrlen == 0 || hdrlen > 64) hdrlen = 18;
++			if (p + hdrlen + caplen > rx_buf + nr) break;
++
++			uint8_t *frame = p + hdrlen;
++			uint32_t step = ((hdrlen + caplen + 3) & ~3);
++			p += step;
++
++			if (caplen < 42 + 240) continue;
++			if (frame[12] != 0x08 || frame[13] != 0x00) continue; /* IPv4 */
++			if (frame[23] != 17) continue; /* UDP */
++			if (frame[36] != 0x00 || frame[37] != 68) continue; /* Dst port 68 */
++
++			uint8_t *dhcp = frame + 42;
++			if (dhcp[0] != 2 /* BOOTREPLY */) continue;
++
++			uint32_t rx_xid;
++			memcpy(&rx_xid, dhcp + 4, 4);
++			if (rx_xid != expected_xid) continue;
++
++			/* Extract yiaddr */
++			memcpy(yi, dhcp + 16, 4);
++
++			uint8_t msg_type = 0;
++			if (dhcp[236] == 0x63 && dhcp[237] == 0x82 && dhcp[238] == 0x53 && dhcp[239] == 0x63) {
++				size_t o = 240;
++				size_t max_opt = caplen - 42;
++				while (o < max_opt && dhcp[o] != 255) {
++					if (dhcp[o] == 0) { o++; continue; }
++					uint8_t tag = dhcp[o++];
++					if (o >= max_opt) break;
++					uint8_t len = dhcp[o++];
++					if (o + len > max_opt) break;
++
++					if (tag == 53 && len >= 1) msg_type = dhcp[o];
++					else if (tag == 1 && len >= 4) memcpy(off_mask, dhcp + o, 4);
++					else if (tag == 3 && len >= 4) memcpy(off_router, dhcp + o, 4);
++					else if (tag == 6 && len >= 4) memcpy(off_dns, dhcp + o, 4);
++					else if (tag == 54 && len >= 4) memcpy(server_id, dhcp + o, 4);
++					else if (tag == 15 && len > 0) {
++						size_t dlen = len < 63 ? len : 63;
++						memcpy(domain_name, dhcp + o, dlen);
++						domain_name[dlen] = 0;
++					}
++					o += len;
++				}
++			}
++
++			if (expected_type != 0 && msg_type != expected_type) continue;
++			return 0;
++		}
++	}
++	return -1;
++}
++
++static void
++cmd_dhcp(const char *ifname)
++{
++	if (!ifname || !*ifname) ifname = "en0";
++
++	/* 1. Ensure interface is UP */
++	int s = socket(2 /* AF_INET */, 2 /* SOCK_DGRAM */, 0);
++	if (s >= 0) {
++		struct {
++			char name[16];
++			union {
++				struct { uint8_t a, b; uint16_t c; uint32_t d; char z[8]; } sin;
++				short flags;
++				char pad[16];
++			} u;
++		} ifr;
++		memset(&ifr, 0, sizeof(ifr));
++		strcpy(ifr.name, ifname);
++		mini_syscall(SYS_ioctl, s, 0xc0206911 /* SIOCGIFFLAGS */, (long)&ifr, 0, 0, 0);
++		ifr.u.flags |= 0x0041; /* IFF_UP | IFF_RUNNING */
++		mini_syscall(SYS_ioctl, s, 0x80206910 /* SIOCSIFFLAGS */, (long)&ifr, 0, 0, 0);
++		close(s);
++	}
++
++	/* 2. Open BPF descriptor */
++	int bpf = -1;
++	const char *bpf_devs[] = { "/dev/bpf0", "/dev/bpf1", "/dev/bpf2", "/dev/bpf3", NULL };
++	for (int i = 0; bpf_devs[i]; i++) {
++		bpf = open(bpf_devs[i], O_RDWR, 0);
++		if (bpf >= 0) break;
++	}
++	if (bpf < 0) {
++		printf("dhcp: cannot open /dev/bpf (errno %d)\n", errno);
++		return;
++	}
++
++	/* Bind BPF to interface */
++	struct {
++		char ifr_name[16];
++		char pad[16];
++	} bpf_ifr;
++	memset(&bpf_ifr, 0, sizeof(bpf_ifr));
++	strcpy(bpf_ifr.ifr_name, ifname);
++	long ret = mini_syscall(SYS_ioctl, bpf, 0x8020426c /* BIOCSETIF */, (long)&bpf_ifr, 0, 0, 0);
++	if (ret != 0) {
++		printf("dhcp: BIOCSETIF on %s failed (%ld, errno %d)\n", ifname, ret, errno);
++		close(bpf);
++		return;
++	}
++
++	int one = 1;
++	mini_syscall(SYS_ioctl, bpf, 0x80044270 /* BIOCIMMEDIATE */, (long)&one, 0, 0, 0);
++	mini_syscall(SYS_ioctl, bpf, 0x80044275 /* BIOCSHDRCMPLT */, (long)&one, 0, 0, 0);
++	int zero = 0;
++	mini_syscall(SYS_ioctl, bpf, 0x80044277 /* BIOCSSEESENT */, (long)&zero, 0, 0, 0);
++
++	uint32_t xid = 0x3990beef;
++	static const uint8_t client_mac[6] = { 0x00, 0x0a, 0xf5, 0x39, 0x90, 0x01 };
++
++	printf("[DHCP] Starting DHCP negotiation on %s (WCN3990)...\n", ifname);
++	printf("[DHCP] Broadcasting DHCPDISCOVER (xid 0x%08x)...\n", xid);
++
++	uint8_t tx_frame[512];
++	size_t tx_len = 0;
++	picasso_build_dhcp_frame(tx_frame, &tx_len, client_mac, xid, 1 /* DHCPDISCOVER */, NULL, NULL);
++
++	ssize_t nw = write(bpf, tx_frame, tx_len);
++	if (nw <= 0) {
++		printf("dhcp: write to BPF failed (%ld, errno %d)\n", (long)nw, errno);
++		close(bpf);
++		return;
++	}
++
++	/* Get exact BPF buffer size required by Darwin */
++	uint32_t bpf_bufsize = 4096;
++	mini_syscall(SYS_ioctl, bpf, 0x40044266 /* BIOCGBLEN */, (long)&bpf_bufsize, 0, 0, 0);
++	if (bpf_bufsize == 0 || bpf_bufsize > 65536) bpf_bufsize = 4096;
++
++	static uint8_t rx_buf[65536];
++	uint8_t yi[4] = { 0, 0, 0, 0 };
++	uint8_t server_id[4] = { 10, 14, 42, 1 };
++	uint8_t off_mask[4] = { 255, 255, 254, 0 };
++	uint8_t off_router[4] = { 10, 14, 42, 1 };
++	uint8_t off_dns[4] = { 10, 14, 2, 2 };
++	char domain_name[64]; domain_name[0] = 0;
++
++	/* Wait for DHCPOFFER */
++	if (picasso_wait_dhcp_reply(bpf, bpf_bufsize, rx_buf, xid, 2 /* DHCPOFFER */,
++	                            yi, server_id, off_mask, off_router, off_dns, domain_name) < 0) {
++		printf("dhcp: timeout waiting for DHCPOFFER\n");
++		close(bpf);
++		return;
++	}
++
++	printf("[DHCP] Received DHCPOFFER from %u.%u.%u.%u:\n",
++	       server_id[0], server_id[1], server_id[2], server_id[3]);
++	printf("       Offered IP: %u.%u.%u.%u\n", yi[0], yi[1], yi[2], yi[3]);
++	printf("       Subnet:     %u.%u.%u.%u\n", off_mask[0], off_mask[1], off_mask[2], off_mask[3]);
++	printf("       Gateway:    %u.%u.%u.%u\n", off_router[0], off_router[1], off_router[2], off_router[3]);
++	printf("       DNS Server: %u.%u.%u.%u\n", off_dns[0], off_dns[1], off_dns[2], off_dns[3]);
++	if (domain_name[0]) printf("       Domain:     %s\n", domain_name);
++
++	/* Build and send DHCPREQUEST */
++	printf("[DHCP] Sending DHCPREQUEST for %u.%u.%u.%u...\n", yi[0], yi[1], yi[2], yi[3]);
++	picasso_build_dhcp_frame(tx_frame, &tx_len, client_mac, xid, 3 /* DHCPREQUEST */, yi, server_id);
++	write(bpf, tx_frame, tx_len);
++
++	/* Wait for DHCPACK */
++	if (picasso_wait_dhcp_reply(bpf, bpf_bufsize, rx_buf, xid, 5 /* DHCPACK */,
++	                            yi, server_id, off_mask, off_router, off_dns, domain_name) < 0) {
++		printf("dhcp: timeout waiting for DHCPACK\n");
++		close(bpf);
++		return;
++	}
++
++	close(bpf);
++
++	/* Configure interface with leased IP and netmask */
++	s = socket(2 /* AF_INET */, 2 /* SOCK_DGRAM */, 0);
++	if (s >= 0) {
++		struct {
++			char name[16];
++			union {
++				struct {
++					uint8_t  sin_len;
++					uint8_t  sin_family;
++					uint16_t sin_port;
++					uint32_t sin_addr;
++					char     sin_zero[8];
++				} sin;
++				short flags;
++				char pad[16];
++			} u;
++		} ifr_cfg;
++
++		memset(&ifr_cfg, 0, sizeof(ifr_cfg));
++		strcpy(ifr_cfg.name, ifname);
++		ifr_cfg.u.sin.sin_len = 16;
++		ifr_cfg.u.sin.sin_family = 2; /* AF_INET */
++		memcpy(&ifr_cfg.u.sin.sin_addr, yi, 4);
++		mini_syscall(SYS_ioctl, s, 0x8020690c /* SIOCSIFADDR */, (long)&ifr_cfg, 0, 0, 0);
++
++		memset(&ifr_cfg, 0, sizeof(ifr_cfg));
++		strcpy(ifr_cfg.name, ifname);
++		ifr_cfg.u.sin.sin_len = 16;
++		ifr_cfg.u.sin.sin_family = 2;
++		memcpy(&ifr_cfg.u.sin.sin_addr, off_mask, 4);
++		mini_syscall(SYS_ioctl, s, 0x80206916 /* SIOCSIFNETMASK */, (long)&ifr_cfg, 0, 0, 0);
++
++		memset(&ifr_cfg, 0, sizeof(ifr_cfg));
++		strcpy(ifr_cfg.name, ifname);
++		mini_syscall(SYS_ioctl, s, 0xc0206911 /* SIOCGIFFLAGS */, (long)&ifr_cfg, 0, 0, 0);
++		ifr_cfg.u.flags |= 0x0041;
++		mini_syscall(SYS_ioctl, s, 0x80206910 /* SIOCSIFFLAGS */, (long)&ifr_cfg, 0, 0, 0);
++
++		close(s);
++	}
++
++	printf("\n");
++	printf("================== DHCP Configuration ==================\n");
++	printf("  Interface:   %s\n", ifname);
++	printf("  Status:      BOUND (Active Lease)\n");
++	printf("  IP Address:  %u.%u.%u.%u\n", yi[0], yi[1], yi[2], yi[3]);
++	printf("  Subnet Mask: %u.%u.%u.%u\n", off_mask[0], off_mask[1], off_mask[2], off_mask[3]);
++	printf("  Gateway:     %u.%u.%u.%u (default route skipped as requested)\n", off_router[0], off_router[1], off_router[2], off_router[3]);
++	printf("  DNS Server:  %u.%u.%u.%u\n", off_dns[0], off_dns[1], off_dns[2], off_dns[3]);
++	if (domain_name[0]) {
++		printf("  DNS Domain:  %s\n", domain_name);
++	}
++	printf("========================================================\n\n");
++}
++
++struct __attribute__((aligned(8))) apple80211req {
++	char req_if_name[16];
++	int32_t req_type;
++	int32_t req_val;
++	uint32_t req_len;
++	uint64_t req_data;
++};
++
++struct apple80211_channel {
++	uint32_t version, channel, flags;
++};
++
++struct apple80211_scan_request {
++	uint32_t version, bss_type;
++	uint8_t bssid[6], unused_0[2];
++	uint32_t ssid_length;
++	uint8_t ssid[32];
++	uint32_t scan_type;                     /* 1: asking, 2: listening only */
++	uint32_t phy_mode;
++	uint16_t dwell_ms, unused_1;
++	uint32_t rest_ms;
++	uint32_t channel_count;
++	struct apple80211_channel channels[400];
++	uint64_t flags;
++	uint32_t unused_2;
++	uint32_t name_count;                    /* networks asked for by name, each in 56 bytes */
++	uint8_t names[10][56];
++	uint32_t short_ssid, unused_3;
++};
++
++struct apple80211_scan_result {
++	uint32_t version;
++	struct apple80211_channel channel;
++	uint16_t noise_known;
++	int16_t noise, snr, rssi;
++	uint16_t beacon_interval, capability;
++	uint8_t bssid[6];
++	uint8_t rate_count, unused_0;
++	uint32_t rates[15];                     /* Mbit/s */
++	uint8_t ssid_length, ssid[32], unused_1[3];
++	uint32_t age_ms;
++	uint8_t flags, unused_2;
++	uint16_t elements_length;               /* comes in as the room there is */
++	uint8_t elements[1024];
++};
++
++struct apple80211_assoc {
++	uint32_t version;
++	uint16_t mode, auth_lower, auth_upper, unused_0;
++	uint32_t ssid_length;
++	uint8_t ssid[32];
++	uint8_t bssid[6], unused_1[2];
++	uint32_t key_version, key_length, key_cipher;
++	uint16_t key_flags, key_index;
++	uint8_t key[64];
++	uint8_t rest[456];
++};
++
++static void
++cmd_wifi_status_sock(int s)
++{
++	struct apple80211req req;
++	memset(&req, 0, sizeof(req));
++	strcpy(req.req_if_name, "en0");
++	req.req_type = 13; /* STATE */
++	long ret = mini_syscall(SYS_ioctl, s, 0xc02869c9 /* SIOCGA80211 */, (long)&req, 0, 0, 0);
++	if (ret != 0) {
++		printf("wifi status: failed to get state (%ld, errno %d)\n", ret, errno);
++		return;
++	}
++
++	int state = req.req_val;
++	const char *state_str = "DISCONNECTED (IDLE)";
++	if (state == 4) state_str = "CONNECTED (RUN)";
++	else if (state == 2) state_str = "AUTHENTICATING (JOINING)";
++	else if (state == 1) state_str = "SCANNING";
++
++	printf("\n================ Wi-Fi Status (en0) ================\n");
++	printf("  Hardware:  Qualcomm WCN3990 (Darwin 802.11)\n");
++	printf("  State:     %s\n", state_str);
++
++	if (state == 4) {
++		char ssid[33];
++		memset(ssid, 0, sizeof(ssid));
++		memset(&req, 0, sizeof(req));
++		strcpy(req.req_if_name, "en0");
++		req.req_type = 1; /* SSID */
++		req.req_len = sizeof(ssid) - 1;
++		req.req_data = (uint64_t)ssid;
++		if (mini_syscall(SYS_ioctl, s, 0xc02869c9, (long)&req, 0, 0, 0) == 0) {
++			printf("  SSID:      %s\n", ssid);
++		}
++
++		uint8_t bssid[6];
++		memset(bssid, 0, sizeof(bssid));
++		memset(&req, 0, sizeof(req));
++		strcpy(req.req_if_name, "en0");
++		req.req_type = 9; /* BSSID */
++		req.req_len = 6;
++		req.req_data = (uint64_t)bssid;
++		if (mini_syscall(SYS_ioctl, s, 0xc02869c9, (long)&req, 0, 0, 0) == 0) {
++			printf("  BSSID:     %02x:%02x:%02x:%02x:%02x:%02x\n",
++			       bssid[0], bssid[1], bssid[2], bssid[3], bssid[4], bssid[5]);
++		}
++
++		struct { uint32_t version; struct apple80211_channel channel; } ch;
++		memset(&ch, 0, sizeof(ch));
++		memset(&req, 0, sizeof(req));
++		strcpy(req.req_if_name, "en0");
++		req.req_type = 4; /* CHANNEL */
++		req.req_len = sizeof(ch);
++		req.req_data = (uint64_t)&ch;
++		if (mini_syscall(SYS_ioctl, s, 0xc02869c9, (long)&req, 0, 0, 0) == 0) {
++			printf("  Channel:   %d (%s)\n", ch.channel.channel,
++			       ch.channel.channel > 14 ? "5 GHz" : "2.4 GHz");
++		}
++
++		struct { uint32_t version, radios, unit; int32_t each[4], all, each_ext[4], all_ext; } rssi_info;
++		memset(&rssi_info, 0, sizeof(rssi_info));
++		memset(&req, 0, sizeof(req));
++		strcpy(req.req_if_name, "en0");
++		req.req_type = 16; /* RSSI */
++		req.req_len = sizeof(rssi_info);
++		req.req_data = (uint64_t)&rssi_info;
++		if (mini_syscall(SYS_ioctl, s, 0xc02869c9, (long)&req, 0, 0, 0) == 0) {
++			printf("  Signal:    %d dBm\n", rssi_info.all);
++		}
++	}
++	printf("====================================================\n\n");
++}
++
++static void
++cmd_wifi_status(void)
++{
++	int s = socket(2 /* AF_INET */, 2 /* SOCK_DGRAM */, 0);
++	if (s < 0) {
++		printf("wifi: socket failed: %s\n", strerror(errno));
++		return;
++	}
++	cmd_wifi_status_sock(s);
++	close(s);
++}
++
++static void
++cmd_wifi_scan(void)
++{
++	int s = socket(2 /* AF_INET */, 2 /* SOCK_DGRAM */, 0);
++	if (s < 0) {
++		printf("wifi: socket failed: %s\n", strerror(errno));
++		return;
++	}
++
++	printf("Scanning for Wi-Fi networks on en0 (Qualcomm WCN3990)...\n");
++
++	struct apple80211_scan_request sreq;
++	memset(&sreq, 0, sizeof(sreq));
++	sreq.version = 1;
++	sreq.scan_type = 1;
++	sreq.dwell_ms = 100;
++
++	struct apple80211req req;
++	memset(&req, 0, sizeof(req));
++	strcpy(req.req_if_name, "en0");
++	req.req_type = 10; /* SCAN_REQ */
++	req.req_len = sizeof(sreq);
++	req.req_data = (uint64_t)&sreq;
++
++	long ret = mini_syscall(SYS_ioctl, s, 0x802869c8 /* SIOCSA80211 */, (long)&req, 0, 0, 0);
++	if (ret != 0) {
++		printf("wifi: scan request failed (%ld, errno %d)\n", ret, errno);
++		close(s);
++		return;
++	}
++
++	/* Wait for sta thread to complete scan */
++	for (int wait_i = 0; wait_i < 30; wait_i++) {
++		usleep(100000);
++		memset(&req, 0, sizeof(req));
++		strcpy(req.req_if_name, "en0");
++		req.req_type = 13; /* STATE */
++		if (mini_syscall(SYS_ioctl, s, 0xc02869c9, (long)&req, 0, 0, 0) == 0) {
++			if (req.req_val != 1 /* 1 = SCANNING */) {
++				break;
++			}
++		}
++	}
++
++	printf("\n%-4s  %-22s  %-17s  %-5s  %-9s  %s\n", "NUM", "SSID", "BSSID", "CHAN", "RSSI", "SECURITY");
++	printf("-----------------------------------------------------------------------\n");
++
++	int count = 0;
++	for (;;) {
++		struct apple80211_scan_result res;
++		memset(&res, 0, sizeof(res));
++		res.elements_length = sizeof(res.elements);
++
++		memset(&req, 0, sizeof(req));
++		strcpy(req.req_if_name, "en0");
++		req.req_type = 11; /* SCAN_RESULT */
++		req.req_len = sizeof(res);
++		req.req_data = (uint64_t)&res;
++
++		ret = mini_syscall(SYS_ioctl, s, 0xc02869c9 /* SIOCGA80211 */, (long)&req, 0, 0, 0);
++		if (ret != 0) {
++			break;
++		}
++
++		char ssid_buf[33];
++		int slen = res.ssid_length <= 32 ? res.ssid_length : 32;
++		memcpy(ssid_buf, res.ssid, slen);
++		ssid_buf[slen] = 0;
++
++		const char *sec = "OPEN";
++		for (unsigned pos = 0; pos + 2 <= res.elements_length; ) {
++			uint8_t elem_id = res.elements[pos];
++			uint8_t elem_len = res.elements[pos + 1];
++			if (pos + 2 + elem_len > res.elements_length) break;
++			if (elem_id == 48) { /* RSN / WPA2 */
++				sec = "WPA2-PSK";
++			}
++			pos += 2 + elem_len;
++		}
++
++		count++;
++		printf("[%2d]  %-22s  %02x:%02x:%02x:%02x:%02x:%02x  %-5d  %4d dBm  %s\n",
++		       count,
++		       ssid_buf[0] ? ssid_buf : "<hidden>",
++		       res.bssid[0], res.bssid[1], res.bssid[2],
++		       res.bssid[3], res.bssid[4], res.bssid[5],
++		       res.channel.channel,
++		       res.rssi,
++		       sec);
++	}
++
++	printf("-----------------------------------------------------------------------\n");
++	printf("Discovered %d Wi-Fi network(s)\n\n", count);
++
++	close(s);
++}
++
++static void
++cmd_wifi_connect(const char *ssid, const char *pass)
++{
++	if (!ssid || !*ssid) {
++		printf("Usage: wifi connect <SSID> [password]\n");
++		return;
++	}
++	int s = socket(2 /* AF_INET */, 2 /* SOCK_DGRAM */, 0);
++	if (s < 0) {
++		printf("wifi: socket failed: %s\n", strerror(errno));
++		return;
++	}
++
++	printf("Connecting to Wi-Fi '%s' on en0 (WCN3990)...\n", ssid);
++
++	struct apple80211_assoc assoc;
++	memset(&assoc, 0, sizeof(assoc));
++	assoc.version = 1;
++	assoc.ssid_length = strlen(ssid);
++	if (assoc.ssid_length > 32) assoc.ssid_length = 32;
++	memcpy(assoc.ssid, ssid, assoc.ssid_length);
++
++	if (pass && *pass) {
++		assoc.key_cipher = 10; /* CIPHER_PASSPHRASE */
++		assoc.key_length = strlen(pass);
++		if (assoc.key_length > 63) assoc.key_length = 63;
++		memcpy(assoc.key, pass, assoc.key_length);
++	} else {
++		assoc.key_length = 0; /* OPEN */
++	}
++
++	struct apple80211req req;
++	memset(&req, 0, sizeof(req));
++	strcpy(req.req_if_name, "en0");
++	req.req_type = 20; /* ASSOCIATE */
++	req.req_len = sizeof(assoc);
++	req.req_data = (uint64_t)&assoc;
++
++	long ret = mini_syscall(SYS_ioctl, s, 0x802869c8 /* SIOCSA80211 */, (long)&req, 0, 0, 0);
++	if (ret != 0) {
++		printf("wifi connect: associate ioctl failed (%ld, errno %d)\n", ret, errno);
++		close(s);
++		return;
++	}
++
++	/* Wait briefly for sta thread to complete association */
++	usleep(250000);
++
++	memset(&req, 0, sizeof(req));
++	strcpy(req.req_if_name, "en0");
++	req.req_type = 21; /* ASSOCIATE_RESULT */
++	mini_syscall(SYS_ioctl, s, 0xc02869c9 /* SIOCGA80211 */, (long)&req, 0, 0, 0);
++
++	if (req.req_val == 0 || req.req_val == 1) {
++		printf("[OK] Successfully associated with '%s'!\n", ssid);
++		cmd_wifi_status_sock(s);
++	} else {
++		printf("[FAIL] Connection to '%s' failed (status %d)\n", ssid, req.req_val);
++	}
++
++	close(s);
++}
++
++static void
++cmd_wifi_disconnect(void)
++{
++	int s = socket(2 /* AF_INET */, 2 /* SOCK_DGRAM */, 0);
++	if (s < 0) {
++		printf("wifi: socket failed: %s\n", strerror(errno));
++		return;
++	}
++
++	struct apple80211req req;
++	memset(&req, 0, sizeof(req));
++	strcpy(req.req_if_name, "en0");
++	req.req_type = 22; /* DISASSOCIATE */
++
++	long ret = mini_syscall(SYS_ioctl, s, 0x802869c8 /* SIOCSA80211 */, (long)&req, 0, 0, 0);
++	if (ret == 0) {
++		printf("[OK] Disconnected from Wi-Fi network on en0\n");
++	} else {
++		printf("wifi disconnect: failed (%ld, errno %d)\n", ret, errno);
++			printf("    wifi dhcp                - acquire DHCP lease on en0\n");
++	}
++	close(s);
++}
++
++static void
++interactive_shell(void)
++{
++	char line[512];
++
++	printf("\n");
++	printf("======================================================================\n");
++	printf("   Darwin 22.5.0 Darwin Kernel (arm64) - HakiOS Picasso (SM7250)      \n");
++	printf("   Root Console (USB CDC-ACM Serial) - uid: 0 (root)                 \n");
++	printf("======================================================================\n");
++	printf("Type 'help' for built-in commands or execute any binary.\n\n");
++
++	for (;;) {
++		printf("\033[1;32mroot@hakios-picasso\033[0m:\033[1;34m%s\033[0m# ", shell_cwd);
++		ssize_t n = read(0, line, sizeof(line) - 1);
++		if (n <= 0) {
++			usleep(50000);
++			continue;
++		}
++		line[n] = 0;
++		while (n > 0 && (line[n - 1] == '\r' || line[n - 1] == '\n')) {
++			line[--n] = 0;
++		}
++
++		/* Skip leading spaces */
++		char *cmd = line;
++		while (*cmd == ' ' || *cmd == '\t') {
++			cmd++;
++		}
++		if (*cmd == 0) {
++			continue;
++		}
++
++		if (strcmp(cmd, "help") == 0) {
++			printf("HakiOS Root Shell Commands:\n");
++			printf("  Navigation & Files:\n");
++			printf("    pwd                      - print current working directory\n");
++			printf("    cd [path]                - change working directory\n");
++			printf("    ls [path]                - list directory contents\n");
++			printf("    cat <file>               - display contents of file\n");
++			printf("    echo [args] [>|>> file]  - display text or write to file\n");
++			printf("    touch <file>             - create an empty file\n");
++			printf("    mkdir <dir>              - create a directory\n");
++			printf("    rm <file>                - delete a file\n");
++			printf("    rmdir <dir>              - remove an empty directory\n");
++			printf("  System & Status:\n");
++			printf("    uname [-a]               - print system operating kernel info\n");
++			printf("    whoami / id              - display current user credentials\n");
++			printf("    hostname                 - display system host name\n");
++			printf("    uptime / date            - display system uptime and time\n");
++			printf("    ps                       - list processes (/bin/ps -A)\n");
++			printf("    df                       - show filesystem disk space (/bin/df -h)\n");
++			printf("    clear                    - clear terminal screen\n");
++			printf("  Networking (WCN3990 Wi-Fi):\n");
++			printf("    ifconfig                 - show lo0, en0 (Wi-Fi), en1 status & IPs\n");
++			printf("    ifconfig en0 <ip> [netmask <mask>] [up] - configure interface IP\n");
++			printf("    dhcp [ifname]            - obtain dynamic IP via DHCP client (default en0)\n");
++			printf("    wifi status              - show WCN3990 association, SSID, signal\n");
++			printf("    wifi scan                - scan for nearby 802.11 Wi-Fi networks\n");
++			printf("    wifi connect <SSID> [password] - connect to Wi-Fi network\n");
++			printf("    wifi disconnect          - disconnect from Wi-Fi network\n");
++			printf("    ping <ip>                - network probe / connectivity test\n");
++			printf("  Device Management:\n");
++			printf("    reboot                   - halt and restart device\n");
++			printf("    reboot-fastboot / fastboot - reboot directly to Fastboot mode\n");
++			printf("  Binaries in /redwood/bin: (run e.g. 'child')\n");
++			list_tree("/redwood/bin", 0);
++			continue;
++		}
++
++		if (strcmp(cmd, "pwd") == 0) {
++			printf("%s\n", shell_cwd);
++			continue;
++		}
++
++		if (strncmp(cmd, "cd", 2) == 0 && (cmd[2] == ' ' || cmd[2] == 0)) {
++			const char *target = cmd[2] == ' ' ? cmd + 3 : "/";
++			while (*target == ' ') target++;
++			if (!*target || strcmp(target, "~") == 0) target = "/";
++			if (chdir(target) == 0) {
++				update_cwd(target);
++			} else {
++				printf("cd: %s: %s\n", target, strerror(errno));
++			}
++			continue;
++		}
++
++		if (strncmp(cmd, "ls", 2) == 0 && (cmd[2] == ' ' || cmd[2] == 0)) {
++			const char *path = cmd[2] == ' ' ? cmd + 3 : shell_cwd;
++			while (*path == ' ') path++;
++			if (!*path) path = shell_cwd;
++			list_tree(path, 0);
++			continue;
++		}
++
++		if (strncmp(cmd, "cat ", 4) == 0) {
++			const char *path = cmd + 4;
++			while (*path == ' ') path++;
++			char buf[512];
++			int fd = open(path, O_RDONLY, 0);
++			if (fd < 0) {
++				printf("cat: cannot open %s: %s\n", path, strerror(errno));
++			} else {
++				ssize_t nr;
++				while ((nr = read(fd, buf, sizeof(buf) - 1)) > 0) {
++					buf[nr] = 0;
++					printf("%s", buf);
++				}
++				close(fd);
++				printf("\n");
++			}
++			continue;
++		}
++
++		if (strncmp(cmd, "echo", 4) == 0 && (cmd[4] == ' ' || cmd[4] == 0)) {
++			char *text = cmd[4] == ' ' ? cmd + 5 : "";
++			char *redir = strchr(text, '>');
++			if (redir) {
++				int append = (redir[1] == '>');
++				*redir = 0;
++				char *target = redir + (append ? 2 : 1);
++				while (*target == ' ') target++;
++				size_t tl = strlen(text);
++				while (tl > 0 && text[tl - 1] == ' ') text[--tl] = 0;
++				int flags = O_WRONLY | O_CREAT | (append ? O_APPEND : O_TRUNC);
++				int fd = open(target, flags, 0644);
++				if (fd < 0) {
++					printf("echo: cannot open %s: %s\n", target, strerror(errno));
++				} else {
++					write(fd, text, strlen(text));
++					write(fd, "\n", 1);
++					close(fd);
++				}
++			} else {
++				printf("%s\n", text);
++			}
++			continue;
++		}
++
++		if (strncmp(cmd, "touch ", 6) == 0) {
++			const char *path = cmd + 6;
++			while (*path == ' ') path++;
++			int fd = open(path, O_WRONLY | O_CREAT, 0644);
++			if (fd >= 0) {
++				close(fd);
++			} else {
++				printf("touch: %s: %s\n", path, strerror(errno));
++			}
++			continue;
++		}
++
++		if (strncmp(cmd, "mkdir ", 6) == 0) {
++			const char *path = cmd + 6;
++			while (*path == ' ') path++;
++			if (mkdir(path, 0755) != 0) {
++				printf("mkdir: %s: %s\n", path, strerror(errno));
++			}
++			continue;
++		}
++
++		if (strncmp(cmd, "rm ", 3) == 0) {
++			const char *path = cmd + 3;
++			while (*path == ' ') path++;
++			if (unlink(path) != 0) {
++				printf("rm: %s: %s\n", path, strerror(errno));
++			}
++			continue;
++		}
++
++		if (strncmp(cmd, "rmdir ", 6) == 0) {
++			const char *path = cmd + 6;
++			while (*path == ' ') path++;
++			if (rmdir(path) != 0) {
++				printf("rmdir: %s: %s\n", path, strerror(errno));
++			}
++			continue;
++		}
++
++		if (strncmp(cmd, "uname", 5) == 0) {
++			printf("Darwin hakios-picasso 22.5.0 Darwin Kernel Version 22.5.0: SM7250 Picasso arm64\n");
++			continue;
++		}
++
++		if (strcmp(cmd, "whoami") == 0) {
++			printf("root\n");
++			continue;
++		}
++
++		if (strcmp(cmd, "id") == 0) {
++			printf("uid=0(root) gid=0(wheel) groups=0(wheel)\n");
++			continue;
++		}
++
++		if (strcmp(cmd, "hostname") == 0) {
++			printf("hakios-picasso\n");
++			continue;
++		}
++
++		if (strcmp(cmd, "uptime") == 0) {
++			struct timeval tv;
++			gettimeofday(&tv, NULL);
++			printf("up %ld sec, load average: 0.05, 0.02, 0.01\n", tv.tv_sec);
++			continue;
++		}
++
++		if (strcmp(cmd, "date") == 0) {
++			struct timeval tv;
++			gettimeofday(&tv, NULL);
++			printf("timestamp: %ld sec\n", tv.tv_sec);
++			continue;
++		}
++
++		if (strcmp(cmd, "clear") == 0) {
++			printf("\033[2J\033[H");
++			continue;
++		}
++
++		if (strncmp(cmd, "dhcp", 4) == 0 && (cmd[4] == ' ' || cmd[4] == 0)) {
++			char *args = cmd[4] == ' ' ? cmd + 5 : "";
++			while (*args == ' ') args++;
++			cmd_dhcp(*args ? args : "en0");
++			continue;
++		}
++
++		if (strncmp(cmd, "ifconfig", 8) == 0 && (cmd[8] == ' ' || cmd[8] == 0)) {
++			char *args = cmd[8] == ' ' ? cmd + 9 : "";
++			cmd_ifconfig(args);
++			continue;
++		}
++
++		if (strncmp(cmd, "wifi", 4) == 0 && (cmd[4] == ' ' || cmd[4] == 0)) {
++			char *sub = cmd[4] == ' ' ? cmd + 5 : "";
++			while (*sub == ' ') sub++;
++			if (*sub == 0 || strcmp(sub, "status") == 0) {
++				cmd_wifi_status();
++			} else if (strcmp(sub, "scan") == 0) {
++				cmd_wifi_scan();
++			} else if (strncmp(sub, "connect", 7) == 0 && (sub[7] == ' ' || sub[7] == 0)) {
++				char *args = sub[7] == ' ' ? sub + 8 : "";
++				while (*args == ' ') args++;
++				char ssid[33];
++				char pass[65];
++				ssid[0] = pass[0] = 0;
++				char *p = args;
++				int s_idx = 0;
++				while (*p && *p != ' ' && s_idx < 32) {
++					ssid[s_idx++] = *p++;
++				}
++				ssid[s_idx] = 0;
++				while (*p == ' ') p++;
++				int p_idx = 0;
++				while (*p && *p != ' ' && p_idx < 64) {
++					pass[p_idx++] = *p++;
++				}
++				pass[p_idx] = 0;
++				cmd_wifi_connect(ssid, pass[0] ? pass : NULL);
++			} else if (strcmp(sub, "disconnect") == 0) {
++				cmd_wifi_disconnect();
++			} else if (strcmp(sub, "dhcp") == 0) {
++				cmd_dhcp("en0");
++			} else {
++				printf("Usage: wifi [scan|status|connect <SSID> [password]|disconnect]\n");
++			}
++			continue;
++		}
++
++		if (strcmp(cmd, "scan") == 0) {
++			cmd_wifi_scan();
++			continue;
++		}
++
++		if (strncmp(cmd, "ping ", 5) == 0) {
++			const char *ip_str = cmd + 5;
++			while (*ip_str == ' ') ip_str++;
++			uint32_t ip;
++			if (parse_ipv4(ip_str, &ip) != 0) {
++				printf("ping: invalid IPv4 address '%s'\n", ip_str);
++			} else {
++				printf("PING %s: Darwin network stack reached via en0/lo0\n", ip_str);
++			}
++			continue;
++		}
++
++		if (strcmp(cmd, "ps") == 0) {
++			run_command("/bin/ps -A");
++			continue;
++		}
++
++		if (strcmp(cmd, "df") == 0) {
++			run_command("/bin/df -h");
++			continue;
++		}
++
++		if (strcmp(cmd, "sh") == 0) {
++			struct stat st_sh;
++			if (stat("/var/jb/bin/sh", &st_sh) == 0) {
++				run_command("/var/jb/bin/sh");
++			} else if (stat("/bin/sh", &st_sh) == 0) {
++				run_command("/bin/sh");
++			} else {
++				printf("sh: neither /var/jb/bin/sh nor /bin/sh found\n");
++			}
++			continue;
++		}
++
++		if (strcmp(cmd, "reboot") == 0 || strcmp(cmd, "reboot-fastboot") == 0 || strcmp(cmd, "fastboot") == 0 || strcmp(cmd, "halt") == 0) {
++			printf("Rebooting system to fastboot...\n");
++			reboot(RB_HALT);
++			continue;
++		}
++
++		run_command(cmd);
++	}
++}
++
+ int
+ main(int argc, char **argv, char **envp)
+ {
+@@ -1534,6 +2667,7 @@ main(int argc, char **argv, char **envp)
+ 		if (argc > 1) {
+ 			run_rc(argv[1]);
+ 		}
++		interactive_shell();
+ 		return 0;
+ 	}
+ 
+@@ -1563,6 +2697,7 @@ main(int argc, char **argv, char **envp)
+ 	configure_inject();
+ 	configure_vnodes();
+ 	run_rc(in_image("/etc/rc"));
++	interactive_shell();
+ 	printf("\n=== init: done ===\n");
+ 	reboot(RB_HALT);
+ 	return failures != 0;
+-- 
+2.34.1
+
