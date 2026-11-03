@@ -2852,9 +2852,6 @@ picasso_add_bss(const char *ssid, const uint8_t *bssid, uint16_t freq, int16_t r
 #define WLAN_CE_BASE_PA             0x18800000ull
 #define WLAN_CE_SIZE                0x300000ull
 
-#define WLAN_MSA_DMA_PA             0x8ba10000ull
-#define WLAN_MSA_DMA_SIZE           0x100000ull
-
 struct picasso_ce_desc {
 	uint64_t addr;
 	uint16_t nbytes;
@@ -2888,7 +2885,6 @@ static volatile uint8_t *g_wlan_ce_base = NULL;
 static volatile uint32_t *g_ce2_regs = NULL;
 static volatile uint32_t *g_ce2_shadow_wr = NULL;
 
-static IOMemoryMap *g_ce2_dma_map = NULL;
 static struct picasso_ce_desc *g_ce2_ring = NULL;
 static uint8_t *g_ce2_buf_virt = NULL;
 static uint64_t g_ce2_buf_phys = 0;
@@ -2901,34 +2897,26 @@ picasso_wlan_ce_init(void)
 {
 	LOG("picasso_wlan_ce_init: Initializing Copy Engine 2 (Target->Host WMI/OTA Beacons)...");
 
-	if (!g_wlan_ce_map) {
-		g_wlan_ce_map = map_phys(WLAN_CE_BASE_PA, WLAN_CE_SIZE, false);
-		if (!g_wlan_ce_map) {
-			LOG("picasso_wlan_ce_init: failed to map WLAN CE MMIO region (0x%llx)", WLAN_CE_BASE_PA);
+	if (!g_ce2_ring) {
+		IOPhysicalAddress ring_pa = 0;
+		void *ring_mem = IOMallocContiguous(CE2_RING_ENTRIES * sizeof(struct picasso_ce_desc), 4096, &ring_pa);
+		if (!ring_mem) {
+			LOG("picasso_wlan_ce_init: failed to allocate CE2 descriptor ring");
 			return;
 		}
-		g_wlan_ce_base = (volatile uint8_t *)g_wlan_ce_map->getVirtualAddress();
-		g_ce2_regs = (volatile uint32_t *)(g_wlan_ce_base + WLAN_CE2_OFFSET);
-		g_ce2_shadow_wr = (volatile uint32_t *)(g_wlan_ce_base + WLAN_CE2_SHADOW_DST_WR_IDX);
-	}
+		bzero(ring_mem, CE2_RING_ENTRIES * sizeof(struct picasso_ce_desc));
+		g_ce2_ring = (struct picasso_ce_desc *)ring_mem;
 
-	if (!g_ce2_dma_map) {
-		g_ce2_dma_map = map_phys(WLAN_MSA_DMA_PA, WLAN_MSA_DMA_SIZE, false);
-		if (!g_ce2_dma_map) {
-			LOG("picasso_wlan_ce_init: failed to map WLAN MSA DMA region (0x%llx)", WLAN_MSA_DMA_PA);
+		IOPhysicalAddress buf_pa = 0;
+		void *buf_mem = IOMallocContiguous(CE2_RING_ENTRIES * CE2_BUF_SIZE, 4096, &buf_pa);
+		if (!buf_mem) {
+			LOG("picasso_wlan_ce_init: failed to allocate CE2 buffer pool");
 			return;
 		}
-		uint8_t *dma_va = (uint8_t *)g_ce2_dma_map->getVirtualAddress();
-		bzero(dma_va, WLAN_MSA_DMA_SIZE);
+		bzero(buf_mem, CE2_RING_ENTRIES * CE2_BUF_SIZE);
+		g_ce2_buf_virt = (uint8_t *)buf_mem;
+		g_ce2_buf_phys = (uint64_t)buf_pa;
 
-		/* Descriptor ring at start of MSA DMA (64 * 16 = 1024 bytes) */
-		g_ce2_ring = (struct picasso_ce_desc *)dma_va;
-
-		/* Buffer pool follows descriptors at offset 0x1000 (4KB aligned) */
-		g_ce2_buf_virt = dma_va + 0x1000;
-		g_ce2_buf_phys = WLAN_MSA_DMA_PA + 0x1000;
-
-		/* Populate 64 destination receive descriptors */
 		for (unsigned i = 0; i < CE2_RING_ENTRIES; i++) {
 			g_ce2_ring[i].addr = g_ce2_buf_phys + (uint64_t)i * CE2_BUF_SIZE;
 			g_ce2_ring[i].nbytes = 0;
@@ -2937,8 +2925,19 @@ picasso_wlan_ce_init(void)
 		}
 		mb();
 
+		if (!g_wlan_ce_map) {
+			g_wlan_ce_map = map_phys(WLAN_CE_BASE_PA, WLAN_CE_SIZE, false);
+			if (!g_wlan_ce_map) {
+				LOG("picasso_wlan_ce_init: failed to map WLAN CE MMIO region (0x%llx)", WLAN_CE_BASE_PA);
+				return;
+			}
+			g_wlan_ce_base = (volatile uint8_t *)g_wlan_ce_map->getVirtualAddress();
+			g_ce2_regs = (volatile uint32_t *)(g_wlan_ce_base + WLAN_CE2_OFFSET);
+			g_ce2_shadow_wr = (volatile uint32_t *)(g_wlan_ce_base + WLAN_CE2_SHADOW_DST_WR_IDX);
+		}
+
 		/* Program CE2 registers using exact offsets */
-		g_ce2_regs[CE_DR_BASE_LO >> 2] = (uint32_t)WLAN_MSA_DMA_PA;
+		g_ce2_regs[CE_DR_BASE_LO >> 2] = (uint32_t)ring_pa;
 		mb();
 		g_ce2_regs[CE_DR_SIZE >> 2] = CE2_RING_ENTRIES;
 		mb();
@@ -2949,7 +2948,7 @@ picasso_wlan_ce_init(void)
 
 		g_ce2_sw_index = 0;
 		LOG("picasso_wlan_ce_init: CE2 dest ring active at PA 0x%llx (DR_BASE=0x%x, DR_SIZE=%u, DRRI=%u, SHADOW_WR=%u)",
-		    WLAN_MSA_DMA_PA,
+		    (uint64_t)ring_pa,
 		    g_ce2_regs[CE_DR_BASE_LO >> 2],
 		    g_ce2_regs[CE_DR_SIZE >> 2],
 		    g_ce2_regs[CE_CURRENT_DRRI >> 2],
@@ -2968,6 +2967,8 @@ picasso_wlan_ce_poll(void)
 		if (nbytes == 0) {
 			break;
 		}
+
+		LOG("picasso_wlan_ce_poll: [slot %u] received %u bytes", g_ce2_sw_index, nbytes);
 
 		if (nbytes <= CE2_BUF_SIZE) {
 			const uint8_t *pkt = g_ce2_buf_virt + (uint64_t)g_ce2_sw_index * CE2_BUF_SIZE;
@@ -4738,7 +4739,7 @@ modem_thread(void *arg __unused, wait_result_t wr __unused)
 		 *
 		 * Apps SMMU on SM7250 is ARM MMU-500 (SMMUv2):
 		 * SMR registers at 0x800 + 4*i, S2CR at 0xc00 + 4*i. */
-		uint32_t wlansmmu = 0;
+		uint32_t wlansmmu = 2;
 		(void)PE_parse_boot_argn("modem_wlansmmu", &wlansmmu, sizeof(wlansmmu));
 		if (wlansmmu) {
 			vm_offset_t smmu = ml_io_map(0x15000000, 0x2000);
