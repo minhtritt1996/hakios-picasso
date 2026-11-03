@@ -2776,11 +2776,11 @@ int mbuf_copydata(void *m, size_t off, size_t len, void *out_data);
 
 static void picasso_wlan_ce_poll(void);
 
-static bool
+static unsigned int
 picasso_wlan_poll(void)
 {
 	picasso_wlan_ce_poll();
-	return false;
+	return 0;
 }
 
 static uint16_t
