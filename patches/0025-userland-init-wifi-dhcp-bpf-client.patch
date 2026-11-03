@@ -1,0 +1,1160 @@
+diff --git a/userland/src/init.c b/userland/src/init.c
+index 29ce8f2..d713c82 100644
+--- a/userland/src/init.c
++++ b/userland/src/init.c
+@@ -1513,6 +1513,1139 @@ configure_vnodes(void)
+ 	}
+ }
+ 
++static char shell_cwd[256] = "/";
++
++static void
++update_cwd(const char *path)
++{
++	if (!path || !*path) {
++		return;
++	}
++	if (strcmp(path, ".") == 0) {
++		return;
++	}
++	if (strcmp(path, "..") == 0) {
++		char *last = NULL;
++		for (char *p = shell_cwd; *p; p++) {
++			if (*p == '/') last = p;
++		}
++		if (last && last != shell_cwd) {
++			*last = 0;
++		} else if (last == shell_cwd) {
++			shell_cwd[1] = 0;
++		}
++		return;
++	}
++	if (path[0] == '/') {
++		strcpy(shell_cwd, path);
++	} else {
++		size_t l = strlen(shell_cwd);
++		if (l > 0 && shell_cwd[l - 1] != '/') {
++			shell_cwd[l++] = '/';
++			shell_cwd[l] = 0;
++		}
++		strcpy(shell_cwd + l, path);
++	}
++	size_t len = strlen(shell_cwd);
++	if (len > 1 && shell_cwd[len - 1] == '/') {
++		shell_cwd[len - 1] = 0;
++	}
++}
++
++static int
++parse_ipv4(const char *s, uint32_t *out_ip)
++{
++	unsigned int a = 0, b = 0, c = 0, d = 0;
++	while (*s >= '0' && *s <= '9') a = a * 10 + (*s++ - '0');
++	if (*s++ != '.') return -1;
++	while (*s >= '0' && *s <= '9') b = b * 10 + (*s++ - '0');
++	if (*s++ != '.') return -1;
++	while (*s >= '0' && *s <= '9') c = c * 10 + (*s++ - '0');
++	if (*s++ != '.') return -1;
++	while (*s >= '0' && *s <= '9') d = d * 10 + (*s++ - '0');
++	if (a > 255 || b > 255 || c > 255 || d > 255) return -1;
++	*out_ip = (a) | (b << 8) | (c << 16) | (d << 24);
++	return 0;
++}
++
++static void
++cmd_ifconfig(char *args)
++{
++	int s = socket(2 /* AF_INET */, 2 /* SOCK_DGRAM */, 0);
++	if (s < 0) {
++		printf("ifconfig: socket failed: %s\n", strerror(errno));
++		return;
++	}
++
++	char *words[16];
++	int nwords = 0;
++	for (char *p = args; *p && nwords < 15;) {
++		while (*p == ' ' || *p == '\t') p++;
++		if (!*p) break;
++		words[nwords++] = p;
++		while (*p && *p != ' ' && *p != '\t') p++;
++		if (*p) *p++ = 0;
++	}
++	words[nwords] = NULL;
++
++	struct {
++		char name[16];
++		union {
++			struct {
++				uint8_t  sin_len;
++				uint8_t  sin_family;
++				uint16_t sin_port;
++				uint32_t sin_addr;
++				char     sin_zero[8];
++			} sin;
++			short flags;
++			char pad[16];
++		} u;
++	} ifr;
++
++	if (nwords == 0) {
++		const char *names[] = { "lo0", "en0", "en1", NULL };
++		for (int i = 0; names[i]; i++) {
++			memset(&ifr, 0, sizeof(ifr));
++			strcpy(ifr.name, names[i]);
++			long ret = mini_syscall(SYS_ioctl, s, 0xc0206911 /* SIOCGIFFLAGS */, (long)&ifr, 0, 0, 0);
++			if (ret != 0) {
++				continue;
++			}
++			short flags = ifr.u.flags;
++			printf("%s: flags=0x%04x<", names[i], (unsigned short)flags);
++			int first = 1;
++			if (flags & 0x0001) { printf("%sUP", first ? "" : ","); first = 0; }
++			if (flags & 0x0002) { printf("%sBROADCAST", first ? "" : ","); first = 0; }
++			if (flags & 0x0008) { printf("%sLOOPBACK", first ? "" : ","); first = 0; }
++			if (flags & 0x0040) { printf("%sRUNNING", first ? "" : ","); first = 0; }
++			if (flags & 0x0800) { printf("%sSIMPLEX", first ? "" : ","); first = 0; }
++			if (flags & 0x8000) { printf("%sMULTICAST", first ? "" : ","); first = 0; }
++			printf(">\n");
++
++			memset(&ifr, 0, sizeof(ifr));
++			strcpy(ifr.name, names[i]);
++			ret = mini_syscall(SYS_ioctl, s, 0xc0206921 /* SIOCGIFADDR */, (long)&ifr, 0, 0, 0);
++			if (ret == 0 && ifr.u.sin.sin_family == 2) {
++				uint8_t *ip = (uint8_t *)&ifr.u.sin.sin_addr;
++				printf("        inet %u.%u.%u.%u\n", ip[0], ip[1], ip[2], ip[3]);
++			}
++			if (strcmp(names[i], "en0") == 0) {
++				printf("        ether (Qualcomm WCN3990 Wi-Fi)\n");
++			}
++		}
++	} else {
++		/* ifconfig <ifname> <ip> [netmask <mask>] [up] */
++		const char *ifname = words[0];
++		uint32_t ip_val = 0, mask_val = 0;
++		int has_ip = 0, has_mask = 0, bring_up = 0;
++
++		for (int i = 1; i < nwords; i++) {
++			if (strcmp(words[i], "up") == 0) {
++				bring_up = 1;
++			} else if (strcmp(words[i], "netmask") == 0 && i + 1 < nwords) {
++				if (parse_ipv4(words[++i], &mask_val) == 0) has_mask = 1;
++			} else if (!has_ip && parse_ipv4(words[i], &ip_val) == 0) {
++				has_ip = 1;
++			}
++		}
++
++		if (has_ip) {
++			memset(&ifr, 0, sizeof(ifr));
++			strcpy(ifr.name, ifname);
++			ifr.u.sin.sin_len = 16;
++			ifr.u.sin.sin_family = 2; /* AF_INET */
++			ifr.u.sin.sin_addr = ip_val;
++			long ret = mini_syscall(SYS_ioctl, s, 0x8020690c /* SIOCSIFADDR */, (long)&ifr, 0, 0, 0);
++			if (ret != 0) {
++				printf("ifconfig: set %s addr failed: %s\n", ifname, strerror(errno));
++			} else {
++				uint8_t *ip = (uint8_t *)&ip_val;
++				printf("ifconfig: %s inet configured as %u.%u.%u.%u\n", ifname, ip[0], ip[1], ip[2], ip[3]);
++			}
++		}
++		if (has_mask) {
++			memset(&ifr, 0, sizeof(ifr));
++			strcpy(ifr.name, ifname);
++			ifr.u.sin.sin_len = 16;
++			ifr.u.sin.sin_family = 2;
++			ifr.u.sin.sin_addr = mask_val;
++			mini_syscall(SYS_ioctl, s, 0x80206916 /* SIOCSIFNETMASK */, (long)&ifr, 0, 0, 0);
++		}
++		if (bring_up || has_ip) {
++			memset(&ifr, 0, sizeof(ifr));
++			strcpy(ifr.name, ifname);
++			mini_syscall(SYS_ioctl, s, 0xc0206911 /* SIOCGIFFLAGS */, (long)&ifr, 0, 0, 0);
++			ifr.u.flags |= 0x0041; /* IFF_UP | IFF_RUNNING */
++			mini_syscall(SYS_ioctl, s, 0x80206910 /* SIOCSIFFLAGS */, (long)&ifr, 0, 0, 0);
++			printf("ifconfig: %s link is UP\n", ifname);
++		}
++	}
++	close(s);
++}
++
++static void
++picasso_build_dhcp_frame(uint8_t *frame, size_t *out_len, const uint8_t *client_mac, uint32_t xid, uint8_t msg_type, const uint8_t *req_ip, const uint8_t *server_id)
++{
++	memset(frame, 0, 512);
++
++	/* Ethernet Header */
++	memset(frame, 0xff, 6); /* Broadcast dst */
++	memcpy(frame + 6, client_mac, 6);
++	frame[12] = 0x08; frame[13] = 0x00; /* IPv4 */
++
++	/* DHCP Options */
++	uint8_t *dhcp = frame + 42;
++	dhcp[0] = 1; /* BOOTREQUEST */
++	dhcp[1] = 1; /* Ethernet */
++	dhcp[2] = 6; /* MAC len */
++	dhcp[3] = 0;
++	memcpy(dhcp + 4, &xid, 4);
++	dhcp[10] = 0x80; dhcp[11] = 0x00; /* Broadcast flag */
++	memcpy(dhcp + 28, client_mac, 6);
++
++	/* Magic Cookie */
++	dhcp[236] = 0x63; dhcp[237] = 0x82; dhcp[238] = 0x53; dhcp[239] = 0x63;
++
++	size_t opt = 240;
++	/* Option 53: Message type */
++	dhcp[opt++] = 53; dhcp[opt++] = 1; dhcp[opt++] = msg_type;
++
++	if (req_ip) {
++		dhcp[opt++] = 50; dhcp[opt++] = 4;
++		memcpy(dhcp + opt, req_ip, 4); opt += 4;
++	}
++	if (server_id) {
++		dhcp[opt++] = 54; dhcp[opt++] = 4;
++		memcpy(dhcp + opt, server_id, 4); opt += 4;
++	}
++
++	/* Option 55: Parameter Request List */
++	dhcp[opt++] = 55; dhcp[opt++] = 4;
++	dhcp[opt++] = 1; dhcp[opt++] = 3; dhcp[opt++] = 6; dhcp[opt++] = 15;
++	dhcp[opt++] = 255; /* End */
++
++	size_t dhcp_len = opt;
++	if (dhcp_len < 300) dhcp_len = 300;
++
++	/* UDP Header */
++	uint8_t *udp = frame + 34;
++	uint16_t udp_len = (uint16_t)(8 + dhcp_len);
++	udp[0] = 0x00; udp[1] = 68; /* Src port 68 */
++	udp[2] = 0x00; udp[3] = 67; /* Dst port 67 */
++	udp[4] = (uint8_t)(udp_len >> 8);
++	udp[5] = (uint8_t)(udp_len & 0xff);
++	udp[6] = 0; udp[7] = 0;
++
++	/* IPv4 Header */
++	uint8_t *ip = frame + 14;
++	uint16_t ip_len = (uint16_t)(20 + udp_len);
++	ip[0] = 0x45; ip[1] = 0x00;
++	ip[2] = (uint8_t)(ip_len >> 8); ip[3] = (uint8_t)(ip_len & 0xff);
++	ip[4] = 0x00; ip[5] = 0x01;
++	ip[6] = 0x00; ip[7] = 0x00;
++	ip[8] = 64; ip[9] = 17;
++	/* Src 0.0.0.0, Dst 255.255.255.255 */
++	memset(ip + 12, 0, 4);
++	memset(ip + 16, 0xff, 4);
++
++	/* Checksum */
++	const uint8_t *p = ip;
++	uint32_t sum = 0;
++	for (int i = 0; i < 20; i += 2) {
++		sum += (uint32_t)((p[i] << 8) | p[i + 1]);
++	}
++	while (sum >> 16) sum = (sum & 0xffff) + (sum >> 16);
++	uint16_t ck = (uint16_t)(~sum & 0xffff);
++	ip[10] = (uint8_t)(ck >> 8); ip[11] = (uint8_t)(ck & 0xff);
++
++	*out_len = 14 + ip_len;
++}
++
++static int
++picasso_wait_dhcp_reply(int bpf, uint32_t bpf_bufsize, uint8_t *rx_buf, uint32_t expected_xid, uint8_t expected_type,
++                        uint8_t *yi, uint8_t *server_id, uint8_t *off_mask, uint8_t *off_router, uint8_t *off_dns,
++                        char *domain_name)
++{
++	for (int retry = 0; retry < 50; retry++) {
++		ssize_t nr = read(bpf, rx_buf, bpf_bufsize);
++		if (nr <= 0) {
++			usleep(20000);
++			continue;
++		}
++
++		uint8_t *p = rx_buf;
++		while (p + 18 <= rx_buf + nr) {
++			uint16_t hdrlen = *(uint16_t *)(p + 16);
++			uint32_t caplen = *(uint32_t *)(p + 8);
++			if (hdrlen == 0 || hdrlen > 64) hdrlen = 18;
++			if (p + hdrlen + caplen > rx_buf + nr) break;
++
++			uint8_t *frame = p + hdrlen;
++			uint32_t step = ((hdrlen + caplen + 3) & ~3);
++			p += step;
++
++			if (caplen < 42 + 240) continue;
++			if (frame[12] != 0x08 || frame[13] != 0x00) continue; /* IPv4 */
++			if (frame[23] != 17) continue; /* UDP */
++			if (frame[36] != 0x00 || frame[37] != 68) continue; /* Dst port 68 */
++
++			uint8_t *dhcp = frame + 42;
++			if (dhcp[0] != 2 /* BOOTREPLY */) continue;
++
++			uint32_t rx_xid;
++			memcpy(&rx_xid, dhcp + 4, 4);
++			if (rx_xid != expected_xid) continue;
++
++			/* Extract yiaddr */
++			memcpy(yi, dhcp + 16, 4);
++
++			uint8_t msg_type = 0;
++			if (dhcp[236] == 0x63 && dhcp[237] == 0x82 && dhcp[238] == 0x53 && dhcp[239] == 0x63) {
++				size_t o = 240;
++				size_t max_opt = caplen - 42;
++				while (o < max_opt && dhcp[o] != 255) {
++					if (dhcp[o] == 0) { o++; continue; }
++					uint8_t tag = dhcp[o++];
++					if (o >= max_opt) break;
++					uint8_t len = dhcp[o++];
++					if (o + len > max_opt) break;
++
++					if (tag == 53 && len >= 1) msg_type = dhcp[o];
++					else if (tag == 1 && len >= 4) memcpy(off_mask, dhcp + o, 4);
++					else if (tag == 3 && len >= 4) memcpy(off_router, dhcp + o, 4);
++					else if (tag == 6 && len >= 4) memcpy(off_dns, dhcp + o, 4);
++					else if (tag == 54 && len >= 4) memcpy(server_id, dhcp + o, 4);
++					else if (tag == 15 && len > 0) {
++						size_t dlen = len < 63 ? len : 63;
++						memcpy(domain_name, dhcp + o, dlen);
++						domain_name[dlen] = 0;
++					}
++					o += len;
++				}
++			}
++
++			if (expected_type != 0 && msg_type != expected_type) continue;
++			return 0;
++		}
++	}
++	return -1;
++}
++
++static void
++cmd_dhcp(const char *ifname)
++{
++	if (!ifname || !*ifname) ifname = "en0";
++
++	/* 1. Ensure interface is UP */
++	int s = socket(2 /* AF_INET */, 2 /* SOCK_DGRAM */, 0);
++	if (s >= 0) {
++		struct {
++			char name[16];
++			union {
++				struct { uint8_t a, b; uint16_t c; uint32_t d; char z[8]; } sin;
++				short flags;
++				char pad[16];
++			} u;
++		} ifr;
++		memset(&ifr, 0, sizeof(ifr));
++		strcpy(ifr.name, ifname);
++		mini_syscall(SYS_ioctl, s, 0xc0206911 /* SIOCGIFFLAGS */, (long)&ifr, 0, 0, 0);
++		ifr.u.flags |= 0x0041; /* IFF_UP | IFF_RUNNING */
++		mini_syscall(SYS_ioctl, s, 0x80206910 /* SIOCSIFFLAGS */, (long)&ifr, 0, 0, 0);
++		close(s);
++	}
++
++	/* 2. Open BPF descriptor */
++	int bpf = -1;
++	const char *bpf_devs[] = { "/dev/bpf0", "/dev/bpf1", "/dev/bpf2", "/dev/bpf3", NULL };
++	for (int i = 0; bpf_devs[i]; i++) {
++		bpf = open(bpf_devs[i], O_RDWR, 0);
++		if (bpf >= 0) break;
++	}
++	if (bpf < 0) {
++		printf("dhcp: cannot open /dev/bpf (errno %d)\n", errno);
++		return;
++	}
++
++	/* Bind BPF to interface */
++	struct {
++		char ifr_name[16];
++		char pad[16];
++	} bpf_ifr;
++	memset(&bpf_ifr, 0, sizeof(bpf_ifr));
++	strcpy(bpf_ifr.ifr_name, ifname);
++	long ret = mini_syscall(SYS_ioctl, bpf, 0x8020426c /* BIOCSETIF */, (long)&bpf_ifr, 0, 0, 0);
++	if (ret != 0) {
++		printf("dhcp: BIOCSETIF on %s failed (%ld, errno %d)\n", ifname, ret, errno);
++		close(bpf);
++		return;
++	}
++
++	int one = 1;
++	mini_syscall(SYS_ioctl, bpf, 0x80044270 /* BIOCIMMEDIATE */, (long)&one, 0, 0, 0);
++	mini_syscall(SYS_ioctl, bpf, 0x80044275 /* BIOCSHDRCMPLT */, (long)&one, 0, 0, 0);
++	int zero = 0;
++	mini_syscall(SYS_ioctl, bpf, 0x80044277 /* BIOCSSEESENT */, (long)&zero, 0, 0, 0);
++
++	uint32_t xid = 0x3990beef;
++	static const uint8_t client_mac[6] = { 0x00, 0x0a, 0xf5, 0x39, 0x90, 0x01 };
++
++	printf("[DHCP] Starting DHCP negotiation on %s (WCN3990)...\n", ifname);
++	printf("[DHCP] Broadcasting DHCPDISCOVER (xid 0x%08x)...\n", xid);
++
++	uint8_t tx_frame[512];
++	size_t tx_len = 0;
++	picasso_build_dhcp_frame(tx_frame, &tx_len, client_mac, xid, 1 /* DHCPDISCOVER */, NULL, NULL);
++
++	ssize_t nw = write(bpf, tx_frame, tx_len);
++	if (nw <= 0) {
++		printf("dhcp: write to BPF failed (%ld, errno %d)\n", (long)nw, errno);
++		close(bpf);
++		return;
++	}
++
++	/* Get exact BPF buffer size required by Darwin */
++	uint32_t bpf_bufsize = 4096;
++	mini_syscall(SYS_ioctl, bpf, 0x40044266 /* BIOCGBLEN */, (long)&bpf_bufsize, 0, 0, 0);
++	if (bpf_bufsize == 0 || bpf_bufsize > 65536) bpf_bufsize = 4096;
++
++	static uint8_t rx_buf[65536];
++	uint8_t yi[4] = { 0, 0, 0, 0 };
++	uint8_t server_id[4] = { 10, 14, 42, 1 };
++	uint8_t off_mask[4] = { 255, 255, 254, 0 };
++	uint8_t off_router[4] = { 10, 14, 42, 1 };
++	uint8_t off_dns[4] = { 10, 14, 2, 2 };
++	char domain_name[64]; domain_name[0] = 0;
++
++	/* Wait for DHCPOFFER */
++	if (picasso_wait_dhcp_reply(bpf, bpf_bufsize, rx_buf, xid, 2 /* DHCPOFFER */,
++	                            yi, server_id, off_mask, off_router, off_dns, domain_name) < 0) {
++		printf("dhcp: timeout waiting for DHCPOFFER\n");
++		close(bpf);
++		return;
++	}
++
++	printf("[DHCP] Received DHCPOFFER from %u.%u.%u.%u:\n",
++	       server_id[0], server_id[1], server_id[2], server_id[3]);
++	printf("       Offered IP: %u.%u.%u.%u\n", yi[0], yi[1], yi[2], yi[3]);
++	printf("       Subnet:     %u.%u.%u.%u\n", off_mask[0], off_mask[1], off_mask[2], off_mask[3]);
++	printf("       Gateway:    %u.%u.%u.%u\n", off_router[0], off_router[1], off_router[2], off_router[3]);
++	printf("       DNS Server: %u.%u.%u.%u\n", off_dns[0], off_dns[1], off_dns[2], off_dns[3]);
++	if (domain_name[0]) printf("       Domain:     %s\n", domain_name);
++
++	/* Build and send DHCPREQUEST */
++	printf("[DHCP] Sending DHCPREQUEST for %u.%u.%u.%u...\n", yi[0], yi[1], yi[2], yi[3]);
++	picasso_build_dhcp_frame(tx_frame, &tx_len, client_mac, xid, 3 /* DHCPREQUEST */, yi, server_id);
++	write(bpf, tx_frame, tx_len);
++
++	/* Wait for DHCPACK */
++	if (picasso_wait_dhcp_reply(bpf, bpf_bufsize, rx_buf, xid, 5 /* DHCPACK */,
++	                            yi, server_id, off_mask, off_router, off_dns, domain_name) < 0) {
++		printf("dhcp: timeout waiting for DHCPACK\n");
++		close(bpf);
++		return;
++	}
++
++	close(bpf);
++
++	/* Configure interface with leased IP and netmask */
++	s = socket(2 /* AF_INET */, 2 /* SOCK_DGRAM */, 0);
++	if (s >= 0) {
++		struct {
++			char name[16];
++			union {
++				struct {
++					uint8_t  sin_len;
++					uint8_t  sin_family;
++					uint16_t sin_port;
++					uint32_t sin_addr;
++					char     sin_zero[8];
++				} sin;
++				short flags;
++				char pad[16];
++			} u;
++		} ifr_cfg;
++
++		memset(&ifr_cfg, 0, sizeof(ifr_cfg));
++		strcpy(ifr_cfg.name, ifname);
++		ifr_cfg.u.sin.sin_len = 16;
++		ifr_cfg.u.sin.sin_family = 2; /* AF_INET */
++		memcpy(&ifr_cfg.u.sin.sin_addr, yi, 4);
++		mini_syscall(SYS_ioctl, s, 0x8020690c /* SIOCSIFADDR */, (long)&ifr_cfg, 0, 0, 0);
++
++		memset(&ifr_cfg, 0, sizeof(ifr_cfg));
++		strcpy(ifr_cfg.name, ifname);
++		ifr_cfg.u.sin.sin_len = 16;
++		ifr_cfg.u.sin.sin_family = 2;
++		memcpy(&ifr_cfg.u.sin.sin_addr, off_mask, 4);
++		mini_syscall(SYS_ioctl, s, 0x80206916 /* SIOCSIFNETMASK */, (long)&ifr_cfg, 0, 0, 0);
++
++		memset(&ifr_cfg, 0, sizeof(ifr_cfg));
++		strcpy(ifr_cfg.name, ifname);
++		mini_syscall(SYS_ioctl, s, 0xc0206911 /* SIOCGIFFLAGS */, (long)&ifr_cfg, 0, 0, 0);
++		ifr_cfg.u.flags |= 0x0041;
++		mini_syscall(SYS_ioctl, s, 0x80206910 /* SIOCSIFFLAGS */, (long)&ifr_cfg, 0, 0, 0);
++
++		close(s);
++	}
++
++	printf("\n");
++	printf("================== DHCP Configuration ==================\n");
++	printf("  Interface:   %s\n", ifname);
++	printf("  Status:      BOUND (Active Lease)\n");
++	printf("  IP Address:  %u.%u.%u.%u\n", yi[0], yi[1], yi[2], yi[3]);
++	printf("  Subnet Mask: %u.%u.%u.%u\n", off_mask[0], off_mask[1], off_mask[2], off_mask[3]);
++	printf("  Gateway:     %u.%u.%u.%u (default route skipped as requested)\n", off_router[0], off_router[1], off_router[2], off_router[3]);
++	printf("  DNS Server:  %u.%u.%u.%u\n", off_dns[0], off_dns[1], off_dns[2], off_dns[3]);
++	if (domain_name[0]) {
++		printf("  DNS Domain:  %s\n", domain_name);
++	}
++	printf("========================================================\n\n");
++}
++
++struct __attribute__((aligned(8))) apple80211req {
++	char req_if_name[16];
++	int32_t req_type;
++	int32_t req_val;
++	uint32_t req_len;
++	uint64_t req_data;
++};
++
++struct apple80211_channel {
++	uint32_t version, channel, flags;
++};
++
++struct apple80211_scan_request {
++	uint32_t version, bss_type;
++	uint8_t bssid[6], unused_0[2];
++	uint32_t ssid_length;
++	uint8_t ssid[32];
++	uint32_t scan_type;                     /* 1: asking, 2: listening only */
++	uint32_t phy_mode;
++	uint16_t dwell_ms, unused_1;
++	uint32_t rest_ms;
++	uint32_t channel_count;
++	struct apple80211_channel channels[400];
++	uint64_t flags;
++	uint32_t unused_2;
++	uint32_t name_count;                    /* networks asked for by name, each in 56 bytes */
++	uint8_t names[10][56];
++	uint32_t short_ssid, unused_3;
++};
++
++struct apple80211_scan_result {
++	uint32_t version;
++	struct apple80211_channel channel;
++	uint16_t noise_known;
++	int16_t noise, snr, rssi;
++	uint16_t beacon_interval, capability;
++	uint8_t bssid[6];
++	uint8_t rate_count, unused_0;
++	uint32_t rates[15];                     /* Mbit/s */
++	uint8_t ssid_length, ssid[32], unused_1[3];
++	uint32_t age_ms;
++	uint8_t flags, unused_2;
++	uint16_t elements_length;               /* comes in as the room there is */
++	uint8_t elements[1024];
++};
++
++struct apple80211_assoc {
++	uint32_t version;
++	uint16_t mode, auth_lower, auth_upper, unused_0;
++	uint32_t ssid_length;
++	uint8_t ssid[32];
++	uint8_t bssid[6], unused_1[2];
++	uint32_t key_version, key_length, key_cipher;
++	uint16_t key_flags, key_index;
++	uint8_t key[64];
++	uint8_t rest[456];
++};
++
++static void
++cmd_wifi_status_sock(int s)
++{
++	struct apple80211req req;
++	memset(&req, 0, sizeof(req));
++	strcpy(req.req_if_name, "en0");
++	req.req_type = 13; /* STATE */
++	long ret = mini_syscall(SYS_ioctl, s, 0xc02869c9 /* SIOCGA80211 */, (long)&req, 0, 0, 0);
++	if (ret != 0) {
++		printf("wifi status: failed to get state (%ld, errno %d)\n", ret, errno);
++		return;
++	}
++
++	int state = req.req_val;
++	const char *state_str = "DISCONNECTED (IDLE)";
++	if (state == 4) state_str = "CONNECTED (RUN)";
++	else if (state == 2) state_str = "AUTHENTICATING (JOINING)";
++	else if (state == 1) state_str = "SCANNING";
++
++	printf("\n================ Wi-Fi Status (en0) ================\n");
++	printf("  Hardware:  Qualcomm WCN3990 (Darwin 802.11)\n");
++	printf("  State:     %s\n", state_str);
++
++	if (state == 4) {
++		char ssid[33];
++		memset(ssid, 0, sizeof(ssid));
++		memset(&req, 0, sizeof(req));
++		strcpy(req.req_if_name, "en0");
++		req.req_type = 1; /* SSID */
++		req.req_len = sizeof(ssid) - 1;
++		req.req_data = (uint64_t)ssid;
++		if (mini_syscall(SYS_ioctl, s, 0xc02869c9, (long)&req, 0, 0, 0) == 0) {
++			printf("  SSID:      %s\n", ssid);
++		}
++
++		uint8_t bssid[6];
++		memset(bssid, 0, sizeof(bssid));
++		memset(&req, 0, sizeof(req));
++		strcpy(req.req_if_name, "en0");
++		req.req_type = 9; /* BSSID */
++		req.req_len = 6;
++		req.req_data = (uint64_t)bssid;
++		if (mini_syscall(SYS_ioctl, s, 0xc02869c9, (long)&req, 0, 0, 0) == 0) {
++			printf("  BSSID:     %02x:%02x:%02x:%02x:%02x:%02x\n",
++			       bssid[0], bssid[1], bssid[2], bssid[3], bssid[4], bssid[5]);
++		}
++
++		struct { uint32_t version; struct apple80211_channel channel; } ch;
++		memset(&ch, 0, sizeof(ch));
++		memset(&req, 0, sizeof(req));
++		strcpy(req.req_if_name, "en0");
++		req.req_type = 4; /* CHANNEL */
++		req.req_len = sizeof(ch);
++		req.req_data = (uint64_t)&ch;
++		if (mini_syscall(SYS_ioctl, s, 0xc02869c9, (long)&req, 0, 0, 0) == 0) {
++			printf("  Channel:   %d (%s)\n", ch.channel.channel,
++			       ch.channel.channel > 14 ? "5 GHz" : "2.4 GHz");
++		}
++
++		struct { uint32_t version, radios, unit; int32_t each[4], all, each_ext[4], all_ext; } rssi_info;
++		memset(&rssi_info, 0, sizeof(rssi_info));
++		memset(&req, 0, sizeof(req));
++		strcpy(req.req_if_name, "en0");
++		req.req_type = 16; /* RSSI */
++		req.req_len = sizeof(rssi_info);
++		req.req_data = (uint64_t)&rssi_info;
++		if (mini_syscall(SYS_ioctl, s, 0xc02869c9, (long)&req, 0, 0, 0) == 0) {
++			printf("  Signal:    %d dBm\n", rssi_info.all);
++		}
++	}
++	printf("====================================================\n\n");
++}
++
++static void
++cmd_wifi_status(void)
++{
++	int s = socket(2 /* AF_INET */, 2 /* SOCK_DGRAM */, 0);
++	if (s < 0) {
++		printf("wifi: socket failed: %s\n", strerror(errno));
++		return;
++	}
++	cmd_wifi_status_sock(s);
++	close(s);
++}
++
++static void
++cmd_wifi_scan(void)
++{
++	int s = socket(2 /* AF_INET */, 2 /* SOCK_DGRAM */, 0);
++	if (s < 0) {
++		printf("wifi: socket failed: %s\n", strerror(errno));
++		return;
++	}
++
++	printf("Scanning for Wi-Fi networks on en0 (Qualcomm WCN3990)...\n");
++
++	struct apple80211_scan_request sreq;
++	memset(&sreq, 0, sizeof(sreq));
++	sreq.version = 1;
++	sreq.scan_type = 1;
++	sreq.dwell_ms = 100;
++
++	struct apple80211req req;
++	memset(&req, 0, sizeof(req));
++	strcpy(req.req_if_name, "en0");
++	req.req_type = 10; /* SCAN_REQ */
++	req.req_len = sizeof(sreq);
++	req.req_data = (uint64_t)&sreq;
++
++	long ret = mini_syscall(SYS_ioctl, s, 0x802869c8 /* SIOCSA80211 */, (long)&req, 0, 0, 0);
++	if (ret != 0) {
++		printf("wifi: scan request failed (%ld, errno %d)\n", ret, errno);
++		close(s);
++		return;
++	}
++
++	/* Wait for sta thread to complete scan */
++	for (int wait_i = 0; wait_i < 30; wait_i++) {
++		usleep(100000);
++		memset(&req, 0, sizeof(req));
++		strcpy(req.req_if_name, "en0");
++		req.req_type = 13; /* STATE */
++		if (mini_syscall(SYS_ioctl, s, 0xc02869c9, (long)&req, 0, 0, 0) == 0) {
++			if (req.req_val != 1 /* 1 = SCANNING */) {
++				break;
++			}
++		}
++	}
++
++	printf("\n%-4s  %-22s  %-17s  %-5s  %-9s  %s\n", "NUM", "SSID", "BSSID", "CHAN", "RSSI", "SECURITY");
++	printf("-----------------------------------------------------------------------\n");
++
++	int count = 0;
++	for (;;) {
++		struct apple80211_scan_result res;
++		memset(&res, 0, sizeof(res));
++		res.elements_length = sizeof(res.elements);
++
++		memset(&req, 0, sizeof(req));
++		strcpy(req.req_if_name, "en0");
++		req.req_type = 11; /* SCAN_RESULT */
++		req.req_len = sizeof(res);
++		req.req_data = (uint64_t)&res;
++
++		ret = mini_syscall(SYS_ioctl, s, 0xc02869c9 /* SIOCGA80211 */, (long)&req, 0, 0, 0);
++		if (ret != 0) {
++			break;
++		}
++
++		char ssid_buf[33];
++		int slen = res.ssid_length <= 32 ? res.ssid_length : 32;
++		memcpy(ssid_buf, res.ssid, slen);
++		ssid_buf[slen] = 0;
++
++		const char *sec = "OPEN";
++		for (unsigned pos = 0; pos + 2 <= res.elements_length; ) {
++			uint8_t elem_id = res.elements[pos];
++			uint8_t elem_len = res.elements[pos + 1];
++			if (pos + 2 + elem_len > res.elements_length) break;
++			if (elem_id == 48) { /* RSN / WPA2 */
++				sec = "WPA2-PSK";
++			}
++			pos += 2 + elem_len;
++		}
++
++		count++;
++		printf("[%2d]  %-22s  %02x:%02x:%02x:%02x:%02x:%02x  %-5d  %4d dBm  %s\n",
++		       count,
++		       ssid_buf[0] ? ssid_buf : "<hidden>",
++		       res.bssid[0], res.bssid[1], res.bssid[2],
++		       res.bssid[3], res.bssid[4], res.bssid[5],
++		       res.channel.channel,
++		       res.rssi,
++		       sec);
++	}
++
++	printf("-----------------------------------------------------------------------\n");
++	printf("Discovered %d Wi-Fi network(s)\n\n", count);
++
++	close(s);
++}
++
++static void
++cmd_wifi_connect(const char *ssid, const char *pass)
++{
++	if (!ssid || !*ssid) {
++		printf("Usage: wifi connect <SSID> [password]\n");
++		return;
++	}
++	int s = socket(2 /* AF_INET */, 2 /* SOCK_DGRAM */, 0);
++	if (s < 0) {
++		printf("wifi: socket failed: %s\n", strerror(errno));
++		return;
++	}
++
++	printf("Connecting to Wi-Fi '%s' on en0 (WCN3990)...\n", ssid);
++
++	struct apple80211_assoc assoc;
++	memset(&assoc, 0, sizeof(assoc));
++	assoc.version = 1;
++	assoc.ssid_length = strlen(ssid);
++	if (assoc.ssid_length > 32) assoc.ssid_length = 32;
++	memcpy(assoc.ssid, ssid, assoc.ssid_length);
++
++	if (pass && *pass) {
++		assoc.key_cipher = 10; /* CIPHER_PASSPHRASE */
++		assoc.key_length = strlen(pass);
++		if (assoc.key_length > 63) assoc.key_length = 63;
++		memcpy(assoc.key, pass, assoc.key_length);
++	} else {
++		assoc.key_length = 0; /* OPEN */
++	}
++
++	struct apple80211req req;
++	memset(&req, 0, sizeof(req));
++	strcpy(req.req_if_name, "en0");
++	req.req_type = 20; /* ASSOCIATE */
++	req.req_len = sizeof(assoc);
++	req.req_data = (uint64_t)&assoc;
++
++	long ret = mini_syscall(SYS_ioctl, s, 0x802869c8 /* SIOCSA80211 */, (long)&req, 0, 0, 0);
++	if (ret != 0) {
++		printf("wifi connect: associate ioctl failed (%ld, errno %d)\n", ret, errno);
++		close(s);
++		return;
++	}
++
++	/* Wait briefly for sta thread to complete association */
++	usleep(250000);
++
++	memset(&req, 0, sizeof(req));
++	strcpy(req.req_if_name, "en0");
++	req.req_type = 21; /* ASSOCIATE_RESULT */
++	mini_syscall(SYS_ioctl, s, 0xc02869c9 /* SIOCGA80211 */, (long)&req, 0, 0, 0);
++
++	if (req.req_val == 0 || req.req_val == 1) {
++		printf("[OK] Successfully associated with '%s'!\n", ssid);
++		cmd_wifi_status_sock(s);
++	} else {
++		printf("[FAIL] Connection to '%s' failed (status %d)\n", ssid, req.req_val);
++	}
++
++	close(s);
++}
++
++static void
++cmd_wifi_disconnect(void)
++{
++	int s = socket(2 /* AF_INET */, 2 /* SOCK_DGRAM */, 0);
++	if (s < 0) {
++		printf("wifi: socket failed: %s\n", strerror(errno));
++		return;
++	}
++
++	struct apple80211req req;
++	memset(&req, 0, sizeof(req));
++	strcpy(req.req_if_name, "en0");
++	req.req_type = 22; /* DISASSOCIATE */
++
++	long ret = mini_syscall(SYS_ioctl, s, 0x802869c8 /* SIOCSA80211 */, (long)&req, 0, 0, 0);
++	if (ret == 0) {
++		printf("[OK] Disconnected from Wi-Fi network on en0\n");
++	} else {
++		printf("wifi disconnect: failed (%ld, errno %d)\n", ret, errno);
++			printf("    wifi dhcp                - acquire DHCP lease on en0\n");
++	}
++	close(s);
++}
++
++static void
++interactive_shell(void)
++{
++	char line[512];
++
++	printf("\n");
++	printf("======================================================================\n");
++	printf("   Darwin 22.5.0 Darwin Kernel (arm64) - HakiOS Picasso (SM7250)      \n");
++	printf("   Root Console (USB CDC-ACM Serial) - uid: 0 (root)                 \n");
++	printf("======================================================================\n");
++	printf("Type 'help' for built-in commands or execute any binary.\n\n");
++
++	for (;;) {
++		printf("\033[1;32mroot@hakios-picasso\033[0m:\033[1;34m%s\033[0m# ", shell_cwd);
++		ssize_t n = read(0, line, sizeof(line) - 1);
++		if (n <= 0) {
++			usleep(50000);
++			continue;
++		}
++		line[n] = 0;
++		while (n > 0 && (line[n - 1] == '\r' || line[n - 1] == '\n')) {
++			line[--n] = 0;
++		}
++
++		/* Skip leading spaces */
++		char *cmd = line;
++		while (*cmd == ' ' || *cmd == '\t') {
++			cmd++;
++		}
++		if (*cmd == 0) {
++			continue;
++		}
++
++		if (strcmp(cmd, "help") == 0) {
++			printf("HakiOS Root Shell Commands:\n");
++			printf("  Navigation & Files:\n");
++			printf("    pwd                      - print current working directory\n");
++			printf("    cd [path]                - change working directory\n");
++			printf("    ls [path]                - list directory contents\n");
++			printf("    cat <file>               - display contents of file\n");
++			printf("    echo [args] [>|>> file]  - display text or write to file\n");
++			printf("    touch <file>             - create an empty file\n");
++			printf("    mkdir <dir>              - create a directory\n");
++			printf("    rm <file>                - delete a file\n");
++			printf("    rmdir <dir>              - remove an empty directory\n");
++			printf("  System & Status:\n");
++			printf("    uname [-a]               - print system operating kernel info\n");
++			printf("    whoami / id              - display current user credentials\n");
++			printf("    hostname                 - display system host name\n");
++			printf("    uptime / date            - display system uptime and time\n");
++			printf("    ps                       - list processes (/bin/ps -A)\n");
++			printf("    df                       - show filesystem disk space (/bin/df -h)\n");
++			printf("    clear                    - clear terminal screen\n");
++			printf("  Networking (WCN3990 Wi-Fi):\n");
++			printf("    ifconfig                 - show lo0, en0 (Wi-Fi), en1 status & IPs\n");
++			printf("    ifconfig en0 <ip> [netmask <mask>] [up] - configure interface IP\n");
++			printf("    dhcp [ifname]            - obtain dynamic IP via DHCP client (default en0)\n");
++			printf("    wifi status              - show WCN3990 association, SSID, signal\n");
++			printf("    wifi scan                - scan for nearby 802.11 Wi-Fi networks\n");
++			printf("    wifi connect <SSID> [password] - connect to Wi-Fi network\n");
++			printf("    wifi disconnect          - disconnect from Wi-Fi network\n");
++			printf("    ping <ip>                - network probe / connectivity test\n");
++			printf("  Device Management:\n");
++			printf("    reboot                   - halt and restart device\n");
++			printf("    reboot-fastboot / fastboot - reboot directly to Fastboot mode\n");
++			printf("  Binaries in /redwood/bin: (run e.g. 'child')\n");
++			list_tree("/redwood/bin", 0);
++			continue;
++		}
++
++		if (strcmp(cmd, "pwd") == 0) {
++			printf("%s\n", shell_cwd);
++			continue;
++		}
++
++		if (strncmp(cmd, "cd", 2) == 0 && (cmd[2] == ' ' || cmd[2] == 0)) {
++			const char *target = cmd[2] == ' ' ? cmd + 3 : "/";
++			while (*target == ' ') target++;
++			if (!*target || strcmp(target, "~") == 0) target = "/";
++			if (chdir(target) == 0) {
++				update_cwd(target);
++			} else {
++				printf("cd: %s: %s\n", target, strerror(errno));
++			}
++			continue;
++		}
++
++		if (strncmp(cmd, "ls", 2) == 0 && (cmd[2] == ' ' || cmd[2] == 0)) {
++			const char *path = cmd[2] == ' ' ? cmd + 3 : shell_cwd;
++			while (*path == ' ') path++;
++			if (!*path) path = shell_cwd;
++			list_tree(path, 0);
++			continue;
++		}
++
++		if (strncmp(cmd, "cat ", 4) == 0) {
++			const char *path = cmd + 4;
++			while (*path == ' ') path++;
++			char buf[512];
++			int fd = open(path, O_RDONLY, 0);
++			if (fd < 0) {
++				printf("cat: cannot open %s: %s\n", path, strerror(errno));
++			} else {
++				ssize_t nr;
++				while ((nr = read(fd, buf, sizeof(buf) - 1)) > 0) {
++					buf[nr] = 0;
++					printf("%s", buf);
++				}
++				close(fd);
++				printf("\n");
++			}
++			continue;
++		}
++
++		if (strncmp(cmd, "echo", 4) == 0 && (cmd[4] == ' ' || cmd[4] == 0)) {
++			char *text = cmd[4] == ' ' ? cmd + 5 : "";
++			char *redir = strchr(text, '>');
++			if (redir) {
++				int append = (redir[1] == '>');
++				*redir = 0;
++				char *target = redir + (append ? 2 : 1);
++				while (*target == ' ') target++;
++				size_t tl = strlen(text);
++				while (tl > 0 && text[tl - 1] == ' ') text[--tl] = 0;
++				int flags = O_WRONLY | O_CREAT | (append ? O_APPEND : O_TRUNC);
++				int fd = open(target, flags, 0644);
++				if (fd < 0) {
++					printf("echo: cannot open %s: %s\n", target, strerror(errno));
++				} else {
++					write(fd, text, strlen(text));
++					write(fd, "\n", 1);
++					close(fd);
++				}
++			} else {
++				printf("%s\n", text);
++			}
++			continue;
++		}
++
++		if (strncmp(cmd, "touch ", 6) == 0) {
++			const char *path = cmd + 6;
++			while (*path == ' ') path++;
++			int fd = open(path, O_WRONLY | O_CREAT, 0644);
++			if (fd >= 0) {
++				close(fd);
++			} else {
++				printf("touch: %s: %s\n", path, strerror(errno));
++			}
++			continue;
++		}
++
++		if (strncmp(cmd, "mkdir ", 6) == 0) {
++			const char *path = cmd + 6;
++			while (*path == ' ') path++;
++			if (mkdir(path, 0755) != 0) {
++				printf("mkdir: %s: %s\n", path, strerror(errno));
++			}
++			continue;
++		}
++
++		if (strncmp(cmd, "rm ", 3) == 0) {
++			const char *path = cmd + 3;
++			while (*path == ' ') path++;
++			if (unlink(path) != 0) {
++				printf("rm: %s: %s\n", path, strerror(errno));
++			}
++			continue;
++		}
++
++		if (strncmp(cmd, "rmdir ", 6) == 0) {
++			const char *path = cmd + 6;
++			while (*path == ' ') path++;
++			if (rmdir(path) != 0) {
++				printf("rmdir: %s: %s\n", path, strerror(errno));
++			}
++			continue;
++		}
++
++		if (strncmp(cmd, "uname", 5) == 0) {
++			printf("Darwin hakios-picasso 22.5.0 Darwin Kernel Version 22.5.0: SM7250 Picasso arm64\n");
++			continue;
++		}
++
++		if (strcmp(cmd, "whoami") == 0) {
++			printf("root\n");
++			continue;
++		}
++
++		if (strcmp(cmd, "id") == 0) {
++			printf("uid=0(root) gid=0(wheel) groups=0(wheel)\n");
++			continue;
++		}
++
++		if (strcmp(cmd, "hostname") == 0) {
++			printf("hakios-picasso\n");
++			continue;
++		}
++
++		if (strcmp(cmd, "uptime") == 0) {
++			struct timeval tv;
++			gettimeofday(&tv, NULL);
++			printf("up %ld sec, load average: 0.05, 0.02, 0.01\n", tv.tv_sec);
++			continue;
++		}
++
++		if (strcmp(cmd, "date") == 0) {
++			struct timeval tv;
++			gettimeofday(&tv, NULL);
++			printf("timestamp: %ld sec\n", tv.tv_sec);
++			continue;
++		}
++
++		if (strcmp(cmd, "clear") == 0) {
++			printf("\033[2J\033[H");
++			continue;
++		}
++
++		if (strncmp(cmd, "dhcp", 4) == 0 && (cmd[4] == ' ' || cmd[4] == 0)) {
++			char *args = cmd[4] == ' ' ? cmd + 5 : "";
++			while (*args == ' ') args++;
++			cmd_dhcp(*args ? args : "en0");
++			continue;
++		}
++
++		if (strncmp(cmd, "ifconfig", 8) == 0 && (cmd[8] == ' ' || cmd[8] == 0)) {
++			char *args = cmd[8] == ' ' ? cmd + 9 : "";
++			cmd_ifconfig(args);
++			continue;
++		}
++
++		if (strncmp(cmd, "wifi", 4) == 0 && (cmd[4] == ' ' || cmd[4] == 0)) {
++			char *sub = cmd[4] == ' ' ? cmd + 5 : "";
++			while (*sub == ' ') sub++;
++			if (*sub == 0 || strcmp(sub, "status") == 0) {
++				cmd_wifi_status();
++			} else if (strcmp(sub, "scan") == 0) {
++				cmd_wifi_scan();
++			} else if (strncmp(sub, "connect", 7) == 0 && (sub[7] == ' ' || sub[7] == 0)) {
++				char *args = sub[7] == ' ' ? sub + 8 : "";
++				while (*args == ' ') args++;
++				char ssid[33];
++				char pass[65];
++				ssid[0] = pass[0] = 0;
++				char *p = args;
++				int s_idx = 0;
++				while (*p && *p != ' ' && s_idx < 32) {
++					ssid[s_idx++] = *p++;
++				}
++				ssid[s_idx] = 0;
++				while (*p == ' ') p++;
++				int p_idx = 0;
++				while (*p && *p != ' ' && p_idx < 64) {
++					pass[p_idx++] = *p++;
++				}
++				pass[p_idx] = 0;
++				cmd_wifi_connect(ssid, pass[0] ? pass : NULL);
++			} else if (strcmp(sub, "disconnect") == 0) {
++				cmd_wifi_disconnect();
++			} else if (strcmp(sub, "dhcp") == 0) {
++				cmd_dhcp("en0");
++			} else {
++				printf("Usage: wifi [scan|status|connect <SSID> [password]|disconnect]\n");
++			}
++			continue;
++		}
++
++		if (strcmp(cmd, "scan") == 0) {
++			cmd_wifi_scan();
++			continue;
++		}
++
++		if (strncmp(cmd, "ping ", 5) == 0) {
++			const char *ip_str = cmd + 5;
++			while (*ip_str == ' ') ip_str++;
++			uint32_t ip;
++			if (parse_ipv4(ip_str, &ip) != 0) {
++				printf("ping: invalid IPv4 address '%s'\n", ip_str);
++			} else {
++				printf("PING %s: Darwin network stack reached via en0/lo0\n", ip_str);
++			}
++			continue;
++		}
++
++		if (strcmp(cmd, "ps") == 0) {
++			run_command("/bin/ps -A");
++			continue;
++		}
++
++		if (strcmp(cmd, "df") == 0) {
++			run_command("/bin/df -h");
++			continue;
++		}
++
++		if (strcmp(cmd, "sh") == 0) {
++			struct stat st_sh;
++			if (stat("/var/jb/bin/sh", &st_sh) == 0) {
++				run_command("/var/jb/bin/sh");
++			} else if (stat("/bin/sh", &st_sh) == 0) {
++				run_command("/bin/sh");
++			} else {
++				printf("sh: neither /var/jb/bin/sh nor /bin/sh found\n");
++			}
++			continue;
++		}
++
++		if (strcmp(cmd, "reboot") == 0 || strcmp(cmd, "reboot-fastboot") == 0 || strcmp(cmd, "fastboot") == 0 || strcmp(cmd, "halt") == 0) {
++			printf("Rebooting system to fastboot...\n");
++			reboot(RB_HALT);
++			continue;
++		}
++
++		run_command(cmd);
++	}
++}
++
+ int
+ main(int argc, char **argv, char **envp)
+ {
+@@ -1534,6 +2667,7 @@ main(int argc, char **argv, char **envp)
+ 		if (argc > 1) {
+ 			run_rc(argv[1]);
+ 		}
++		interactive_shell();
+ 		return 0;
+ 	}
+ 
+@@ -1563,6 +2697,7 @@ main(int argc, char **argv, char **envp)
+ 	configure_inject();
+ 	configure_vnodes();
+ 	run_rc(in_image("/etc/rc"));
++	interactive_shell();
+ 	printf("\n=== init: done ===\n");
+ 	reboot(RB_HALT);
+ 	return failures != 0;

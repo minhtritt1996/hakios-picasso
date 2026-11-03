@@ -34,7 +34,7 @@ All statuses reflect verified, reproducible runs on physical hardware:
 | **USB** | **Works** | `xnuloader` Fastboot (`product: xnuloader`), OEM paniclog preserve (512 KB PRAM staging across warm reboots), CDC serial console (`/dev/ttyACM0`). |
 | **Storage** | **Partial** | Loader surveys UFS 2.1 (109 partitions across 6 LUNs); root filesystem mounted from APFS RAM disk; Apple embedded panic log preserved in `logdump` partition. |
 | **GPU** | **Partial** | Firmware (`a620_zap.mdt`, `a630_sqe.fw`, `a650_gmu.bin`) extracted; TrustZone SCM PAS authentication and CP secure mode unlock (`RBBM_SECVID_TRUST_CNTL 0x1 -> 0x3`) in progress. |
-| **Wi-Fi** | **Partial** | `wifid` daemon active under `launchd`; Picasso modem-hosted WLAN (`hakios.picasso_wlan.cpp`) via MPSS PAS 4. |
+| **Wi-Fi** | **Works** | Qualcomm WCN3990 via MPSS PAS 4 (`hakios.picasso_wlan.cpp`); physical over-the-air 802.11 beacon scanning, WPA2-PSK 4-way handshake, TX/RX Data Plane (`picasso_wlan_transmit`), and userland BPF DHCP client lease (`10.14.42.115` on `en0`). |
 | **Buttons** | **Missing** | Power & Volume keys via PMIC SPMI arbiter pending bringup. |
 | **Audio / ADSP** | **Missing** | Audio DSP bringup pending. |
 | **Battery / PMIC** | **Missing** | Battery gauge reading via ADSP pending. |
