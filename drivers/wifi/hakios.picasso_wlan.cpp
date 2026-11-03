@@ -2871,6 +2871,8 @@ static uint64_t g_ce2_buf_phys = 0;
 static uint32_t g_ce2_sw_index = 0;
 static IOMemoryMap *g_ce2_dma_map = NULL;
 
+static void picasso_parse_beacon_frame(const uint8_t *frame, size_t len, int16_t rssi, uint16_t freq);
+
 static void
 picasso_wlan_ce_init(void)
 {
