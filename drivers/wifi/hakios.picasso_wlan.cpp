@@ -2933,13 +2933,7 @@ picasso_sta_scan(const struct hakios_sta_scan *what)
 	IOLog("picasso_sta_scan: WCN3990 scanning 2.4GHz & 5GHz channels...\n");
 
 	g_picasso_bss_count = 0;
-	uint8_t b1[6] = { 0x24, 0x4b, 0xfe, 0x11, 0x22, 0x33 };
-	uint8_t b2[6] = { 0x24, 0x4b, 0xfe, 0x11, 0x22, 0x34 };
-	uint8_t b3[6] = { 0x24, 0x4b, 0xfe, 0x11, 0x22, 0x35 };
-	picasso_add_bss("Hakios-Picasso-5G", b1, 5180, -42, true);
-	picasso_add_bss("Xiaomi-Picasso-2G", b2, 2412, -48, true);
-	picasso_add_bss("Open-Airport-WiFi", b3, 2437, -65, false);
-	IOLog("picasso_sta_scan: populated %u active networks for wifid UI\n", g_picasso_bss_count);
+	picasso_wlan_ce_poll();
 
 	IOLog("picasso_sta_scan: WCN3990 scan complete, heard %u access points\n", g_picasso_bss_count);
 	return 0;
