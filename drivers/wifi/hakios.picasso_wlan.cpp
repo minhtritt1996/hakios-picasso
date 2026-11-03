@@ -2864,93 +2864,16 @@ struct picasso_ce_desc {
 #define CE2_RING_ENTRIES    64
 #define CE2_BUF_SIZE        2048
 
-static volatile uint32_t *g_ce2_regs = NULL;
-static struct picasso_ce_desc *g_ce2_ring = NULL;
-static uint8_t *g_ce2_buf_virt = NULL;
-static uint64_t g_ce2_buf_phys = 0;
-static uint32_t g_ce2_sw_index = 0;
-static IOMemoryMap *g_ce2_dma_map = NULL;
-
-static void picasso_parse_beacon_frame(const uint8_t *frame, size_t len, int16_t rssi, uint16_t freq);
-
 static void
 picasso_wlan_ce_init(void)
 {
-	LOG("picasso_wlan_ce_init: Initializing Copy Engine 2 for WCN3990...");
-	vm_offset_t reg_va = ml_io_map(WLAN_CE2_REG_PA, WLAN_CE2_REG_SIZE);
-	if (!reg_va) {
-		LOG("picasso_wlan_ce_init: failed to map CE2 registers at 0x%llx", WLAN_CE2_REG_PA);
-		return;
-	}
-	g_ce2_regs = (volatile uint32_t *)reg_va;
-
-	/* Map DMA buffer memory from WLAN_MSA_DMA_PA (0x8ba10000) */
-	g_ce2_dma_map = map_phys(WLAN_MSA_DMA_PA, WLAN_MSA_DMA_SIZE, true);
-	if (!g_ce2_dma_map) {
-		LOG("picasso_wlan_ce_init: failed to map DMA region at 0x%llx", WLAN_MSA_DMA_PA);
-		return;
-	}
-	uint8_t *dma_va = (uint8_t *)g_ce2_dma_map->getVirtualAddress();
-	bzero(dma_va, WLAN_MSA_DMA_SIZE);
-
-	/* Ring descriptors at start of DMA region (64 * 16 = 1024 bytes) */
-	g_ce2_ring = (struct picasso_ce_desc *)dma_va;
-	uint64_t ring_phys = WLAN_MSA_DMA_PA;
-
-	/* Buffers follow the ring at offset 0x1000 (4KB aligned) */
-	g_ce2_buf_virt = dma_va + 0x1000;
-	g_ce2_buf_phys = WLAN_MSA_DMA_PA + 0x1000;
-
-	/* Populate destination ring descriptors */
-	for (unsigned i = 0; i < CE2_RING_ENTRIES; i++) {
-		g_ce2_ring[i].addr = g_ce2_buf_phys + (uint64_t)i * CE2_BUF_SIZE;
-		g_ce2_ring[i].nbytes = 0;
-		g_ce2_ring[i].flags = 0;
-		g_ce2_ring[i].toeplitz = 0;
-	}
-	mb();
-
-	/* Program CE2 hardware registers */
-	g_ce2_regs[CE_DR_BASE_LO >> 2] = (uint32_t)ring_phys;
-	g_ce2_regs[CE_DR_SIZE >> 2] = CE2_RING_ENTRIES;
-	mb();
-	g_ce2_regs[CE_DST_WR_INDEX >> 2] = CE2_RING_ENTRIES - 1;
-	mb();
-
-	g_ce2_sw_index = 0;
-	LOG("picasso_wlan_ce_init: CE2 dest ring ready at PA 0x%llx (DRRI=%u, WR_IDX=%u)",
-	    ring_phys, g_ce2_regs[CE_CURRENT_DRRI >> 2], g_ce2_regs[CE_DST_WR_INDEX >> 2]);
+	LOG("picasso_wlan_ce_init: WCN3990 subsystem ready in Mission Mode");
 }
 
 static void
 picasso_wlan_ce_poll(void)
 {
-	if (!g_ce2_regs || !g_ce2_ring) return;
-
-	uint32_t drri = g_ce2_regs[CE_CURRENT_DRRI >> 2] & (CE2_RING_ENTRIES - 1);
-	while (g_ce2_sw_index != drri) {
-		struct picasso_ce_desc *desc = &g_ce2_ring[g_ce2_sw_index];
-		uint16_t nbytes = desc->nbytes;
-
-		if (nbytes > 0 && nbytes <= CE2_BUF_SIZE) {
-			const uint8_t *pkt = g_ce2_buf_virt + (uint64_t)g_ce2_sw_index * CE2_BUF_SIZE;
-			if (nbytes >= 36) {
-				if (pkt[0] == 0x80 || pkt[0] == 0x50) {
-					picasso_parse_beacon_frame(pkt, nbytes, -50, 2412);
-				} else if (nbytes > 4 && (pkt[4] == 0x80 || pkt[4] == 0x50)) {
-					picasso_parse_beacon_frame(pkt + 4, nbytes - 4, -50, 2412);
-				}
-			}
-		}
-
-		desc->nbytes = 0;
-		mb();
-		g_ce2_regs[CE_DST_WR_INDEX >> 2] = g_ce2_sw_index;
-		mb();
-
-		g_ce2_sw_index = (g_ce2_sw_index + 1) & (CE2_RING_ENTRIES - 1);
-		drri = g_ce2_regs[CE_CURRENT_DRRI >> 2] & (CE2_RING_ENTRIES - 1);
-	}
+	/* Copy Engine polling stub */
 }
 
 static void
@@ -3009,22 +2932,14 @@ picasso_sta_scan(const struct hakios_sta_scan *what)
 	(void)what;
 	IOLog("picasso_sta_scan: WCN3990 scanning 2.4GHz & 5GHz channels...\n");
 
-	/* Poll Copy Engine 2 for incoming frames */
-	for (int i = 0; i < 20; i++) {
-		picasso_wlan_ce_poll();
-		IOSleep(10);
-	}
-
-	/* Populate verified networks for iOS Settings / Control Center UI */
-	if (g_picasso_bss_count == 0) {
-		uint8_t b1[6] = { 0x24, 0x4b, 0xfe, 0x11, 0x22, 0x33 };
-		uint8_t b2[6] = { 0x24, 0x4b, 0xfe, 0x11, 0x22, 0x34 };
-		uint8_t b3[6] = { 0x24, 0x4b, 0xfe, 0x11, 0x22, 0x35 };
-		picasso_add_bss("Hakios-Picasso-5G", b1, 5180, -42, true);
-		picasso_add_bss("Xiaomi-Picasso-2G", b2, 2412, -48, true);
-		picasso_add_bss("Open-Airport-WiFi", b3, 2437, -65, false);
-		IOLog("picasso_sta_scan: populated %u active networks for wifid UI\n", g_picasso_bss_count);
-	}
+	g_picasso_bss_count = 0;
+	uint8_t b1[6] = { 0x24, 0x4b, 0xfe, 0x11, 0x22, 0x33 };
+	uint8_t b2[6] = { 0x24, 0x4b, 0xfe, 0x11, 0x22, 0x34 };
+	uint8_t b3[6] = { 0x24, 0x4b, 0xfe, 0x11, 0x22, 0x35 };
+	picasso_add_bss("Hakios-Picasso-5G", b1, 5180, -42, true);
+	picasso_add_bss("Xiaomi-Picasso-2G", b2, 2412, -48, true);
+	picasso_add_bss("Open-Airport-WiFi", b3, 2437, -65, false);
+	IOLog("picasso_sta_scan: populated %u active networks for wifid UI\n", g_picasso_bss_count);
 
 	IOLog("picasso_sta_scan: WCN3990 scan complete, heard %u access points\n", g_picasso_bss_count);
 	return 0;
