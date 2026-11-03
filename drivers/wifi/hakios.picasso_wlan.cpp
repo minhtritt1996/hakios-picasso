@@ -4554,27 +4554,53 @@ modem_thread(void *arg __unused, wait_result_t wr __unused)
 		 * attaches that device to the iommu at probe, long before the modem
 		 * boots; if the stream is left faulting the WLAN core cannot DMA
 		 * and its firmware never registers wlan_pd. modem_wlansmmu=1 only
-		 * reports, 2 sets the stream to bypass. */
+		 * reports, 2 sets the stream to bypass.
+		 *
+		 * Apps SMMU on SM7250 is ARM MMU-500 (SMMUv2):
+		 * SMR registers at 0x800 + 4*i, S2CR at 0xc00 + 4*i. */
 		uint32_t wlansmmu = 0;
 		(void)PE_parse_boot_argn("modem_wlansmmu", &wlansmmu, sizeof(wlansmmu));
 		if (wlansmmu) {
-			vm_offset_t smmu = ml_io_map(0x15000000, 0x10000);
+			vm_offset_t smmu = ml_io_map(0x15000000, 0x2000);
 			if (smmu != 0) {
 				volatile uint32_t *r = (volatile uint32_t *)smmu;
-				uint32_t s2off = 0x8000 + (0xc0 << 3);
-				uint32_t s2 = r[s2off >> 2], cb = r[(0x6000 + (0xc0 << 2)) >> 2];
-				uint32_t gbpa = r[0x44 >> 2];
-				LOG("wlan smmu: IDR0 %08x CR0 %08x GBPA %08x S2CR(c0) %08x CBAR(c0) %08x",
-				    r[0], r[0x20 >> 2], gbpa, s2, cb);
-				if (wlansmmu >= 2 && (s2 & 0x3u) != 1u) {
-					r[s2off >> 2] = (s2 & ~0x3fu) | 1u;
-					__asm__ volatile ("dsb sy" ::: "memory");
-					if (gbpa & 2u) {
-						r[0x44 >> 2] = gbpa & ~2u;
-						__asm__ volatile ("dsb sy" ::: "memory");
+				uint32_t idr0 = r[0x20 >> 2];
+				uint32_t num_smr = idr0 & 0xffu;
+				int match_idx = -1;
+				int free_idx = -1;
+
+				for (uint32_t i = 0; i < num_smr && i < 128; i++) {
+					uint32_t smr = r[(0x800 >> 2) + i];
+					if (!(smr & (1u << 31))) {
+						if (free_idx < 0) free_idx = (int)i;
+						continue;
 					}
-					LOG("wlan smmu: S2CR(c0) %08x -> %08x GBPA -> %08x",
-					    s2, r[s2off >> 2], r[0x44 >> 2]);
+					uint32_t mask = (smr >> 16) & 0x7fffu;
+					if (((smr ^ 0xc0u) & 0x7fffu & ~mask) == 0) {
+						match_idx = (int)i;
+						break;
+					}
+				}
+
+				if (match_idx >= 0) {
+					uint32_t s2 = r[(0xc00 >> 2) + match_idx];
+					uint32_t type = (s2 >> 16) & 3u;
+					LOG("wlan smmu: match at SMR[%d]=%08x S2CR=%08x (type=%u)",
+					    match_idx, r[(0x800 >> 2) + match_idx], s2, type);
+					if (wlansmmu >= 2 && type != 1u) {
+						s2 = (s2 & ~(3u << 16)) | (1u << 16);
+						r[(0xc00 >> 2) + match_idx] = s2;
+						__asm__ volatile ("dsb sy" ::: "memory");
+						LOG("wlan smmu: S2CR[%d] set to bypass (%08x)", match_idx, s2);
+					}
+				} else if (wlansmmu >= 2 && free_idx >= 0) {
+					r[(0x800 >> 2) + free_idx] = (1u << 31) | 0xc0u;
+					r[(0xc00 >> 2) + free_idx] = (1u << 16); /* bypass */
+					__asm__ volatile ("dsb sy" ::: "memory");
+					LOG("wlan smmu: allocated SMR[%d]=%08x S2CR=bypass",
+					    free_idx, (1u << 31) | 0xc0u);
+				} else {
+					LOG("wlan smmu: no match found for stream 0xc0 (free_idx=%d)", free_idx);
 				}
 			} else {
 				LOG("wlan smmu: cannot map 0x15000000");
