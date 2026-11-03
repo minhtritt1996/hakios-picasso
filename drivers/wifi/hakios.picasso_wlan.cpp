@@ -38,6 +38,29 @@ extern "C" bool hakios_aop_mailbox_send(const char *text);
 extern "C" bool hakios_mpss_rails(uint32_t level);
 extern "C" void picasso_usb_console_drive_poll(void);
 extern "C" void picasso_usb_reboot_fastboot(void);
+extern "C" void machine_delay_until(uint64_t interval, uint64_t deadline);
+extern "C" void nanoseconds_to_absolutetime(uint64_t nanoseconds, uint64_t *result);
+
+static inline void
+picasso_sleep_us(uint32_t us)
+{
+	uint64_t abstime = 0;
+	nanoseconds_to_absolutetime((uint64_t)us * 1000ull, &abstime);
+	machine_delay_until(abstime, mach_absolute_time() + abstime);
+}
+
+static inline void
+picasso_sleep_ms(uint32_t ms)
+{
+	uint64_t abstime = 0;
+	nanoseconds_to_absolutetime((uint64_t)ms * 1000000ull, &abstime);
+	machine_delay_until(abstime, mach_absolute_time() + abstime);
+}
+
+#undef IOSleep
+#define IOSleep(ms) picasso_sleep_ms(ms)
+#undef IODelay
+#define IODelay(us) picasso_sleep_us(us)
 
 #define LOG(fmt, ...)   printf("PicassoModem: " fmt "\n", ##__VA_ARGS__)
 
@@ -4418,6 +4441,7 @@ modem_watch(unsigned seconds)
 		LOG("no apps<->modem SMEM partition");
 		return false;
 	}
+	LOG("modem_watch: starting watch for up to %u seconds...", seconds);
 	for (unsigned ms = 0; ms < seconds * 1000; ms++) {
 		if (in == NULL) {
 			uint32_t sz = 0;
@@ -4434,6 +4458,7 @@ modem_watch(unsigned seconds)
 			for (uint32_t i = 0; i < in->valid && i < SMP2P_MAX_ENTRY; i++) {
 				if (strncmp(e[i].name, "slave-kernel", 16) == 0) {
 					sk = &e[i].value;
+					LOG("t=%u ms: found slave-kernel entry at index %u", ms, i);
 					break;
 				}
 			}
@@ -4458,6 +4483,9 @@ modem_watch(unsigned seconds)
 				LOG("modem crash reason: %s", why != NULL ? buf : "(none)");
 				return false;
 			}
+		}
+		if (ms > 0 && (ms % 1000) == 0) {
+			LOG("modem_watch: waiting... ms=%u, in=%p, sk=%p", ms, in, sk);
 		}
 		IOSleep(1);
 	}
