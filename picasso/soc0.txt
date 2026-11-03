@@ -1,4 +1,0 @@
-soc_id=400
-machine=SM7250
-platform=
-family=Snapdragon
