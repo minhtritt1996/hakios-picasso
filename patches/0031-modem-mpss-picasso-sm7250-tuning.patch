@@ -1,0 +1,102 @@
+From 0031000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: minhtritt1996 <minhtritt1996@gmail.com>
+Date: Wed, 4 Nov 2026 05:46:00 +0700
+Subject: [PATCH] modem: rewrite MPSS delays using machine_delay_until and fix picasso soc_rsc
+
+Fix picasso soc_rsc to 0x18220000 and replace sleep_us/ms with machine_delay_until
+busy-spin to prevent timer deadlocks during modem/WLAN MPSS PAS 4 bringup.
+---
+diff --git a/drivers/modem/hakios.mpss.c b/drivers/modem/hakios.mpss.c
+index 880c9de..71637a3 100644
+--- a/drivers/modem/hakios.mpss.c
++++ b/drivers/modem/hakios.mpss.c
+@@ -179,16 +179,23 @@ tell(const char *format, ...)
+ }
+ #define printf say
+ 
++extern void machine_delay_until(uint64_t interval, uint64_t deadline);
++extern void nanoseconds_to_absolutetime(uint64_t nanoseconds, uint64_t *result);
++
+ static void
+ sleep_us(uint32_t us)
+ {
+-	delay_for_interval(us, NSEC_PER_USEC);
++	uint64_t abstime = 0;
++	nanoseconds_to_absolutetime((uint64_t)us * 1000ull, &abstime);
++	machine_delay_until(abstime, mach_absolute_time() + abstime);
+ }
+ 
+ static void
+ sleep_ms(uint32_t ms)
+ {
+-	delay_for_interval(ms, NSEC_PER_MSEC);
++	uint64_t abstime = 0;
++	nanoseconds_to_absolutetime((uint64_t)ms * 1000000ull, &abstime);
++	machine_delay_until(abstime, mach_absolute_time() + abstime);
+ }
+ 
+ static uint64_t
+@@ -725,8 +732,10 @@ mailbox_open(void)
+ }
+ 
+ /* A message to the always-on processor (Linux's qmp_send()), under the lock the Wi-Fi's start takes too. */
+-static bool
+-mailbox_send(const char *text)
++bool hakios_aop_mailbox_send(const char *text);
++#define mailbox_send hakios_aop_mailbox_send
++bool
++hakios_aop_mailbox_send(const char *text)
+ {
+ 	uint32_t words[QMP_MESSAGE / 4] = { 0 };
+ 	bool sent = false;
+@@ -876,8 +885,10 @@ rail_position(const char *name, uint32_t level, uint32_t *address)
+ }
+ 
+ /* The two rails at that level (Linux's proxy request), or given back (level 0). True: RPMh has said done. */
+-static bool
+-rails(uint32_t level)
++bool hakios_mpss_rails(uint32_t level);
++#define rails hakios_mpss_rails
++bool
++hakios_mpss_rails(uint32_t level)
+ {
+ 	static const char *const names[2] = { "cx.lvl", "mss.lvl" };
+ 	uint32_t addresses[2] = { 0, 0 }, values[2] = { 0, 0 }, done = 0;
+@@ -6348,6 +6359,7 @@ hakios_mpss_init(void)
+ 	thread_t thread;
+ 
+ 	PE_parse_boot_argn("modem_step", &last_step, sizeof(last_step));
++	soc_override();
+ 	if (last_step == 0 && (!PE_parse_boot_argn("modem", &on, sizeof(on)) || on != 1)) {
+ 		return;
+ 	}
+@@ -6355,7 +6367,6 @@ hakios_mpss_init(void)
+ 		printf("mpss: modem=1 and modem_step=N are for the phone's modem, and this is not the phone\n");
+ 		return;
+ 	}
+-	soc_override();
+ 	if (last_step == 0) {
+ 		/* all of it, on a thread of its own, and left up */
+ 		last_step = STEPS;
+diff --git a/drivers/wifi/conf b/drivers/wifi/conf
+index 1ef4fd3..4f05eaf 100644
+--- a/drivers/wifi/conf
++++ b/drivers/wifi/conf
+@@ -2,13 +2,14 @@
+ # CONFIG_HAKIOS_<NAME>=y in a defconfig builds a driver into the kernel; "standard" files are always built.
+ # tools/hakios-config.py reads this file; docs/drivers-config.md says what each word means and how it reaches XNU.
+ 
++standard bsd/dev/hakios.apple80211.c
++standard bsd/dev/hakios.sta.c
++standard iokit/Kernel/hakios.wlan.cpp iokitcpp
++
+ driver WIFI
+ 	file    bsd/dev/hakios.wifi.c
+ 	file    bsd/dev/hakios.wlfw.c
+ 	file    bsd/dev/hakios.lx.c
+-	file    bsd/dev/hakios.sta.c
+-	file    bsd/dev/hakios.apple80211.c
+-	file    iokit/Kernel/hakios.wlan.cpp iokitcpp
+ 	requires QMI
+ 	help    Wi-Fi of the WCN6750 (wifi=1, wifi_step=N): the DSP that runs the radio's firmware, Linux's ath11k
+ 	help    (its object, made by tools/mk-ath11k.sh, is linked in only with this), a station, and the Apple80211

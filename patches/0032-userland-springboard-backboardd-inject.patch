@@ -1,0 +1,217 @@
+From 0032000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: minhtritt1996 <minhtritt1996@gmail.com>
+Date: Wed, 4 Nov 2026 05:46:00 +0700
+Subject: [PATCH] userland: backboardd DT integration, SpringBoard SweetGPU hook and ZhuGeService daemon
+
+Attach /arm-io/disp0 to DT root in userland inject.c, protect backboardd against nil
+container URLs, hook OpenGL ES for SpringBoard, add com.apple.ZhuGeService.plist, and
+strip group/other write permissions (0644/0755) in mkapfs for launchd security policy.
+---
+diff --git a/tools/apfs/mkapfs.py b/tools/apfs/mkapfs.py
+index 2628f4a..0f9c853 100755
+--- a/tools/apfs/mkapfs.py
++++ b/tools/apfs/mkapfs.py
+@@ -114,7 +114,7 @@ def div_up(a, b):
+ class Node:
+     def __init__(self, name, mode, source=None, target=None):
+         self.name = name                # str
+-        self.mode = mode                # st_mode
++        self.mode = mode & ~0o022       # st_mode (strip group/other write for launchd security)
+         self.uid = self.gid = 0
+         self.source = source            # a regular file's path on this machine
+         self.target = target            # a symbolic link's target, bytes
+diff --git a/userland/build.sh b/userland/build.sh
+index d972869..8f4bbc5 100755
+--- a/userland/build.sh
++++ b/userland/build.sh
+@@ -157,6 +157,7 @@ fi
+ rm -rf root
+ mkdir -p root/sbin root/bin root/etc root/share root/LaunchDaemons
+ cp obj/init root/sbin/init
++ln -sf init root/sbin/launchd
+ cp obj/child root/bin/child
+ # The data volume into the flash and back (src/var_store.c), and the job that saves it when a run
+ # ends: the program and its job together, away from the Darwin job list below, which several working
+@@ -415,7 +416,7 @@ if [ -d $DARWIN/rootfs/usr/lib ]; then
+ 	# the system image, so mkjobs.py judges "is this daemon's program there" by the listing of the volume
+ 	# and not by what select-system.py extracted here (--root-volume; seven jobs turn on the difference,
+ 	# fairplayd among them).
+-	cp com.hakios.demo.plist com.hakios.wifi.plist root/LaunchDaemons/
++	cp com.apple.ZhuGeService.plist com.hakios.demo.plist com.hakios.wifi.plist root/LaunchDaemons/
+ 	VOLUME=""
+ 	[ -n "$FLASHBOOT" ] && [ -f $DARWIN/rootfs.slt ] && VOLUME="--root-volume $DARWIN/rootfs.slt"
+ 	[ -n "$DARWIN_JOBS" ] && OSLOG=${OSLOG-com.apple.backboardd} ./mkjobs.py ${REST:+--rest} $VOLUME $DARWIN/rootfs root/LaunchDaemons $DARWIN_JOBS
+@@ -498,13 +499,15 @@ fi
+ # NanoLaunchDaemons and LaunchAngels with,
+ # xpc without launchd.plist (launchd would read that list of all of Darwin's jobs instead of
+ # LaunchDaemons) and the audio server's plug-in directory with only our device in it.
+-mkdir -p root/empty root/xpc root/hal
++mkdir -p root/empty root/xpc root/hal root/flash root/Cryptexes/OS root/Cryptexes/App
++ln -sfn . root/redwood
+ for f in extensions.plist extensions.plist.sig; do
+ 	[ -f $DARWIN/rootfs/System/Library/xpc/$f ] && cp $DARWIN/rootfs/System/Library/xpc/$f root/xpc/
+ done
+ [ -d root/lib/HakiosAudio.driver ] && ln -s /redwood/lib/HakiosAudio.driver root/hal/HakiosAudio.driver
+ # the image: zlib where it saves room (a small file whole in its attribute, as Apple keeps them); fw/
+ # as it is, which the kernel's drivers use where it lies in memory (drivers/storage/hakios.image.c)
++chmod -R go-w root
+ python3 ../tools/apfs/mkapfs.py -z --plain fw -o root.apfs redwood=root | tail -1
+ [ -z "$CHECK" ] || ../tools/apfs/check-image.sh root.apfs redwood=root
+ 
+diff --git a/userland/com.apple.ZhuGeService.plist b/userland/com.apple.ZhuGeService.plist
+new file mode 100644
+index 0000000..2aa9e59
+--- /dev/null
++++ b/userland/com.apple.ZhuGeService.plist
+@@ -0,0 +1,23 @@
++<?xml version=1.0 encoding=UTF-8?>
++<!DOCTYPE plist PUBLIC -//Apple//DTD PLIST 1.0//EN http://www.apple.com/DTDs/PropertyList-1.0.dtd>
++<plist version=1.0>
++<dict>
++	<key>Label</key>
++	<string>com.apple.ZhuGeService</string>
++	<key>MachServices</key>
++	<dict>
++		<key>com.apple.ZhuGeService</key>
++		<true/>
++		<key>com.apple.ZhuGeInternalService</key>
++		<true/>
++	</dict>
++	<key>POSIXSpawnType</key>
++	<string>Adaptive</string>
++	<key>Program</key>
++	<string>/System/Library/PrivateFrameworks/ZhuGeSupport.framework/XPCServices/ZhuGeService.xpc/ZhuGeService</string>
++	<key>StandardErrorPath</key>
++	<string>/dev/console</string>
++	<key>UserName</key>
++	<string>root</string>
++</dict>
++</plist>
+diff --git a/userland/src/inject.c b/userland/src/inject.c
+index 217e8fa..9f72c79 100644
+--- a/userland/src/inject.c
++++ b/userland/src/inject.c
+@@ -42,6 +42,7 @@
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <string.h>
++#include <sys/stat.h>
+ #include <sys/sysctl.h>
+ #include <signal.h>
+ #include <sys/ucontext.h>
+@@ -1075,7 +1076,15 @@ opengl_es(void)
+ 	gl_loaded = 1;
+ 	gl_function_values = (void (*)(void *, unsigned, unsigned, size_t, size_t, const float *))dlsym(library,
+ 	    "hakios_gl_function_values");
++	if (gl_function_values == NULL) {
++		gl_function_values = (void (*)(void *, unsigned, unsigned, size_t, size_t, const float *))dlsym(library,
++		    "sweet_gl_function_values");
++	}
+ 	gl_function_refused = (void (*)(unsigned))dlsym(library, "hakios_gl_function_refused");
++	if (gl_function_refused == NULL) {
++		gl_function_refused = (void (*)(unsigned))dlsym(library, "sweet_gl_function_refused");
++	}
++	say("hakios: %s loaded; EAGLContext is ours now\n", HAKIOS_GL);
+ }
+ 
+ /*
+@@ -1161,6 +1170,77 @@ watch_metallib_lookups(const char *arguments)
+ 	    ca_metallib ? ca_metallib : "");
+ }
+ 
++/* ---- backboardd: prevent nil NSURL crashes on missing container ----------------------------- */
++
++static id (*orig_initFileURLWithPath)(id self, SEL selector, id path);
++static id (*orig_initFileURLWithPath_isDir)(id self, SEL selector, id path, BOOL isDir);
++static id (*orig_fileURLWithPath)(id self, SEL selector, id path);
++static id (*orig_fileURLWithPath_isDir)(id self, SEL selector, id path, BOOL isDir);
++
++static id
++safe_url_path(id path)
++{
++	if (path == nil) {
++		say("hakios: backboardd: caught nil path in NSURL, substituting fallback container path\n");
++		mkdir("/private/var/containers", 0755);
++		mkdir("/private/var/containers/Data", 0755);
++		mkdir("/private/var/containers/Data/System", 0755);
++		mkdir("/private/var/containers/Data/System/com.apple.backboardd", 0755);
++		return (id)CFSTR("/private/var/containers/Data/System/com.apple.backboardd");
++	}
++	return path;
++}
++
++static id
++my_initFileURLWithPath(id self, SEL selector, id path)
++{
++	return orig_initFileURLWithPath ? orig_initFileURLWithPath(self, selector, safe_url_path(path)) : self;
++}
++
++static id
++my_initFileURLWithPath_isDir(id self, SEL selector, id path, BOOL isDir)
++{
++	return orig_initFileURLWithPath_isDir ? orig_initFileURLWithPath_isDir(self, selector, safe_url_path(path), isDir) : self;
++}
++
++static id
++my_fileURLWithPath(id self, SEL selector, id path)
++{
++	return orig_fileURLWithPath ? orig_fileURLWithPath(self, selector, safe_url_path(path)) : nil;
++}
++
++static id
++my_fileURLWithPath_isDir(id self, SEL selector, id path, BOOL isDir)
++{
++	return orig_fileURLWithPath_isDir ? orig_fileURLWithPath_isDir(self, selector, safe_url_path(path), isDir) : nil;
++}
++
++static void
++backboardd_url_fixes(void)
++{
++	Class cls = objc_getClass("NSURL");
++	if (cls != NULL) {
++		Method m;
++		m = class_getInstanceMethod(cls, sel_registerName("initFileURLWithPath:"));
++		if (m != NULL) {
++			orig_initFileURLWithPath = (id (*)(id, SEL, id))method_setImplementation(m, (IMP)my_initFileURLWithPath);
++		}
++		m = class_getInstanceMethod(cls, sel_registerName("initFileURLWithPath:isDirectory:"));
++		if (m != NULL) {
++			orig_initFileURLWithPath_isDir = (id (*)(id, SEL, id, BOOL))method_setImplementation(m, (IMP)my_initFileURLWithPath_isDir);
++		}
++		m = class_getClassMethod(cls, sel_registerName("fileURLWithPath:"));
++		if (m != NULL) {
++			orig_fileURLWithPath = (id (*)(id, SEL, id))method_setImplementation(m, (IMP)my_fileURLWithPath);
++		}
++		m = class_getClassMethod(cls, sel_registerName("fileURLWithPath:isDirectory:"));
++		if (m != NULL) {
++			orig_fileURLWithPath_isDir = (id (*)(id, SEL, id, BOOL))method_setImplementation(m, (IMP)my_fileURLWithPath_isDir);
++		}
++		say("hakios: backboardd: NSURL nil-parameter protection installed\n");
++	}
++}
++
+ __attribute__((constructor))
+ static void
+ hakios_init(void)
+@@ -1218,6 +1298,7 @@ hakios_init(void)
+ 		if (strstr(arguments, "metal_watch=1") != NULL || strstr(arguments, "ca_metallib=") != NULL) {
+ 			watch_metallib_lookups(arguments);
+ 		}
++		backboardd_url_fixes();
+ 		opengl_es();
+ 		window_server_fixes();
+ 		/*
+diff --git a/userland/src/inject_sb.c b/userland/src/inject_sb.c
+index 880ac16..aa0b270 100644
+--- a/userland/src/inject_sb.c
++++ b/userland/src/inject_sb.c
+@@ -656,6 +656,9 @@ gpu_draws(void)
+ 		}
+ 	}
+ 	gpu = IOServiceGetMatchingService(0, IOServiceMatching("HakiosGPU"));
++	if (gpu == 0) {
++		gpu = IOServiceGetMatchingService(0, IOServiceMatching("SweetGPU"));
++	}
+ 	if (gpu != 0) {
+ 		IOObjectRelease(gpu);
+ 	}

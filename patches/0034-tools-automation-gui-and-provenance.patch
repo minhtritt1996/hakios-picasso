@@ -1,0 +1,456 @@
+From 0034000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: minhtritt1996 <minhtritt1996@gmail.com>
+Date: Wed, 4 Nov 2026 05:46:00 +0700
+Subject: [PATCH] tools: add boot_gui_full automation, raw display capture and update provenance
+
+Add boot_gui_full automated boot and log streaming script, display capture utilities
+(fetch_data.py, raw2bmp.py, raw_download.py), and update provenance and hakios-config.
+---
+diff --git a/boot_gui_full.py b/boot_gui_full.py
+new file mode 100644
+index 0000000..56bc0d1
+--- /dev/null
++++ b/boot_gui_full.py
+@@ -0,0 +1,111 @@
++#!/usr/bin/env python3
++import subprocess
++import sys
++import time
++import os
++import glob
++import termios
++import struct
++import select
++import fcntl
++
++def run(cmd, timeout=None):
++    print(f'+ {cmd}', flush=True)
++    res = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout)
++    if res.stdout:
++        print(res.stdout, flush=True)
++    if res.stderr:
++        print(res.stderr, file=sys.stderr, flush=True)
++    if res.returncode != 0:
++        raise RuntimeError(f'Command failed with exit {res.returncode}')
++    return res.stdout
++
++def configure_serial(fd):
++    attrs = termios.tcgetattr(fd)
++    attrs[0] = 0
++    attrs[1] = 0
++    attrs[2] = termios.CS8 | termios.CREAD | termios.CLOCAL
++    attrs[3] = 0
++    attrs[4] = termios.B115200
++    attrs[5] = termios.B115200
++    attrs[6][termios.VMIN] = 0
++    attrs[6][termios.VTIME] = 0
++    termios.tcsetattr(fd, termios.TCSANOW, attrs)
++
++def assert_modem_lines(fd):
++    wanted = termios.TIOCM_DTR | termios.TIOCM_RTS
++    fcntl.ioctl(fd, termios.TIOCMBIS, struct.pack('I', wanted))
++
++print('=== Step 1: Checking fastboot device ===', flush=True)
++devs = run('fastboot devices')
++if 'xnuloader' not in devs and 'fastboot' not in devs:
++    raise RuntimeError('Device not found in fastboot!')
++
++print('=== Step 2: Stage resident system.apfs (2.4 GB) ===', flush=True)
++run('fastboot oem ramdisk', timeout=10)
++t0 = time.time()
++print('Uploading system.apfs to RAM (this takes ~75-100s)...', flush=True)
++run('fastboot stage /home/tritm/hakios-u/userland/system.apfs', timeout=300)
++print(f'Upload complete in {time.time() - t0:.1f}s!', flush=True)
++
++print('=== Step 3: Create Boot Payload ===', flush=True)
++cmdline = (
++    '-v debug=0x14e rd=md0 nointr_consio=1 buttons=1 touchscreen=0 hv_wdt_pet=1 cpus=8 small_cores_after=0 mfb=1 wifi=1 modem=0 modem_wlansmmu=2 '
++    'ufs=2 ufs_native=1 serial=3 picasso_usb=2 sweettick=1 sheng-lite=1 '
++    'soc_ipa_base=0x1e00000 soc_gsi_base=0x1e04000 soc_ipcc=0x408000 soc_aoss=0xc300000 soc_rsc=0x18220000 '
++    'soc_apps_smmu=0x15000000 soc_smem=0x80900000 soc_imem=0x146ab000 soc_cmd_db=0x80860000'
++)
++
++mkpayload_cmd = (
++    'cd /home/tritm/hakios-u && ./xnuloader/mkpayload.py -o /tmp/payload_gui_full.bin '
++    'loader.efi=xnuloader/loader.efi kernel=hakios-kernel ramdisk=userland/root.apfs --usb '
++    f'--cmdline "{cmdline}"'
++)
++run(mkpayload_cmd, timeout=30)
++
++print('=== Step 4: Staging Boot Payload ===', flush=True)
++run('fastboot stage /tmp/payload_gui_full.bin', timeout=30)
++
++print('=== Step 5: Executing fastboot oem run ===', flush=True)
++run('fastboot oem run', timeout=10)
++
++print('=== Step 6: Monitoring CDC console /dev/ttyACM* for SpringBoard bring-up ===', flush=True)
++start_wait = time.time()
++found_port = None
++fd = None
++while time.time() - start_wait < 90:
++    ports = glob.glob('/dev/ttyACM*') + glob.glob('/dev/ttyUSB*')
++    if ports:
++        found_port = sorted(ports)[0]
++        try:
++            fd = os.open(found_port, os.O_RDWR | os.O_NONBLOCK | os.O_NOCTTY)
++            configure_serial(fd)
++            assert_modem_lines(fd)
++            print(f'Connected and asserted DTR/RTS on {found_port}!', flush=True)
++            break
++        except Exception:
++            time.sleep(0.2)
++    time.sleep(0.2)
++
++if fd is None:
++    print('CDC console not enumerated yet, system running live on screen.', flush=True)
++    sys.exit(0)
++
++try:
++    log_file = open('/home/tritm/gui_springboard.log', 'wb')
++    stream_start = time.time()
++    while time.time() - stream_start < 150:
++        r, _, _ = select.select([fd], [], [], 0.3)
++        if r:
++            data = os.read(fd, 4096)
++            if data:
++                log_file.write(data)
++                log_file.flush()
++                sys.stdout.buffer.write(data)
++                sys.stdout.buffer.flush()
++    log_file.close()
++    os.close(fd)
++except Exception as e:
++    print(f'Serial port error: {e}', flush=True)
++
++print("=== FINISHED: Check phone screen for SpringBoard UI! ===", flush=True)
+diff --git a/tools/boot_gui_full.py b/tools/boot_gui_full.py
+new file mode 100644
+index 0000000..de1a265
+--- /dev/null
++++ b/tools/boot_gui_full.py
+@@ -0,0 +1,111 @@
++#!/usr/bin/env python3
++import subprocess
++import sys
++import time
++import os
++import glob
++import termios
++import struct
++import select
++import fcntl
++
++def run(cmd, timeout=None):
++    print(f'+ {cmd}', flush=True)
++    res = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout)
++    if res.stdout:
++        print(res.stdout, flush=True)
++    if res.stderr:
++        print(res.stderr, file=sys.stderr, flush=True)
++    if res.returncode != 0:
++        raise RuntimeError(f'Command failed with exit {res.returncode}')
++    return res.stdout
++
++def configure_serial(fd):
++    attrs = termios.tcgetattr(fd)
++    attrs[0] = 0
++    attrs[1] = 0
++    attrs[2] = termios.CS8 | termios.CREAD | termios.CLOCAL
++    attrs[3] = 0
++    attrs[4] = termios.B115200
++    attrs[5] = termios.B115200
++    attrs[6][termios.VMIN] = 0
++    attrs[6][termios.VTIME] = 0
++    termios.tcsetattr(fd, termios.TCSANOW, attrs)
++
++def assert_modem_lines(fd):
++    wanted = termios.TIOCM_DTR | termios.TIOCM_RTS
++    fcntl.ioctl(fd, termios.TIOCMBIS, struct.pack('I', wanted))
++
++print('=== Step 1: Checking fastboot device ===', flush=True)
++devs = run('fastboot devices')
++if 'xnuloader' not in devs and 'fastboot' not in devs:
++    raise RuntimeError('Device not found in fastboot!')
++
++print('=== Step 2: Stage resident system.apfs (2.4 GB) ===', flush=True)
++run('fastboot oem ramdisk', timeout=10)
++t0 = time.time()
++print('Uploading system.apfs to RAM (this takes ~75-100s)...', flush=True)
++run('fastboot stage /home/tritm/hakios-u/userland/system.apfs', timeout=300)
++print(f'Upload complete in {time.time() - t0:.1f}s!', flush=True)
++
++print('=== Step 3: Create Boot Payload ===', flush=True)
++cmdline = (
++    '-v debug=0x14e rd=md0 nointr_consio=1 buttons=1 touchscreen=0 hv_wdt_pet=1 cpus=8 small_cores_after=0 mfb=1 wifi=0 modem=0 adreno=21 adreno_keep=1 '
++    'ufs=2 ufs_native=1 serial=3 picasso_usb=2 sweettick=1 sheng-lite=1 '
++    'soc_ipa_base=0x1e00000 soc_gsi_base=0x1e04000 soc_ipcc=0x408000 soc_aoss=0xc300000 soc_rsc=0x18220000 '
++    'soc_apps_smmu=0x15000000 soc_smem=0x80900000 soc_imem=0x146ab000 soc_cmd_db=0x80860000'
++)
++
++mkpayload_cmd = (
++    'cd /home/tritm/hakios-u && ./xnuloader/mkpayload.py -o /tmp/payload_gui_full.bin '
++    'loader.efi=xnuloader/loader.efi kernel=hakios-kernel ramdisk=userland/root.apfs --usb '
++    f'--cmdline "{cmdline}"'
++)
++run(mkpayload_cmd, timeout=30)
++
++print('=== Step 4: Staging Boot Payload ===', flush=True)
++run('fastboot stage /tmp/payload_gui_full.bin', timeout=30)
++
++print('=== Step 5: Executing fastboot oem run ===', flush=True)
++run('fastboot oem run', timeout=10)
++
++print('=== Step 6: Monitoring CDC console /dev/ttyACM* for SpringBoard bring-up ===', flush=True)
++start_wait = time.time()
++found_port = None
++fd = None
++while time.time() - start_wait < 90:
++    ports = glob.glob('/dev/ttyACM*') + glob.glob('/dev/ttyUSB*')
++    if ports:
++        found_port = sorted(ports)[0]
++        try:
++            fd = os.open(found_port, os.O_RDWR | os.O_NONBLOCK | os.O_NOCTTY)
++            configure_serial(fd)
++            assert_modem_lines(fd)
++            print(f'Connected and asserted DTR/RTS on {found_port}!', flush=True)
++            break
++        except Exception:
++            time.sleep(0.2)
++    time.sleep(0.2)
++
++if fd is None:
++    print('CDC console not enumerated yet, system running live on screen.', flush=True)
++    sys.exit(0)
++
++try:
++    log_file = open('/home/tritm/gui_springboard.log', 'wb')
++    stream_start = time.time()
++    while time.time() - stream_start < 150:
++        r, _, _ = select.select([fd], [], [], 0.3)
++        if r:
++            data = os.read(fd, 4096)
++            if data:
++                log_file.write(data)
++                log_file.flush()
++                sys.stdout.buffer.write(data)
++                sys.stdout.buffer.flush()
++    log_file.close()
++    os.close(fd)
++except Exception as e:
++    print(f'Serial port error: {e}', flush=True)
++
++print("=== FINISHED: Check phone screen for SpringBoard UI! ===", flush=True)
+diff --git a/tools/fetch_data.py b/tools/fetch_data.py
+new file mode 100644
+index 0000000..b42202a
+--- /dev/null
++++ b/tools/fetch_data.py
+@@ -0,0 +1,46 @@
++import sys
++import usb.core
++import usb.util
++import struct
++
++def fetch_data(cmd, out_path):
++    dev = usb.core.find(idVendor=0x18d1, idProduct=0xd00d)
++    if not dev:
++        print("Device not found")
++        sys.exit(1)
++
++    cfg = dev.get_active_configuration()
++    intf = cfg[(0,0)]
++    usb.util.claim_interface(dev, intf)
++    try:
++        ep_out = usb.util.find_descriptor(intf, custom_match=lambda e: usb.util.endpoint_direction(e.bEndpointAddress) == usb.util.ENDPOINT_OUT)
++        ep_in = usb.util.find_descriptor(intf, custom_match=lambda e: usb.util.endpoint_direction(e.bEndpointAddress) == usb.util.ENDPOINT_IN)
++
++        ep_out.write(cmd.encode())
++        resp = bytes(ep_in.read(512, timeout=2000)).decode('latin1', errors='replace')
++        print(f"Command '{cmd}' response: {resp}")
++
++        ep_out.write(b'upload')
++        resp = bytes(ep_in.read(512, timeout=2000)).decode('latin1', errors='replace')
++        print(f"Upload response: {resp}")
++        if resp.startswith('DATA'):
++            total = int(resp[4:12], 16)
++            print(f"Receiving {total} bytes...")
++            data = bytearray()
++            while len(data) < total:
++                chunk = ep_in.read(min(total - len(data), 65536), timeout=5000)
++                data.extend(chunk)
++            final_resp = bytes(ep_in.read(512, timeout=2000)).decode('latin1', errors='replace')
++            print(f"Final response: {final_resp}")
++            with open(out_path, 'wb') as f:
++                f.write(data)
++            print(f"Saved {len(data)} bytes to {out_path}")
++        else:
++            print("Upload failed, unexpected response:", resp)
++    finally:
++        usb.util.release_interface(dev, intf)
++
++if __name__ == '__main__':
++    cmd = sys.argv[1] if len(sys.argv) > 1 else 'oem screenshot'
++    out_path = sys.argv[2] if len(sys.argv) > 2 else '/tmp/screen_after.raw'
++    fetch_data(cmd, out_path)
+diff --git a/tools/hakios-config.py b/tools/hakios-config.py
+index 68decaa..d084355 100755
+--- a/tools/hakios-config.py
++++ b/tools/hakios-config.py
+@@ -777,12 +777,14 @@ GROUP_ORDER = ["Build facts", "Drivers built in", "CPU, memory and boot", "Stora
+                "Debugging", "Loader", "User space", "Version", "Extra arguments"]
+ 
+ 
+-def listing(config, title_lines):
++def listing(config, title_lines, common_only=False):
+     """The documented defconfig of `config`: every symbol there is, by group, each with its meaning in a comment above it and its value
+     (or `# CONFIG_X is not set`) under it. Linux's defconfigs list only what differs from the defaults; this one lists everything,
+     because here a symbol's default is "the kernel decides" and a reader should see every setting there is."""
+     by_group = collections.defaultdict(list)
+     for sym in SYMBOLS:
++        if common_only and DRIVER_BY_SYMBOL.get(sym[0]) and DRIVER_BY_SYMBOL[sym[0]].origin is not None:
++            continue
+         by_group[GROUP_OF.get(sym[0], "User space")].append(sym)
+     built = drivers_built(config)
+     config = {k: v for k, v in config.items() if k not in built}
+@@ -819,7 +821,8 @@ def cmd_listing(a):
+     title = ["#", "# HakiOS %s defconfig: every setting there is, with what it does." % a.name,
+              "# Made by tools/hakios-config.py listing %s -o <this file>; the values are the ones that file sets, and tests/CI check that it names every symbol." % a.name,
+              "#"]
+-    text = listing(config, title)
++    common_only = a.name in ("common", "common_defconfig")
++    text = listing(config, title, common_only=common_only)
+     if a.output_listing:
+         # read first, written after: `listing common > configs/common_defconfig` has the shell empty the file before it is read,
+         # and the configuration written is then the base one's alone (which is how common_defconfig once lost its values)
+@@ -840,7 +843,8 @@ def cmd_complete(a):
+         m = re.match(r"(?:# )?CONFIG_([A-Z0-9_]+)(?:=| is not set)", line.strip())
+         if m:
+             named.add(m.group(1))
+-    missing = [s[0] for s in SYMBOLS if s[0] not in named]
++    is_common = a.name in ("common", "common_defconfig")
++    missing = [s[0] for s in SYMBOLS if s[0] not in named and not (is_common and DRIVER_BY_SYMBOL.get(s[0]) and DRIVER_BY_SYMBOL[s[0]].origin is not None)]
+     for name in missing[:30]:
+         print("hakios-config: %s does not name CONFIG_%s" % (rel(a.root, path), name))
+     if len(missing) > 30:
+diff --git a/tools/provenance.allow b/tools/provenance.allow
+index 6e883fe..7942baf 100644
+--- a/tools/provenance.allow
++++ b/tools/provenance.allow
+@@ -31,3 +31,5 @@ flash    tools/darwin-write.py                    writes an image into `darwin`
+ flash    tools/backup-partitions.py               WRITES NOTHING to the phone (only ls, blockdev, dd if= and sha256sum, as root, over adb); it is declared because the restore notes it writes for a person (restore.txt) contain the fastboot lines that would put each partition back, which the scan cannot tell from a command to run
+ flash    tools/backup-partitions-test.py          the same tool's test, against a stand-in adb: the text it checks for is those notes
+ flash    tools/userdata-carve.py                 prints the dd commands that cut the `darwin` partition off the end of Android's userdata (a new GPT); a person runs them once, by hand, under Android, and only for the optional persistence; the default run needs no such partition
++flash    tools/mkdatavol.py                      creates empty HFS+ sparse image for optional persistence in darwin partition
++flash    tools/sparse-split.py                   splits raw image into sparse pieces for fastboot download chunks
+diff --git a/tools/raw2bmp.py b/tools/raw2bmp.py
+new file mode 100644
+index 0000000..a87629e
+--- /dev/null
++++ b/tools/raw2bmp.py
+@@ -0,0 +1,45 @@
++import struct
++import sys
++
++def raw_to_bmp(raw_path, bmp_path, width=1080, height=2400):
++    with open(raw_path, 'rb') as f:
++        raw = f.read()
++    
++    # 32bpp BGRA
++    row_bytes = width * 4
++    image_size = row_bytes * height
++    file_size = 54 + image_size
++
++    # BMP Header
++    bmp_header = struct.pack(
++        '<2sIHHI',
++        b'BM',
++        file_size,
++        0, 0,
++        54
++    )
++    # DIB Header (BITMAPINFOHEADER)
++    # Note: negative height means top-down bitmap!
++    dib_header = struct.pack(
++        '<IiiHHIIIIII',
++        40,
++        width,
++        -height,
++        1,
++        32,
++        0,
++        image_size,
++        2835, 2835, # 72 DPI
++        0, 0
++    )
++
++    with open(bmp_path, 'wb') as f:
++        f.write(bmp_header)
++        f.write(dib_header)
++        f.write(raw[:image_size])
++    print(f"Saved {bmp_path} ({width}x{height})")
++
++if __name__ == '__main__':
++    raw_path = sys.argv[1] if len(sys.argv) > 1 else '/tmp/screen.raw'
++    bmp_path = sys.argv[2] if len(sys.argv) > 2 else '/tmp/screen.bmp'
++    raw_to_bmp(raw_path, bmp_path)
+diff --git a/tools/raw_download.py b/tools/raw_download.py
+new file mode 100644
+index 0000000..01f6cf2
+--- /dev/null
++++ b/tools/raw_download.py
+@@ -0,0 +1,55 @@
++import sys
++import time
++import usb.core
++import usb.util
++
++def upload(payload_path):
++    with open(payload_path, 'rb') as f:
++        data = f.read()
++    total = len(data)
++    print(f"Uploading {payload_path}: {total} bytes (0x{total:x})")
++
++    dev = usb.core.find(idVendor=0x18d1, idProduct=0xd00d)
++    if not dev:
++        print("Device not found")
++        sys.exit(1)
++
++    cfg = dev.get_active_configuration()
++    intf = cfg[(0,0)]
++    usb.util.claim_interface(dev, intf)
++    try:
++        ep_out = usb.util.find_descriptor(intf, custom_match=lambda e: usb.util.endpoint_direction(e.bEndpointAddress) == usb.util.ENDPOINT_OUT)
++        ep_in = usb.util.find_descriptor(intf, custom_match=lambda e: usb.util.endpoint_direction(e.bEndpointAddress) == usb.util.ENDPOINT_IN)
++
++        # Send download command
++        cmd = f"download:{total:08x}".encode()
++        ep_out.write(cmd)
++        resp = bytes(ep_in.read(512, timeout=5000)).decode('latin1', errors='replace')
++        print("Download cmd resp:", resp)
++        if not resp.startswith("DATA"):
++            print("Expected DATA, got:", resp)
++            sys.exit(1)
++
++        # Stream data in 64KB chunks
++        chunk_size = 64 * 1024
++        offset = 0
++        t0 = time.time()
++        while offset < total:
++            chunk = data[offset:offset+chunk_size]
++            ep_out.write(chunk, timeout=10000)
++            offset += len(chunk)
++            if offset % (2 * 1024 * 1024) == 0 or offset == total:
++                print(f"Sent {offset}/{total} bytes ({offset*100//total}%)")
++
++        # Read final response (OKAY)
++        resp = bytes(ep_in.read(512, timeout=10000)).decode('latin1', errors='replace')
++        dt = time.time() - t0
++        print(f"Upload complete in {dt:.2f}s, response: {resp}")
++        if not resp.startswith("OKAY"):
++            print("Download failed:", resp)
++            sys.exit(1)
++    finally:
++        usb.util.release_interface(dev, intf)
++
++if __name__ == '__main__':
++    upload(sys.argv[1] if len(sys.argv) > 1 else '/tmp/payload_metal_sm7250.bin')

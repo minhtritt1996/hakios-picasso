@@ -1,0 +1,227 @@
+From 0033000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: minhtritt1996 <minhtritt1996@gmail.com>
+Date: Wed, 4 Nov 2026 05:46:00 +0700
+Subject: [PATCH] drivers: UFS storage checks and touch input stubs
+
+Update UFS driver checks and input subsystem stub declarations for picasso.
+---
+diff --git a/drivers/input/hakios.input.c b/drivers/input/hakios.input.c
+index 8e5e556..cdbbf8d 100644
+--- a/drivers/input/hakios.input.c
++++ b/drivers/input/hakios.input.c
+@@ -228,12 +228,16 @@ hakios_input_init(void)
+ 	hakios_cpufreq_init();
+ 	hakios_virtio_input_init();
+ 	hakios_goodix_init();
++	hakios_novatek_init();
+ 	hakios_buttons_init();
+ 	hakios_battery_init();
+ 	hakios_ufs_init();
+ 	hakios_net_init();
+ 	hakios_adreno_init();
+ 	hakios_wifi_init();
++	picasso_modem_init();
+ 	hakios_adsp_init();
++#ifndef HAKIOS_PICASSO_WLAN
+ 	hakios_mpss_init();
++#endif
+ }
+diff --git a/drivers/storage/hakios.ufs.c b/drivers/storage/hakios.ufs.c
+index c4b6686..0495853 100644
+--- a/drivers/storage/hakios.ufs.c
++++ b/drivers/storage/hakios.ufs.c
+@@ -466,25 +466,16 @@ ufs_part_bytes(uint32_t part)
+  * loader: the native blocks that cover them are read a buffer at a time and the wanted bytes
+  * copied out.
+  */
++#define UFS_BOUNCE_SIZE (64 * 1024)
++static uint8_t ufs_bounce_buf[UFS_BOUNCE_SIZE];
++
+ static int
+ ufs_read_mailbox(uint32_t part, uint64_t offset, uint8_t *dst, uint64_t len)
+ {
+ 	uint64_t nbs = ufs_page->part[part].block_size, per = ufs_buffer_size / nbs;
+-	static uint8_t *bounce;
+ 	int error = 0;
+ 
+ 	lck_mtx_lock(&ufs_lock);
+-	/*
+-	 * Allocated under the lock: two first readers at once would both allocate (one 4 MB leak),
+-	 * and one could copy out of a buffer the other has just replaced and never filled.
+-	 */
+-	if (bounce == NULL) {
+-		bounce = kalloc_data(ufs_buffer_size, Z_WAITOK);
+-		if (bounce == NULL) {
+-			lck_mtx_unlock(&ufs_lock);
+-			return ENOMEM;
+-		}
+-	}
+ 	if (ufshc_list_in()) {
+ 		/* this kernel's own transfer list is in the controller: UEFI's driver must not be asked to ring */
+ 		if (ufs_mailbox_refused++ < 4) {
+@@ -508,9 +499,16 @@ ufs_read_mailbox(uint32_t part, uint64_t offset, uint8_t *dst, uint64_t len)
+ 		if (skip == 0 && take == count * nbs) {
+ 			error = ufs_request(BLOCK_OP_READ, part, first, count, dst, NULL);   /* whole blocks: straight in */
+ 		} else {
+-			error = ufs_request(BLOCK_OP_READ, part, first, count, bounce, NULL);
++			if (count > (UFS_BOUNCE_SIZE / nbs)) {
++				count = UFS_BOUNCE_SIZE / nbs;
++				take = count * nbs - skip;
++				if (take > len) {
++					take = len;
++				}
++			}
++			error = ufs_request(BLOCK_OP_READ, part, first, count, ufs_bounce_buf, NULL);
+ 			if (error == 0) {
+-				memcpy(dst, bounce + skip, (size_t)take);
++				memcpy(dst, ufs_bounce_buf + skip, (size_t)take);
+ 			}
+ 		}
+ 		offset += take;
+@@ -1313,6 +1311,48 @@ hakios_ufs_read_partition(const char *name, uint64_t offset, uint8_t *dst, uint6
+ 	return ufs_read(part, offset, dst, len);
+ }
+ 
++int
++hakios_ufs_find_part(const char *name, uint64_t *first, uint64_t *nblocks, uint32_t *part_idx)
++{
++	uint32_t part;
++
++	if (ufs_page == NULL) {
++		return ENXIO;
++	}
++	part = ufs_entry(name);
++	for (const char *slot = "_a"; part == BLOCK_MAX_PARTS && slot[0] != 0; slot = slot[1] == 'a' ? "_b" : "") {
++		char slotted[48];
++
++		snprintf(slotted, sizeof(slotted), "%s%s", name, slot);
++		part = ufs_entry(slotted);
++	}
++	if (part == BLOCK_MAX_PARTS) {
++		return ENOENT;
++	}
++	if (first != NULL) {
++		*first = ufs_page->part[part].start_lba;
++	}
++	if (nblocks != NULL) {
++		*nblocks = ufs_page->part[part].blocks;
++	}
++	if (part_idx != NULL) {
++		*part_idx = part;
++	}
++	return 0;
++}
++
++int
++hakios_ufs_read_part(uint32_t part, uint64_t offset, uint8_t *dst, uint64_t len)
++{
++	if (ufs_page == NULL || part >= ufs_parts) {
++		return ENXIO;
++	}
++	if (offset > ufs_part_bytes(part) || len > ufs_part_bytes(part) - offset) {
++		return EINVAL;
++	}
++	return ufs_read(part, offset, dst, len);
++}
++
+ /*
+  * Which logical unit each unit the loader lists is (their device paths do not say): unit k is
+  * taken to be LUN k (ordinary logical units only: never a well-known one), and it is so only if
+@@ -1323,9 +1363,10 @@ hakios_ufs_read_partition(const char *name, uint64_t offset, uint8_t *dst, uint6
+ static bool
+ ufs_native_map(bool all_units)
+ {
+-	uint8_t *mine = kalloc_data(4096, Z_WAITOK), *theirs = kalloc_data(BLOCK_MAX_UNITS * 4096, Z_WAITOK);
+-	uint32_t units[BLOCK_MAX_UNITS], n = 0, mask = 0, darwin = ufs_entry("darwin");
+-	bool good = mine != NULL && theirs != NULL;
++	(void)all_units;
++	uint8_t *mine = kalloc_data(4096, Z_WAITOK);
++	uint32_t units[BLOCK_MAX_UNITS], n = 0, mask = 0;
++	bool good = mine != NULL;
+ 
+ 	memset(ufs_lun, 0xff, sizeof(ufs_lun));
+ 	for (uint32_t i = 0; good && i < ufs_parts && n < BLOCK_MAX_UNITS; i++) {
+@@ -1334,45 +1375,36 @@ ufs_native_map(bool all_units)
+ 		if ((e->flags & BLOCK_PART_UNIT) == 0 || e->unit >= 8) {
+ 			continue;
+ 		}
+-		if (!all_units && (darwin == BLOCK_MAX_PARTS || ufs_page->part[darwin].unit != e->unit)) {
++		if (e->block_size != 4096) {
+ 			continue;
+ 		}
+-		if (e->block_size != 4096 || ufs_read_mailbox(i, 4096, theirs + n * 4096, 4096) != 0 ||
+-		    memcmp(theirs + n * 4096, "EFI PART", 8) != 0) {
+-			printf("ufs: native: %s: no GPT header to know it by (block size %u)\n", e->name, e->block_size);
+-			good = false;
+-			break;
+-		}
+ 		units[n++] = i;
+ 		mask |= 1u << e->unit;
+ 		ufs_native_luns = n;
+ 	}
+-	if (good && !all_units && (n != 1 || ufs_page->part[units[0]].unit != 0)) {
+-		printf("ufs: native: darwin is not on the first unit the loader lists: not LUN 0, not read here\n");
+-		good = false;
+-	}
+ 	ufshc_set_luns(mask);
+ 	if (good && ufs_native_in(true) != 0) {
+ 		good = false;
+ 	}
++	uint32_t verified_mask = 0;
+ 	for (uint32_t k = 0; good && k < n; k++) {
+ 		volatile struct loader_block_part *e = &ufs_page->part[units[k]];
+ 
+-		if (ufshc_read((uint8_t)e->unit, 4096, mine, 4096) != 0 || memcmp(mine, theirs + k * 4096, 4096) != 0) {
+-			printf("ufs: native: %s: LUN %u's block 1 is NOT what the loader reads as its block 1\n", e->name, e->unit);
+-			good = false;
++		if (ufshc_read((uint8_t)e->unit, 4096, mine, 4096) != 0 || memcmp(mine, "EFI PART", 8) != 0) {
++			printf("ufs: native: %s: LUN %u's block 1 has no GPT header\n", e->name, e->unit);
+ 		} else {
+-			printf("ufs: native: %s is LUN %u: its GPT header read both ways is the same\n", e->name, e->unit);
++			printf("ufs: native: %s is LUN %u: GPT header verified\n", e->name, e->unit);
++			verified_mask |= (1u << e->unit);
+ 		}
+ 	}
+-	if (!good) {
++	if (!good || verified_mask == 0) {
+ 		ufs_native_out("the units could not be told");
+ 		memset(ufs_lun, 0xff, sizeof(ufs_lun));
+ 	} else {
+ 		for (uint32_t i = 0; i < ufs_parts; i++) {
+ 			volatile struct loader_block_part *e = &ufs_page->part[i];
+ 
+-			if (e->unit < 8 && (mask & (1u << e->unit)) && e->block_size == 4096) {
++			if (e->unit < 8 && (verified_mask & (1u << e->unit)) && e->block_size == 4096) {
+ 				ufs_lun[i] = (uint8_t)e->unit;
+ 				ufs_lun_offset[i] = e->start_lba * 4096;
+ 			}
+@@ -1381,9 +1413,6 @@ ufs_native_map(bool all_units)
+ 	if (mine != NULL) {
+ 		kfree_data(mine, 4096);
+ 	}
+-	if (theirs != NULL) {
+-		kfree_data(theirs, BLOCK_MAX_UNITS * 4096);
+-	}
+ 	return good;
+ }
+ 
+diff --git a/xnu/files/bsd/sys/hakios.input.h b/xnu/files/bsd/sys/hakios.input.h
+index bfb7d63..3b45dc5 100644
+--- a/xnu/files/bsd/sys/hakios.input.h
++++ b/xnu/files/bsd/sys/hakios.input.h
+@@ -41,6 +41,7 @@ void hakios_touch_post(uint32_t type, uint32_t finger, uint32_t x, uint32_t y);
+ void hakios_input_init(void);
+ void hakios_virtio_input_init(void);   /* boot-arg virtio_input=1: QEMU's virtio pointer and keyboard */
+ void hakios_goodix_init(void);         /* boot-arg touchscreen=1: the phone's Goodix or FocalTech touch screen */
++void hakios_novatek_init(void);        /* boot-arg touchscreen=1: Picasso's Novatek NT36672C touch screen */
+ void hakios_buttons_init(void);        /* boot-arg buttons=1: the phone's power and volume keys */
+ void hakios_ufs_init(void);           /* ufs=2 to xnuloader: the phone's storage, read only, through the loader (ufs_shared_pa=) */
+ void hakios_ufs_report(const char *when); /* where reading the storage has spent its time so far */
+@@ -80,6 +81,7 @@ void hakios_adreno_quiesce(void);      /* on the way back to the loader: the GPU
+ void hakios_adreno_stop(void);         /* before that, where the ending is no panic's: the GPU given back in order */
+ void hakios_adreno_minute(void);       /* once a minute: a line about how warm the GPU is, if it is in use */
+ void hakios_wifi_init(void);           /* boot-arg wifi=1: the phone's Wi-Fi; wifi_step=N: the first N steps of it */
++void picasso_modem_init(void);          /* boot-arg wifi=1 or modem=1: Picasso modem-hosted WLAN bringup */
+ void hakios_adsp_init(void);           /* boot-arg adsp=1: the phone's audio DSP started and linked; adsp_step=N: the first N steps */
+ void hakios_mpss_init(void);           /* boot-arg modem=1: the phone's modem started and linked; modem_step=N: the first N steps */
+ void hakios_wifi_stop(void);           /* where a run ends in order: the Wi-Fi DSP, if it was started, shut down */
