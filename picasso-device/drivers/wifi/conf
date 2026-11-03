@@ -1,0 +1,3 @@
+driver PICASSO_WLAN
+	file    iokit/Kernel/hakios.picasso_wlan.cpp iokitcpp
+	help    Picasso modem-hosted WLAN (WCN3990 via MPSS PAS 4)

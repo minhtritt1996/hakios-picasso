@@ -1,0 +1,3 @@
+driver NOVATEK
+	file    bsd/dev/hakios.novatek.c
+	help    the touch screen: Novatek NT36672C on GENI SE7 SPI (touchscreen=1) for Xiaomi Redmi K30 5G (picasso)
