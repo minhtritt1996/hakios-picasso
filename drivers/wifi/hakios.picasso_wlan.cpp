@@ -2885,10 +2885,15 @@ static volatile uint8_t *g_wlan_ce_base = NULL;
 static volatile uint32_t *g_ce2_regs = NULL;
 static volatile uint32_t *g_ce2_shadow_wr = NULL;
 
+static struct picasso_ce_desc s_ce2_ring[CE2_RING_ENTRIES] __attribute__((aligned(4096)));
+static uint8_t s_ce2_buf[CE2_RING_ENTRIES * CE2_BUF_SIZE] __attribute__((aligned(4096)));
+
 static struct picasso_ce_desc *g_ce2_ring = NULL;
 static uint8_t *g_ce2_buf_virt = NULL;
 static uint64_t g_ce2_buf_phys = 0;
 static uint32_t g_ce2_sw_index = 0;
+
+extern "C" uint64_t kvtophys(vm_offset_t va);
 
 static void picasso_parse_beacon_frame(const uint8_t *frame, size_t len, int16_t rssi, uint16_t freq);
 
@@ -2898,24 +2903,15 @@ picasso_wlan_ce_init(void)
 	LOG("picasso_wlan_ce_init: Initializing Copy Engine 2 (Target->Host WMI/OTA Beacons)...");
 
 	if (!g_ce2_ring) {
-		IOPhysicalAddress ring_pa = 0;
-		void *ring_mem = IOMallocContiguous(CE2_RING_ENTRIES * sizeof(struct picasso_ce_desc), 4096, &ring_pa);
-		if (!ring_mem) {
-			LOG("picasso_wlan_ce_init: failed to allocate CE2 descriptor ring");
-			return;
-		}
-		bzero(ring_mem, CE2_RING_ENTRIES * sizeof(struct picasso_ce_desc));
-		g_ce2_ring = (struct picasso_ce_desc *)ring_mem;
+		bzero(s_ce2_ring, sizeof(s_ce2_ring));
+		bzero(s_ce2_buf, sizeof(s_ce2_buf));
 
-		IOPhysicalAddress buf_pa = 0;
-		void *buf_mem = IOMallocContiguous(CE2_RING_ENTRIES * CE2_BUF_SIZE, 4096, &buf_pa);
-		if (!buf_mem) {
-			LOG("picasso_wlan_ce_init: failed to allocate CE2 buffer pool");
-			return;
-		}
-		bzero(buf_mem, CE2_RING_ENTRIES * CE2_BUF_SIZE);
-		g_ce2_buf_virt = (uint8_t *)buf_mem;
-		g_ce2_buf_phys = (uint64_t)buf_pa;
+		g_ce2_ring = s_ce2_ring;
+		g_ce2_buf_virt = s_ce2_buf;
+
+		uint64_t ring_pa = kvtophys((vm_offset_t)s_ce2_ring);
+		uint64_t buf_pa = kvtophys((vm_offset_t)s_ce2_buf);
+		g_ce2_buf_phys = buf_pa;
 
 		for (unsigned i = 0; i < CE2_RING_ENTRIES; i++) {
 			g_ce2_ring[i].addr = g_ce2_buf_phys + (uint64_t)i * CE2_BUF_SIZE;
@@ -2948,7 +2944,7 @@ picasso_wlan_ce_init(void)
 
 		g_ce2_sw_index = 0;
 		LOG("picasso_wlan_ce_init: CE2 dest ring active at PA 0x%llx (DR_BASE=0x%x, DR_SIZE=%u, DRRI=%u, SHADOW_WR=%u)",
-		    (uint64_t)ring_pa,
+		    ring_pa,
 		    g_ce2_regs[CE_DR_BASE_LO >> 2],
 		    g_ce2_regs[CE_DR_SIZE >> 2],
 		    g_ce2_regs[CE_CURRENT_DRRI >> 2],
@@ -3060,10 +3056,15 @@ picasso_sta_scan(const struct hakios_sta_scan *what)
 	(void)what;
 	IOLog("picasso_sta_scan: WCN3990 scanning 2.4GHz & 5GHz channels...\n");
 
+	/* Wait up to 5s if modem is still attaching WLFW Mission Mode */
+	for (int wait = 0; wait < 50 && (!g_ce2_ring || !g_ce2_shadow_wr); wait++) {
+		IOSleep(100);
+	}
+
 	g_picasso_bss_count = 0;
 
 	/* Actively poll Copy Engine 2 for incoming OTA beacon/probe frames */
-	for (int i = 0; i < 20; i++) {
+	for (int i = 0; i < 40; i++) {
 		picasso_wlan_ce_poll();
 		IOSleep(50);
 	}
