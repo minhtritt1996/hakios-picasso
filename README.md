@@ -30,11 +30,11 @@ All statuses reflect verified, reproducible runs on physical hardware:
 | Subsystem | State | Implementation Details |
 |---|---|---|
 | **CPU / Kernel** | **Works** | Apple Darwin 22.5.0 (XNU-8796.121.2) boots SMP 4 cores; passes 36/36 Darwin userland test suite; Apple XPC `launchd`, `backboardd`, `wifid`, and `SpringBoard` running stable. |
-| **Display** | **Partial** | UEFI GOP framebuffer; `MiniIOMobileFramebuffer` registers `IOPlatformDevice` nub `disp0` under `/arm-io` in `gIODTPlane` with physical DeviceMemory. |
+| **Display** | **Partial** | UEFI GOP framebuffer; `MiniIOMobileFramebuffer` initialized early at `GenericARMPE::start()`, publishes nub `disp0` under `/arm-io` in `gIODTPlane`; CADisplay and CAWindowServerDisplay matched (1125x2436 on 1080x2400 panel); WindowServer unblank and display update hooks installed. |
 | **Touch** | **Partial** | Driver `/dev/hakios-touch` communicates with `backboardd` `IOHIDEventSystem`; Novatek NT36672C SPI initialization and firmware staging. |
 | **USB** | **Works** | `xnuloader` Fastboot (`product: xnuloader`), OEM paniclog preserve (512 KB PRAM staging across warm reboots), CDC serial console (`/dev/ttyACM0`). |
 | **Storage** | **Partial** | Loader surveys UFS 2.1 (109 partitions across 6 LUNs); root filesystem mounted from APFS RAM disk; Apple embedded panic log preserved in `logdump` partition. |
-| **GPU** | **Partial** | Firmware (`a620_zap.mdt`, `a630_sqe.fw`, `a650_gmu.bin`) extracted; TrustZone SCM PAS authentication and CP secure mode unlock (`RBBM_SECVID_TRUST_CNTL 0x1 -> 0x3`) in progress. |
+| **GPU** | **Partial** | Firmware (`a620_zap.mdt`, `a630_sqe.fw`, `a650_gmu.bin`) authenticated via PAS; Step 22 Adreno 2D Blitter draws test color bands on screen; OpenGL ES 3.2 Mesa 25.0.7 (`FD620`) loaded by CoreAnimation in `backboardd`. |
 | **Wi-Fi / Network** | **Works** | Qualcomm WCN3990 via MPSS PAS 4 (`hakios.picasso_wlan.cpp`); physical over-the-air 802.11 beacon scanning, WPA2-PSK 4-way handshake, TX/RX Data Plane (`picasso_wlan_transmit`), and userland BPF DHCP client lease (`10.14.42.115` on `en0`). |
 | **Audio / ADSP** | **Works** | Qualcomm ADSP PAS / Secondary MI2S / APR audio stream; NXP TFA9874 amplifier on I2C @ 0x34 (reset GPIO58); Qualcomm WCD938x codec over SoundWire Master Port 2 / Bolero 1.2 TX macro / APR capture stream; `/dev/hakios-audio` and `/dev/hakios-mic` active in Darwin userland. Verified audible playback and room sound recording on hardware. |
 | **Bluetooth** | **Works** | Qualcomm WCN3990 via QUPV3 SE5 UART @ 0x894000 (`hakios.picasso_bt.c`); in-band 2400/115200 baud power sequence, standard 4-byte packing, devfs character device `/dev/hakios-bt` (0666), userland `bt` tool (`bt status`, `bt reset`, `bt addr`). Verified live on hardware. |
