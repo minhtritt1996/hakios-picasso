@@ -1,15 +1,6 @@
-# Patch series for hakios-picasso against upstream oosexgang/hakios-xnu-kernel (96ffbc532e97)
-# Apply in order on top of a clean checkout of hakios-xnu-kernel at 96ffbc532e970f3540885755d457e401e04d4707:
-#   git apply devices/picasso/patches/0001-xnu-picasso-smp-timer-usb-display.patch
-#   git apply devices/picasso/patches/0002-drivers-picasso-adreno620-audio-ufs-mpss-buttons.patch
-#   git apply devices/picasso/patches/0003-userland-picasso-init-inject-springboard.patch
-#   git apply devices/picasso/patches/0004-loader-configs-and-tools-picasso.patch
-#
-# For hakios-metal (fc63b36ee590):
-#   git -C hakios-metal apply devices/picasso/patches/0005-hakios-metal-clang15-constexpr-signbit.patch
-
-0001-xnu-picasso-smp-timer-usb-display.patch
-0002-drivers-picasso-adreno620-audio-ufs-mpss-buttons.patch
-0003-userland-picasso-init-inject-springboard.patch
-0004-loader-configs-and-tools-picasso.patch
-0005-hakios-metal-clang15-constexpr-signbit.patch
+0001-xnu-picasso-smp-timer-iomap-display.patch
+0002-xnu-picasso-usb-cdc-console-driver.patch
+0003-drivers-picasso-adreno620-audio-ufs-mpss-buttons.patch
+0004-userland-picasso-init-inject-springboard.patch
+0005-loader-configs-and-tools-picasso.patch
+0006-hakios-metal-clang15-constexpr-signbit.patch
