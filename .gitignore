@@ -10,3 +10,5 @@ uefi/files/Binaries/picasso/*
 !uefi/files/Binaries/picasso/README.md
 prebuilt/SILICIUM_UEFI.fd
 prebuilt/BootShim.bin
+.agents/rules
+AGENT.md
