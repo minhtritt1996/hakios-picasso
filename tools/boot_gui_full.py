@@ -55,23 +55,27 @@ sys_apfs = os.path.join(OUT_DIR, 'system.apfs') if os.path.isfile(os.path.join(O
 run(f'fastboot stage {sys_apfs}', timeout=300)
 print(f'Upload complete in {time.time() - t0:.1f}s!', flush=True)
 
-print('=== Step 3: Create Boot Payload ===', flush=True)
+print('=== Step 3: Create Boot Payload from build/out/ ===', flush=True)
 cmdline = (
-    '-v debug=0x14e rd=md0 nointr_consio=1 buttons=1 touchscreen=1 hv_wdt_pet=1 cpus=8 small_cores_after=0 mfb=1 wifi=0 modem=0 adreno=22 adreno_keep=1 '
+    '-v debug=0x14e rd=md0 nointr_consio=1 buttons=1 touchscreen=1 hv_wdt_pet=1 cpus=8 small_cores_after=0 '
+    'mfb=1 wifi=0 modem=0 adsp=0 sound=0 mic=0 bt=0 adreno=22 gpu=1 adreno_keep=1 ca_vbl=1 '
     'ufs=2 ufs_native=1 serial=3 picasso_usb=2 sweettick=1 sheng-lite=1 '
     'soc_ipa_base=0x1e00000 soc_gsi_base=0x1e04000 soc_ipcc=0x408000 soc_aoss=0xc300000 soc_rsc=0x18220000 '
     'soc_apps_smmu=0x15000000 soc_smem=0x80900000 soc_imem=0x146ab000 soc_cmd_db=0x80860000'
 )
 
+payload_path = os.path.join(OUT_DIR, 'payload.bin')
 mkpayload_cmd = (
-    f'cd {KERNEL_WS} && ./xnuloader/mkpayload.py -o /tmp/payload_gui_full.bin '
-    'loader.efi=xnuloader/loader.efi kernel=hakios-kernel ramdisk=userland/root.apfs --usb '
+    f'python3 {os.path.join(KERNEL_WS, "xnuloader/mkpayload.py")} -o {payload_path} '
+    f'loader.efi={os.path.join(OUT_DIR, "loader.efi")} '
+    f'kernel={os.path.join(OUT_DIR, "hakios-kernel")} '
+    f'ramdisk={os.path.join(OUT_DIR, "root.apfs")} --usb '
     f'--cmdline "{cmdline}"'
 )
 run(mkpayload_cmd, timeout=30)
 
 print('=== Step 4: Staging Boot Payload ===', flush=True)
-run('fastboot stage /tmp/payload_gui_full.bin', timeout=30)
+run(f'fastboot stage {payload_path}', timeout=30)
 
 print('=== Step 5: Executing fastboot oem run ===', flush=True)
 run('fastboot oem run', timeout=10)
