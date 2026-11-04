@@ -1,57 +1,22 @@
 diff --git a/drivers/gpu/hakios.adreno.c b/drivers/gpu/hakios.adreno.c
-index 7e30967..75d3944 100644
+index 75d3944..241da2c 100644
 --- a/drivers/gpu/hakios.adreno.c
 +++ b/drivers/gpu/hakios.adreno.c
-@@ -2801,7 +2801,8 @@ step_core_space(void)
-  * (Step 21 is what tells whether the 3D core gets out of secure mode with it.) There was a
-  * boot-arg adreno_zap=0 for the second and later runs of a started phone; nothing reads it now.
+@@ -3365,7 +3365,7 @@ hakios_adreno_quiesce(void)
+  * far it has got (a "fence": a submission's number, written by the core when it is through
+  * with it). The caller holds one lock around all of these.
   */
--#define ZAP_MEMORY_SM7250       0x8bc15400ull
-+/* (the device tree reserves 0x8bc15400..0x8bc17400; TrustZone takes only a 4 KB-aligned page of it) */
-+#define ZAP_MEMORY_SM7250       0x8bc16000ull
- #define ZAP_MEMORY_SC7280       0x8b71a000ull
- #define ZAP_MEMORY_SIZE         0x2000u
- #define SCM_PAS_MEM_SETUP       SCM_CALL(2, 2)
-@@ -2824,11 +2825,17 @@ step_zap_load(void)
- 	volatile uint8_t *memory;
- 	uint64_t size = 0, header = 0, answer = ~0ull;
- 	uint64_t zap_mem = ZAP_MEMORY_SM7250;
-+	/*
-+	 * picasso's a620_zap.mdt has one LOAD segment, 0x5000..0x568c: Linux's qcom_mdt_load hands TrustZone
-+	 * ALIGN(max,4K) - min = 0x1000 bytes, not the two pages of the SC7280's image
-+	 */
-+	uint64_t zap_size = 0x1000;
- 
- 	if (!cx_ready() || !core_is_on) {
- 		return false;
- 	}
- 	PE_parse_boot_argn("adreno_zap_mem", &zap_mem, sizeof(zap_mem));
-+	PE_parse_boot_argn("adreno_zap_size", &zap_size, sizeof(zap_size));
- 	uint32_t zap_enable = 1;
- 	if (PE_parse_boot_argn("adreno_zap", &zap_enable, sizeof(zap_enable)) && !zap_enable) {
- 		printf("adreno: %u: zap disabled by adreno_zap=0; continuing in hardware secure stream mode\n", step);
-@@ -2854,7 +2861,7 @@ step_zap_load(void)
- 		zap_is_loaded = false;
- 		return true;
- 	}
--	if (scm("where the image will be", SCM_64 | SCM_SIP | SCM_PAS_MEM_SETUP, SCM_THREE_VALUES, PAS_GPU, zap_mem, ZAP_MEMORY_SIZE,
-+	if (scm("where the image will be", SCM_64 | SCM_SIP | SCM_PAS_MEM_SETUP, SCM_THREE_VALUES, PAS_GPU, zap_mem, zap_size,
- 	    &answer) != 0 || answer != 0) {
- 		printf("adreno: %u: TrustZone does not take the place (%#llx): TAKEN TO MEAN THAT IT KEEPS A ZAP SHADER FROM "
- 		    "BEFORE, which is used as it is\n", step, answer);
-@@ -2862,13 +2869,13 @@ step_zap_load(void)
- 		return true;
- 	}
- 	/* (the memory is looked at only now: TrustZone has just said that it is not its own) */
--	memory = (volatile uint8_t *)ml_io_map_wcomb(zap_mem, ZAP_MEMORY_SIZE);
-+	memory = (volatile uint8_t *)ml_io_map_wcomb(zap_mem, zap_size);
- 	printf("adreno: %u: the reserved memory begins %02x %02x %02x %02x, the zap shader %02x %02x %02x %02x\n", step,
- 	    memory[0], memory[1], memory[2], memory[3], segment[0], segment[1], segment[2], segment[3]);
- 	printf("adreno: %u: about to write %llu bytes at %#llx\n", step, size, zap_mem);
- 	snprintf(last_write, sizeof(last_write), "step %u wrote the zap shader into memory at %#llx", step, zap_mem);
- 	hold(true);
--	for (uint64_t i = 0; i < ZAP_MEMORY_SIZE; i++) {
-+	for (uint64_t i = 0; i < zap_size; i++) {
- 		memory[i] = i < size ? segment[i] : 0;
- 	}
- 	settle();
+-#define GPU_CHIP_ID             0x06030500ull   /* dt: qcom,chipid */
++#define GPU_CHIP_ID             0x06020000ull   /* Adreno 620 (picasso; redwood's A642L is 0x06030500) */
+ #define GPU_ADDRESSES_START     0x20000000ull   /* above everything the steps use; below 4 GB, as Linux keeps them */
+ #define GPU_ADDRESSES_SIZE      0xe0000000ull
+ #define GPU_FENCE_AT            0x40            /* in the scratch page */
+@@ -4019,7 +4019,7 @@ hakios_adreno_init(void)
+ 		}
+ 		by_itself = true;
+ 		last_step = 21;
+-		skip_steps = 1u << 10 | 1u << 11 | 1u << 12;
++		skip_steps = 0;
+ 		pause_ms = 0;
+ 		watch_seconds = 0;
+ 		keep = 1;
