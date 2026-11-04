@@ -1,199 +1,5 @@
-diff --git a/.gitignore b/.gitignore
-index d9687e1..c9bbfcc 100644
---- a/.gitignore
-+++ b/.gitignore
-@@ -73,9 +73,7 @@ __pycache__/
- !/xnu-deps/gen-iig-stubs.py
- !/xnu-deps/hostinc/
- # ... but not Apple's Mach-O headers in it: setup.sh copies them from the kernel tree
--/xnu-deps/hostinc/mach-o/loader.h
--/xnu-deps/hostinc/mach-o/nlist.h
--/xnu-deps/hostinc/mach-o/fat.h
-+/xnu-deps/hostinc/mach-o/
- !/xnu-deps/iig-impl/
- !/xnu-deps/host/
- /xnu-deps/host/*
-diff --git a/README.md b/README.md
-index 782f727..c6be4a6 100644
---- a/README.md
-+++ b/README.md
-@@ -1,131 +1,46 @@
--# HakiOS
-+# Drivers
- 
--English · [中文](README.zh.md) · [Українська](README.uk.md)
-+The kernel's own drivers, by subsystem, the way Linux keeps `drivers/`. They are files of Apple's XNU tree
-+(`bsd/dev/`, `iokit/Kernel/`), kept here so that they can be found and reviewed by what they do.
- 
--**Apple's open-source Darwin kernel (XNU, xnu-8796.121.2) on Android phones with a Qualcomm SoC**, the way Android is Linux on
--phones: a boot loader of its own, drivers of its own, a configuration system and a version of its own. The same kernel runs in
--QEMU with nothing of Apple's and nothing of any phone's (`make qemu-open`).
--
--**Documentation: [docs/](docs/index.md)**, also on the project's website (`hakios-web`). Start with [Getting started](docs/getting-started/index.md), [Port a device](docs/porting/index.md) or the
--[Architecture](docs/concepts/architecture.md).
--
--## What works
--
--| | POCO X5 Pro 5G (`redwood`) | QEMU `virt` |
--|---|---|---|
--| Lock screen, home screen, Control Center, the stock apps | yes | yes (slow: the CPU is emulated) |
--| Touch, multitouch, buttons | yes | yes |
--| All 8 CPU cores, the big one at 2.4 GHz | yes | no |
--| GPU rendering on Adreno (OpenGL ES through Mesa) | yes | no |
--| Speakers, microphone, the battery's level | yes | sound only |
--| Wi-Fi, cameras, vibration | yes | network only |
--| `/private/var` kept across reboots, Sileo, SSH | yes | no |
--| Metal | partly: a device Metal loads; buffers and libraries; nothing drawn yet | partly |
--| Cellular | partly: the modem is up, the SIM bound, the network seen; no registration yet | no |
--| Bluetooth, charging under this kernel, Apple's services | no | no |
--
--Every part, as each device's own `device.conf` records it: [Devices](docs/devices/index.md). The rows about the lock screen and the
--apps describe what happens when you add layer 2 below yourself.
--
--## The three layers
--
--1. **The open core**: the kernel port, the loader, the drivers, the tools. All source, in these repositories.
--2. **What you put on top**: the kernel can start a user space that you supply. It was built so that it can start the Darwin userland 16.5
--   user space, which you lay out yourself from files you download from Apple; nothing of it is shipped, and nothing is
--   circumvented to get it. Whether you may do that, and whether you want to, is your decision.
--3. **Apple's services** (activation, Apple ID, iCloud, the App Store): not supported and not a goal.
--
--By default the loader goes into RAM through `fastboot boot`, the system lives in RAM for a session, and a reboot brings the phone
--back to its own Android. The one thing written by default is the loader's own log (a few KB) to the `logdump` partition; with
--`ufs_write=1` the kernel writes only to a partition `darwin` that you create yourself. This is a research bench, not a ROM.
--
--## Quick start
--
--```sh
--git clone https://github.com/oosexgang/hakios-xnu-kernel.git hakios
--cd hakios
--make doctor           # what this machine lacks, and what to do
--make qemu-open        # the open kernel in QEMU: nothing of Apple's, nothing of a phone's
--```
--
--Darwin in QEMU (Linux, 12 GB of disk, Apple's IPSW downloaded for you), and a session on the phone:
--[QEMU](docs/getting-started/qemu.md), [On the phone](docs/getting-started/phone.md).
--
--```sh
--make redwood_defconfig   # the phone's configuration: the common kernel + the SC7280's + the phone's own
--make kernel              # the kernel with the drivers that configuration builds
--make phone SECS=600      # a 10-minute session on the phone, in RAM
--```
--
--## Repositories: common, SoC, device, UEFI
--
--| Repository | What |
-+| Where | Is |
- |---|---|
--| [hakios-xnu-kernel](https://github.com/oosexgang/hakios-xnu-kernel/tree/main) | **common**: the kernel port, every common driver, the loader, user space, the tools, this documentation, and `devices/qemu` |
--| [hakios-sm7325](https://github.com/oosexgang/hakios-sm7325) | POCO X5 Pro 5G: its defconfig, status, UEFI platform, firmware script, and its SoC's layer (`soc/`: the Qualcomm SC7280 family) |
--| [hakios-uefi](https://github.com/oosexgang/hakios-uefi) | the firmware that starts the loader: Mu-Silicium with HakiOS's boot path, banner and name, and HakiOS's U-Boot (`u-boot/`) |
--| [hakios-metal](https://github.com/oosexgang/hakios-metal) | Metal's command model on the Adreno, through the kernel's GPU driver |
--
--`devices/manifest.conf` in the common repository names each one and the revision it is at; `tools/hakios-device.py sync` clones them
--into `devices/` and `uefi/`. One repository per device: it carries its SoC's layer, and `tools/hakios-device.py new` makes one. [How the repositories fit](docs/porting/repositories.md).
--
--```sh
--git clone https://github.com/oosexgang/hakios-xnu-kernel.git hakios && cd hakios
--tools/hakios-device.py sync      # the SoC, device and UEFI repositories, at the revisions the manifest names
--```
--
--A device of your own is a repository over the common one: `tools/hakios-device.py new` makes it from the phone's own device tree,
--with every phone driver left out until it is ported. Each driver is an option of the kernel's own configuration (`CONFIG_HAKIOS_*`,
--XNU's `options` and `conf/files`), so a device's defconfig builds exactly the drivers it has.
--[Port a device](docs/porting/index.md), [Drivers in the configuration](docs/drivers-config.md).
--
--## What is in the repository, and what never is
--
--In it: only our own code and data: the patch to Apple's open-source XNU (`xnu/hakios.patch`, APSL 2.0) and our files, the boot
--loader, our programs and libraries, the tools, `prebuilt/` (built from this source; the loader **without** any Apple data:
--`make loader` makes the one that starts Darwin, on your machine, from your own IPSW), and the device and SoC directories.
--
--Never in it: any file of Darwin (you build the system image on your machine from an IPSW you get yourself and hand to
--`sysimage/unpack.sh`; nothing is downloaded for you, decrypted or circumvented); the phone's firmware (pulled from your own phone into
--`fw-*/`, which git ignores); keys, certificates, activation, or anything that would make the phone pass as an iPhone to Apple.
--
--## Independent, and Apple-free at the core
--
--HakiOS is an independent research project. It is **not affiliated with or endorsed by Apple**;
--"Darwin", "iPhone", "XNU" and "Apple" are named only to describe what the code works with. The core
--kernel, the boot loader and the open tools build and run with nothing of Apple's:
--
--```sh
--make qemu-open      # the open kernel + a placeholder loader + a tiny raw-syscall user space, in QEMU
--```
--
--No IPSW, no Darwin user space, no firmware. Booting the stock Darwin user space (`make qemu`,
--`make phone`) is an optional path that needs the IPSW and the phone's firmware, which you supply
--from your own device.
--
--## Licenses and the legal side
--
--My code is under the license of the files it changes: the XNU patch under the Apple Public Source
--License 2.0 (Apple publishes XNU under it; the terms are met: changes are published as source,
--notices are kept), the rest as the file headers say. Darwin, its images, Apple's trademarks and the
--phone's firmware belong to their owners, are not in this repository and are not distributed by me;
--everyone takes them from their own phone and their own IPSW. "Darwin", "iPhone" and "Apple" are
--named only to describe what the code works with. If you believe a file here infringes anyone's
--rights, open an issue and I will remove it.
--
--The detail is in separate files: `LEGAL.md` (what is and is not distributed, and the limits of
--these statements), `COMPLIANCE.md` (how the APSL 2.0 and other terms are met, and the items still
--to verify), `THIRD_PARTY_LICENSES.md` (every third-party component with origin and license), and
--`NOTICE` (the short canonical list). None of this is legal advice.
--
--hakios is an experimental project focused on bringing darwin to android hardware. our goal is to make hakios free and accessible to everyone.
--
--owners:
--@oodze - founder
--@netusd - adversting / ceo-dev
--@wannqn - dev 
--@hxfuxyyXD - dev
--Rhaenja Hun（杭润嘉） — Developer / Sponsor
--
--tym sicilium for the sources!
--
-+| `drivers/map` | the list: for each file, its subsystem and the path it has in Apple's tree |
-+| `drivers/<subsystem>/conf` | which drivers there are and which files each one is: `CONFIG_HAKIOS_<NAME>` in a defconfig builds it in ([docs/drivers-config.md](docs/drivers-config.md)) |
-+| `xnu/apply.sh` | lays Apple's tag, `xnu/hakios.patch`, `xnu/files/` and these drivers into one tree |
-+| `xnu/export.sh` | the reverse, run before committing; refuses a new `hakios.*` file that `drivers/map` does not list |
-+| `tools/drivers-check.py` | CI: the map and the directories agree, nothing is listed twice, nothing is kept in two places |
-+
-+Adding a driver: put it in `drivers/<subsystem>/`, add a line to `drivers/map`, a `driver` block (or a `standard` line) to
-+`drivers/<subsystem>/conf`, `python3 tools/drivers-check.py`. The `bsd/conf/files` and `iokit/conf/files` lines are made from
-+the conf files (`tools/hakios-config.py kernel`); if the rest of the kernel calls the driver, a stand-in for when it is left out
-+goes into `core/hakios.stubs.c`. A driver that is started by a boot argument
-+has to be in `docs/boot-args.md` (`python3 tools/boot-args.py --check`).
-+
-+## Subsystems
-+
-+| Directory | Drivers | Boot arguments | What it is |
-+|---|---|---|---|
-+| `input/` | `hakios.goodix.c`, `hakios.input.c`, `hakios.buttons.c`, `hakios.virtio_input.c` | `touchscreen=` | the touch controller, the event queue behind `/dev/hakios-touch`, the buttons, QEMU's virtio input |
-+| `storage/` | `hakios.ufs.c`, `hakios.ufshc.c/.h`, `hakios.sparse.c`, `hakios.image.c`, `hakios.apfs_check.c`, `hakios.virtio_blk.c` | `ufs=`, `ufs_write=`, `ufs_native=` | the phone's flash (UFS), the sparse and image devices, the checks of the APFS read path, QEMU's virtio-blk. **The only code of the kernel that may write to the phone**: see `tools/provenance.allow` |
-+| `gpu/` | `hakios.adreno.c`, `hakios.gpu.cpp` | `gpu=`, `adreno=` | the Adreno GPU bring-up and the IOKit object user space talks to |
-+| `camera/` | `hakios.camera.c`, `hakios.torch.c` | `cam=`, `torch=` | the camera sensors and ISP interface, the flashlight LED |
-+| `haptic/` | `hakios.haptic.c` | `haptic=` | the vibration motor |
-+| `audio/` | `hakios.adsp.c`, `hakios.audio.c`, `hakios.sound.c`, `hakios.guard.c`, `hakios.speaker.c`, `hakios.mic.c`, `hakios.virtio_sound.c` | `adsp=`, `sound=`, `mic=` | the audio DSP loader, `/dev/hakios-audio`, the speaker amplifiers and their guard (`hakios.guard.c`, until now in `storage/`), the microphone, QEMU's virtio sound |
-+| `power/` | `hakios.battery.c/.cpp`, `hakios.cpufreq.c`, `hakios.thermal.c`, `hakios.pmic.c`, `hakios.battguard.c` | `cpufreq=`, `battmgr=`, `thermal=`, `pmic=`, `battery_stop=` | battery readings (through the DSP), CPU frequency, temperature limits that hand control back to the loader, the PMIC, and an end to an unwatched run before the battery is flat (compiled only: see its head for what it was checked against) |
-+| `wifi/` | `hakios.wifi.c`, `hakios.wlfw.c`, `hakios.lx.c`, `hakios.sta.c`, `hakios.apple80211.c`, `hakios.wlan.cpp` | `wifi=`, `wifi_step=` | the Wi-Fi subsystem's bring-up, the WLAN firmware service, the Linux-driver layer (`wifi/lx/`) and the surface the Darwin Wi-Fi service expects |
-+| `bluetooth/` | `hakios.bt.c` | `bt=` | Bluetooth of the WCN6750 radio chip: step one, a look at its three pins, read only (compiled only; the rest is written down in the file's head as what it needs) |
-+| `modem/` | `hakios.mpss.c`, `hakios.cell.c`, `hakios.qmi.c`, `hakios.nas.c`, `hakios.ipa.c` | `modem=` | the cellular modem path (research; not reviewed in `docs/driver-review/`) |
-+| `net/` | `hakios.net.c`, `hakios.virtio_net.c` | | the `enN` network interface and QEMU's virtio-net |
-+| `core/` | `hakios.version.c`, `hakios.platform.c`, `hakios.stubs.c`, `hakios.socinfo.c` | `hakios_kver=`, `socinfo=` | `kern.hakios.version`; what the drivers share (the hardware locks several take turns at, the `kern.hakios` node, `kern.hakios.drivers`); what the kernel calls in a driver that is left out; the SoC's identity as the hardware reports it |
-+
-+## Reviews
-+
-+`docs/driver-review/` has one read-only audit per group (what was checked, what was found, how sure). They are
-+findings to verify, not a certificate: read the report before relying on a driver, and fix findings in the driver,
-+not in the report.
-+
-+The head of each driver says what was checked about it (compiled, run in QEMU, run on the phone) and what is a guess.
-+
-+The kernel is built from the C and C++ files only; the drivers need no files that are not in this repository,
-+except the touch firmware header (`input/hakios.focaltech_fw.h`), which `tools/provenance.allow` marks as pending.
 diff --git a/configs/boot-args.lst b/configs/boot-args.lst
-index 7af859d..1d9cafc 100644
+index 7af859d..4b85fb4 100644
 --- a/configs/boot-args.lst
 +++ b/configs/boot-args.lst
 @@ -8,16 +8,20 @@ adreno_pause	k
@@ -218,7 +24,15 @@ index 7af859d..1d9cafc 100644
  adsp_step	k
  adsp_wait	k
  apfs_cheap	k
-@@ -159,6 +163,7 @@ metal_gmem	u
+@@ -103,6 +107,7 @@ fbscale	k
+ fbtrace	k
+ fbwidth	k
+ gamut	l
++gicprobe	k
+ gl	u
+ glblit	u
+ glcensus	u
+@@ -159,6 +164,7 @@ metal_gmem	u
  metal_gmem_draws	u
  metal_gmem_off	u
  metal_skip	u
@@ -226,7 +40,7 @@ index 7af859d..1d9cafc 100644
  metal_trace	u
  metal_watch	u
  mic	k
-@@ -212,6 +217,17 @@ modem_wait	k
+@@ -212,6 +218,17 @@ modem_wait	k
  modem_wda_off	k
  net_names	k
  net_trace	k
@@ -244,7 +58,7 @@ index 7af859d..1d9cafc 100644
  pmic	k
  pmic_list	k
  press_power	k
-@@ -258,6 +274,7 @@ surf_clear	k
+@@ -258,6 +275,7 @@ surf_clear	k
  surf_wrap	k
  surftrace	k
  surftrace_of	k
@@ -252,7 +66,7 @@ index 7af859d..1d9cafc 100644
  switcher_wallpaper	u
  syssleep	k
  systrace	k
-@@ -305,6 +322,7 @@ virtio_blk	k
+@@ -305,6 +323,7 @@ virtio_blk	k
  virtio_input	k
  virtio_net	k
  virtio_sound	k
@@ -261,7 +75,7 @@ index 7af859d..1d9cafc 100644
  wifi_again	k
  wifi_ask	k
 diff --git a/configs/common_defconfig b/configs/common_defconfig
-index 08ae448..bea7427 100644
+index 08ae448..1a2c019 100644
 --- a/configs/common_defconfig
 +++ b/configs/common_defconfig
 @@ -2,7 +2,7 @@
@@ -269,7 +83,7 @@ index 08ae448..bea7427 100644
  # Made by tools/hakios-config.py listing common -o <this file>; the values are the ones that file sets, and tests/CI check that it names every symbol.
  #
 -# 350 symbols in 18 groups; 34 are set, 25 of them drivers built in.
-+# 379 symbols in 18 groups; 34 are set, 25 of them drivers built in.
++# 380 symbols in 18 groups; 34 are set, 25 of them drivers built in.
  #
  
  #
@@ -283,11 +97,20 @@ index 08ae448..bea7427 100644
  
  #
 -# CPU, memory and boot (21)
-+# CPU, memory and boot (23)
++# CPU, memory and boot (24)
  #
  
  # CPU cores the kernel uses, 1 to 8; one if not set
-@@ -134,6 +134,9 @@ CONFIG_HAKIOS_WIFI=y
+@@ -128,12 +128,18 @@ CONFIG_HAKIOS_WIFI=y
+ # read by hakios.cpufreq.c (kernel)
+ # CONFIG_DDR_VOTE is not set
+ 
++# read by the patch to Apple's files (kernel)
++# CONFIG_GICPROBE is not set
++
+ # read by GenericARMPE.cpp (kernel)
+ # CONFIG_MACHINE_NAME is not set
+ 
  # read by hakios.cpufreq.c (kernel)
  # CONFIG_MEMBENCH is not set
  
@@ -297,7 +120,7 @@ index 08ae448..bea7427 100644
  # read by the patch to Apple's files, loader.c (kernel and loader)
  # CONFIG_RD is not set
  
-@@ -152,6 +155,9 @@ CONFIG_HAKIOS_WIFI=y
+@@ -152,6 +158,9 @@ CONFIG_HAKIOS_WIFI=y
  # read by GenericARMPE.cpp (kernel)
  # CONFIG_SMALL_CORES_AFTER is not set
  
@@ -307,7 +130,7 @@ index 08ae448..bea7427 100644
  # read by the patch to Apple's files (kernel)
  # CONFIG_SYSSLEEP is not set
  
-@@ -335,7 +341,7 @@ CONFIG_TOUCHSCREEN=y
+@@ -335,7 +344,7 @@ CONFIG_TOUCHSCREEN=y
  # CONFIG_VIRTIO_INPUT is not set
  
  #
@@ -316,7 +139,7 @@ index 08ae448..bea7427 100644
  #
  
  # rendering on Adreno (an image built with GL=1; the GPU's firmware from your phone) [needs fw-gpu/ from the phone]
-@@ -371,12 +377,18 @@ CONFIG_GPU=y
+@@ -371,12 +380,18 @@ CONFIG_GPU=y
  # step 17 asks the GMU for the 3D core's Nth speed: 1 315 MHz, 2 450 MHz, 3 550 MHz (the default: the most this ...
  # CONFIG_ADRENO_SPEED is not set
  
@@ -338,7 +161,7 @@ index 08ae448..bea7427 100644
  # before any step: read what the firmware left the display controller doing (display_probe() below; two clocks are ...
  # CONFIG_DISPLAY_PROBE is not set
  
-@@ -527,6 +539,9 @@ CONFIG_GPU=y
+@@ -527,6 +542,9 @@ CONFIG_GPU=y
  # only the program metal_test (userland/src/metal_test.m): the safe level, for seeing what Metal does with the device
  # CONFIG_METAL is not set
  
@@ -348,7 +171,7 @@ index 08ae448..bea7427 100644
  # read by MiniIOMobileFramebuffer.cpp (kernel)
  # CONFIG_REC_MB is not set
  
-@@ -561,7 +576,7 @@ CONFIG_GPU=y
+@@ -561,7 +579,7 @@ CONFIG_GPU=y
  # CONFIG_VBLUR is not set
  
  #
@@ -357,7 +180,7 @@ index 08ae448..bea7427 100644
  #
  
  # the audio DSP; the battery level in the UI and charging state come through it [needs fw-audio/ from the phone]
-@@ -591,6 +606,9 @@ CONFIG_SOUND=4
+@@ -591,6 +609,9 @@ CONFIG_SOUND=4
  # read by hakios.adsp.c (kernel)
  # CONFIG_ADSP_LISTEN is not set
  
@@ -367,7 +190,7 @@ index 08ae448..bea7427 100644
  # read by hakios.adsp.c (kernel)
  # CONFIG_ADSP_NEW is not set
  
-@@ -600,6 +618,9 @@ CONFIG_SOUND=4
+@@ -600,6 +621,9 @@ CONFIG_SOUND=4
  # read by hakios.adsp.c (kernel)
  # CONFIG_ADSP_RETURN is not set
  
@@ -377,7 +200,7 @@ index 08ae448..bea7427 100644
  # read by hakios.adsp.c (kernel)
  # CONFIG_ADSP_STEP is not set
  
-@@ -630,6 +651,9 @@ CONFIG_SOUND=4
+@@ -630,6 +654,9 @@ CONFIG_SOUND=4
  # read by hakios.mic.c (kernel)
  # CONFIG_MIC_TEST is not set
  
@@ -387,7 +210,7 @@ index 08ae448..bea7427 100644
  # read by hakios.audio.c (kernel)
  # CONFIG_REC_SOUND is not set
  
-@@ -1075,7 +1099,7 @@ CONFIG_MODEM_AGAIN=y
+@@ -1075,7 +1102,7 @@ CONFIG_MODEM_AGAIN=y
  # CONFIG_UFS_PROBE is not set
  
  #
@@ -396,7 +219,7 @@ index 08ae448..bea7427 100644
  #
  
  # read by inject_sb.c (user space)
-@@ -1087,6 +1111,12 @@ CONFIG_MODEM_AGAIN=y
+@@ -1087,6 +1114,12 @@ CONFIG_MODEM_AGAIN=y
  # the second look this many seconds later (0: no second look; 30)
  # CONFIG_BT_AGAIN is not set
  
@@ -409,7 +232,7 @@ index 08ae448..bea7427 100644
  # CoreAnimation's frame clock from the display driver's refresh notifications
  # CONFIG_CA_VBL is not set
  
-@@ -1111,6 +1141,60 @@ CONFIG_MODEM_AGAIN=y
+@@ -1111,6 +1144,60 @@ CONFIG_MODEM_AGAIN=y
  # the renderer is made to answer that it has those functions after all
  # CONFIG_GLYES is not set
  
@@ -470,7 +293,7 @@ index 08ae448..bea7427 100644
  # the root is to be the Darwin root volume on /dev/DEV -- the phone's flash, read only
  # CONFIG_ROOT_APFS is not set
  
-@@ -1120,6 +1204,9 @@ CONFIG_MODEM_AGAIN=y
+@@ -1120,6 +1207,9 @@ CONFIG_MODEM_AGAIN=y
  # read by init.c (user space)
  # CONFIG_VAR_HFS is not set
  
@@ -481,7 +304,7 @@ index 08ae448..bea7427 100644
  # Extra arguments (1)
  #
 diff --git a/configs/symbols.tsv b/configs/symbols.tsv
-index 31ed41b..3137ed1 100644
+index 31ed41b..8b4d3b7 100644
 --- a/configs/symbols.tsv
 +++ b/configs/symbols.tsv
 @@ -8,15 +8,19 @@ ADRENO_PAUSE	arg	adreno_pause	GPU and display	k	hakios.adreno.c	how long the new
@@ -505,7 +328,15 @@ index 31ed41b..3137ed1 100644
  ADSP_STEP	arg	adsp_step	Audio and battery	k	hakios.adsp.c	
  ADSP_WAIT	arg	adsp_wait	Audio and battery	k	hakios.adsp.c	
  APFS_CHEAP	arg	apfs_cheap	Storage and APFS	k	apfs_vfsops.c	
-@@ -145,6 +149,7 @@ METAL_GMEM	arg	metal_gmem	User space	u	HakiosMetalCA.m
+@@ -94,6 +98,7 @@ FBSCALE	arg	fbscale	GPU and display	k	MiniIOMobileFramebuffer.cpp	the same 375 x
+ FBTRACE	arg	fbtrace	GPU and display	k	MiniIOMobileFramebuffer.cpp	log the first N calls of every selector (default 3)
+ FBWIDTH	arg	fbwidth	GPU and display	k	MiniIOMobileFramebuffer.cpp	
+ GAMUT	arg	gamut	Loader	l	loader.c	
++GICPROBE	arg	gicprobe	CPU, memory and boot	k	(patch)	
+ GL	arg	gl	User space	u	inject.c,inject_sb.c	not even with a GPU; gl=1: also without one, by Mesa's software driver (slow; for working on eagl.c in QEMU)
+ GLBLIT	arg	glblit	GPU and display	u	eagl.c	the surface's memory, as before
+ GLCENSUS	arg	glcensus	GPU and display	u	eagl.c	
+@@ -145,6 +150,7 @@ METAL_GMEM	arg	metal_gmem	User space	u	HakiosMetalCA.m
  METAL_GMEM_DRAWS	arg	metal_gmem_draws	User space	u	HakiosMetalCA.m	GMEM for a pass whose like had at least N draws in the frame before (hakios_metal_cb_set_gmem_min_draws), sysmem for the rest; 56 when not given, 0
  METAL_GMEM_OFF	arg	metal_gmem_off	User space	u	HakiosMetalCA.m	
  METAL_SKIP	arg	metal_skip	User space	u	HakiosMetalCA.m	
@@ -513,7 +344,7 @@ index 31ed41b..3137ed1 100644
  METAL_TRACE	arg	metal_trace	User space	u	HakiosMetalCA.m	
  METAL_WATCH	arg	metal_watch	User space	u	inject.c	
  MIC_ADC	arg	mic_adc	Audio and battery	k	hakios.mic.c	
-@@ -192,6 +197,17 @@ MODEM_SIM_SWITCH_OFF	arg	modem_sim_switch_off	Cellular	k	hakios.mpss.c
+@@ -192,6 +198,17 @@ MODEM_SIM_SWITCH_OFF	arg	modem_sim_switch_off	Cellular	k	hakios.mpss.c
  MODEM_STEP	arg	modem_step	Cellular	k	hakios.mpss.c	the steps once the root is there, then back to the loader if modem_return=1 says so
  MODEM_WAIT	arg	modem_wait	Cellular	k	hakios.mpss.c	
  MODEM_WDA_OFF	arg	modem_wda_off	Cellular	k	hakios.mpss.c	
@@ -531,7 +362,7 @@ index 31ed41b..3137ed1 100644
  PMIC_LIST	arg	pmic_list	Chip, thermal and PMIC	k	hakios.pmic.c	only the clock, not the inventory of every block
  PRESS_POWER	arg	press_power	Touch and buttons	k	hakios.buttons.c	a short press of the power key that many seconds after boot, and another ten seconds later, given to Darwin as the key's own are (hakios_touch_post):
  PRESS_POWER_MS	arg	press_power_ms	Touch and buttons	k	hakios.buttons.c	
-@@ -234,6 +250,7 @@ SURF_CLEAR	arg	surf_clear	GPU and display	k	MiniIOSurface.cpp	kept memory is giv
+@@ -234,6 +251,7 @@ SURF_CLEAR	arg	surf_clear	GPU and display	k	MiniIOSurface.cpp	kept memory is giv
  SURF_WRAP	arg	surf_wrap	GPU and display	k	MiniIOSurface.cpp	surfaces around the client's pictures refused, as before methodWrapClientImage (for comparing)
  SURFTRACE	arg	surftrace	GPU and display	k	MiniIOSurface.cpp	log the first N surfaces created (default 24)
  SURFTRACE_OF	arg	surftrace_of	GPU and display	k	MiniIOSurface.cpp	
@@ -539,7 +370,7 @@ index 31ed41b..3137ed1 100644
  SWITCHER_WALLPAPER	arg	switcher_wallpaper	User space	u	inject_sb.c	
  SYSSLEEP	arg	syssleep	CPU, memory and boot	k	(patch)	
  SYSTRACE	arg	systrace	CPU, memory and boot	k	(patch),user_exception_trace.c	
-@@ -272,6 +289,7 @@ VBLUR	arg	vblur	GPU and display	u	eagl.c
+@@ -272,6 +290,7 @@ VBLUR	arg	vblur	GPU and display	u	eagl.c
  VIRTIO_BLK	arg	virtio_blk	Storage and APFS	k	hakios.virtio_blk.c	
  VIRTIO_INPUT	arg	virtio_input	Touch and buttons	k	hakios.virtio_input.c	
  VIRTIO_SOUND	arg	virtio_sound	Audio and battery	k	hakios.virtio_sound.c	
@@ -563,7 +394,7 @@ index 60616fe..e9dfe94 100644
  	repository  https://github.com/oosexgang/hakios-uefi.git
  	revision    1c6522893266157506c767e2ca427053ed3634a8
 diff --git a/docs/boot-args.md b/docs/boot-args.md
-index 16bc0fd..a3bd44c 100644
+index 16bc0fd..51c9d15 100644
 --- a/docs/boot-args.md
 +++ b/docs/boot-args.md
 @@ -2,13 +2,13 @@
@@ -571,7 +402,7 @@ index 16bc0fd..a3bd44c 100644
  Made by `tools/boot-args.py --markdown`; CI fails if it is out of date with the source (`tools/boot-args.py --check`).
  
 -Every argument that the kernel, the loader or user space of this port reads, and which file reads it. **339 arguments**: 276 read by the kernel, 14 by the loader, 59 by user space (one is read in more than one place).
-+Every argument that the kernel, the loader or user space of this port reads, and which file reads it. **357 arguments**: 294 read by the kernel, 14 by the loader, 59 by user space (one is read in more than one place).
++Every argument that the kernel, the loader or user space of this port reads, and which file reads it. **358 arguments**: 295 read by the kernel, 14 by the loader, 59 by user space (one is read in more than one place).
  
  This is a catalogue of what exists and who reads it, not a manual. What an argument means is in the head of the file that reads it. The stable switches have a symbol in the configuration (`tools/hakios-config.py help SYMBOL`, `docs/configs.md`); the rest are the knobs of bring-up (a driver's steps, pauses, traces, test modes) and can change with the driver. Any of them can be given in a configuration with `CONFIG_BOOTARGS="name=value ..."`, which checks that each name is in this list.
  
@@ -636,11 +467,16 @@ index 16bc0fd..a3bd44c 100644
  | `hakios_kver` | K | `hakios.version.c` |  | the loader (from the payload's kernel.ver) |
  
 -## CPU, memory and boot (23)
-+## CPU, memory and boot (25)
++## CPU, memory and boot (26)
  
  | Argument | Layer | Read by | Configuration | Set by |
  |---|---|---|---|---|
-@@ -362,12 +368,14 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
+@@ -358,16 +364,19 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
+ | `ddr_rest` | K | `hakios.cpufreq.c` | `CONFIG_DDR_REST` |  |
+ | `ddr_vote` | K | `hakios.cpufreq.c` | `CONFIG_DDR_VOTE` |  |
+ | `epoch` | K | `GenericARMPE.cpp` |  | xl (the host's clock) |
++| `gicprobe` | K | `(patch)` | `CONFIG_GICPROBE` |  |
+ | `hv_wdt_pet` | K | `loader_return.c` |  | the loader, when it has armed the watchdog (the runner also passes it) |
  | `loader_return_after` | KL | `loader.c`, `loader_return.c` |  | xl (XL_SECS) |
  | `machine_name` | K | `GenericARMPE.cpp` | `CONFIG_MACHINE_NAME` |  |
  | `membench` | K | `hakios.cpufreq.c` | `CONFIG_MEMBENCH` |  |
@@ -655,7 +491,7 @@ index 16bc0fd..a3bd44c 100644
  | `syssleep` | K | `(patch)` | `CONFIG_SYSSLEEP` |  |
  | `systrace` | K | `(patch)`, `user_exception_trace.c` | `CONFIG_SYSTRACE` |  |
  | `systrace_name` | K | `(patch)` | `CONFIG_SYSTRACE_NAME` |  |
-@@ -395,7 +403,7 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
+@@ -395,7 +404,7 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
  | `ufs` | L | `loader.c` | `CONFIG_UFS` |  |
  | `ufs_probe` | L | `loader.c` | `CONFIG_UFS_PROBE` |  |
  
@@ -664,7 +500,7 @@ index 16bc0fd..a3bd44c 100644
  
  | Argument | Layer | Read by | Configuration | Set by |
  |---|---|---|---|---|
-@@ -421,8 +429,18 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
+@@ -421,8 +430,18 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
  | `metal_skip` | U | `HakiosMetalCA.m` | `CONFIG_METAL_SKIP` |  |
  | `metal_trace` | U | `HakiosMetalCA.m` | `CONFIG_METAL_TRACE` |  |
  | `metal_watch` | U | `inject.c` | `CONFIG_METAL_WATCH` |  |
@@ -891,19 +727,6 @@ index 6241a20..df7490d 100644
 +| **`HAKIOS_PICASSO_WLAN`**<br>Picasso modem-hosted WLAN (WCN3990 via MPSS PAS 4) | `hakios.picasso_wlan.cpp` |  |  | built | built | |
  
  The columns on the right are the devices' defconfigs: "built" means that defconfig builds the driver in.
-diff --git a/qemu/run.sh b/qemu/run.sh
-index c05e8a0..4644d5e 100755
---- a/qemu/run.sh
-+++ b/qemu/run.sh
-@@ -34,7 +34,7 @@ if [ -n "${QEMU_ESP:-}" ]; then
- 	mkdir -p esp/EFI/hakios && cp payload.bin esp/EFI/hakios/payload.bin
- 	PAYLOAD_DEVICE=()
- fi
--timeout "$T" qemu-system-aarch64 -M virt,gic-version=3 -cpu cortex-a76 -smp ${QEMU_SMP:-1} -m ${QEMU_MEM:-6G} \
-+timeout "$T" qemu-system-aarch64 -M virt,gic-version=3 -cpu ${QEMU_CPU:-cortex-a76} -smp ${QEMU_SMP:-1} -m ${QEMU_MEM:-6G} \
-   -accel tcg,tb-size=${QEMU_TB_MB:-384} \
-   -drive if=pflash,format=raw,readonly=on,file="$EFI" \
-   -drive if=pflash,format=raw,file=vars.fd \
 diff --git a/tools/apfs/mkapfs.py b/tools/apfs/mkapfs.py
 index 2628f4a..0f9c853 100755
 --- a/tools/apfs/mkapfs.py
