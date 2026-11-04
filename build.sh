@@ -15,11 +15,12 @@
 set -euo pipefail
 
 PICASSO_DIR=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
+WORKSPACE_ROOT=$(dirname "$PICASSO_DIR")
 UPSTREAM_DIR="$PICASSO_DIR/upstream"
 BUILD_DIR="$PICASSO_DIR/build"
 OUT_DIR="$BUILD_DIR/out"
-SHARED_HOST_WS="${SHARED_HOST_WS:-/home/tritm/hakios-u}"
-SHARED_MU_VENV="${SHARED_MU_VENV:-/home/tritm/hakios-mu/.venv}"
+SHARED_HOST_WS="${SHARED_HOST_WS:-$WORKSPACE_ROOT/hakios-u}"
+SHARED_MU_VENV="${SHARED_MU_VENV:-$WORKSPACE_ROOT/hakios-mu/.venv}"
 
 TARGET="all"
 CLEAN=0

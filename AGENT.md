@@ -31,21 +31,26 @@ hakios-u/                            # Tầng Common (Upstream: oosexgang/hakios
     │   ├── bluetooth/               # CONFIG_HAKIOS_PICASSO_BT (/dev/hakios-bt)
     │   ├── input/                   # CONFIG_HAKIOS_NOVATEK (Novatek NT36672C SPI touch)
     │   └── wifi/                    # CONFIG_HAKIOS_PICASSO_WLAN (WCN3990 MPSS PAS)
-    ├── uefi/                        # Cấu hình Mu-Silicium UEFI cho Picasso
-    ├── patches/                     # Downstream patch series cho phần common/XNU khi chưa merge upstream
-    │   ├── UPSTREAM                 # Commit hash của upstream làm base
-    │   ├── series                   # Thứ tự áp dụng các file .patch
-    │   └── *.patch                  # Các bản vá đánh số thứ tự rõ ràng
+    ├── uefi/                        # Cấu hình Mu-Silicium UEFI cho Picasso (apply.sh, export.sh, files/)
+    ├── prebuilt/                    # BootShim.bin, device-tree.dtb, mkbootimg.py, ramdisk
+    ├── build.sh                     # Script build tự động (clone từ upstream/ sang build/, áp patch & biên dịch)
+    ├── patches/                     # Downstream patch series (0001..0006) cho phần common/XNU/Metal
+    │   ├── UPSTREAM                 # Commit hash của các repo upstream làm base
+    │   ├── series                   # Thứ tự áp dụng 6 file .patch
+    │   └── 000*.patch               # Các bản vá phân tách rõ theo từng tầng
+    ├── upstream/                    # (gitignored) Chứa các repo gốc sạch (TUYỆT ĐỐI KHÔNG CHỈNH SỬA)
+    ├── build/                       # (gitignored) Không gian biên dịch cô lập và thư mục xuất file build/out/
     └── note.md                      # Nhật ký kỹ thuật, kết quả debug và kế hoạch phiên tiếp theo
 ```
 
-### Quy tắc sở hữu mã nguồn (Ownership Rules):
-1. **Không sửa bẩn Upstream Common:** Không tự ý commit code riêng của `picasso` vào nhánh `main` của `hakios-xnu-kernel`. Mọi phát triển tích hợp tại `/home/tritm/hakios-u` nằm trên nhánh `picasso-main`, và mọi tài sản thiết bị phải được đồng bộ về `/home/tritm/hakios-picasso`.
-2. **Driver riêng của thiết bị (`devices/picasso/drivers/<subsystem>/conf`):**
+### Quy tắc sở hữu mã nguồn & Bảo toàn Upstream (Ownership & Immutability Rules):
+1. **Tuyệt đối không chỉnh sửa `upstream/`:** Thư mục `upstream/` bên trong `hakios-picasso` chứa bản clone nguyên gốc của `hakios-xnu-kernel`, `hakios-uefi`, `hakios-metal`, `xnu-8796.121.2`, `hfs-627.100.6` và `Mu-Silicium`. Mọi thao tác áp patch và biên dịch bắt buộc phải diễn ra trong `build/` thông qua `./build.sh`.
+2. **Không sửa bẩn Upstream Common:** Không tự ý commit code riêng của `picasso` vào nhánh `main` của `hakios-xnu-kernel`. Mọi tài sản thiết bị và bản vá phải được đồng bộ về `hakios-picasso`.
+3. **Driver riêng của thiết bị (`devices/picasso/drivers/<subsystem>/conf`):**
    - Khai báo qua symbol `CONFIG_HAKIOS_<NAME>`.
    - Khi chạy `make kernel`, `xnu/sync-drivers.sh` (qua `tools/hakios-config.py external-files`) tự động chép file vào cây XNU dưới dạng `optional`.
    - Khi chạy `xnu/export.sh`, các file driver của thiết bị được tự động loại trừ khỏi `xnu/hakios.patch` chung.
-3. **Không phát minh lại cơ chế đã có:** Nếu một thông số phần cứng là địa chỉ SoC đã được hỗ trợ qua `soc_*` boot-args, phải đặt trong `soc.args` hoặc `configs/picasso.config` thay vì hardcode vào mã nguồn common.
+4. **Không phát minh lại cơ chế đã có:** Nếu một thông số phần cứng là địa chỉ SoC đã được hỗ trợ qua `soc_*` boot-args, phải đặt trong `soc.args` hoặc `configs/picasso.config` thay vì hardcode vào mã nguồn common.
 
 ---
 
@@ -87,13 +92,13 @@ Khi bật hoặc gỡ lỗi một subsystem, **luôn cô lập bằng boot-args*
 
 ### Bước 4: Quy Trình Phát Triển Kernel / XNU & Quản Lý Downstream Patch
 Khi cần sửa mã nguồn thuộc XNU (`xnu/files/` hoặc `xnu-src/`):
-1. Chỉnh sửa trong `xnu/files/...` và đồng bộ sang `xnu-src/xnu-8796.121.2/...` (hoặc sửa trong `xnu-src/` rồi chạy `./xnu/export.sh`).
-2. Biên dịch lại kernel và kiểm thử thực tế trên thiết bị qua RAM boot.
-3. Xuất bản vá downstream định danh rõ ràng vào `/home/tritm/hakios-picasso/patches/` và cập nhật `/home/tritm/hakios-picasso/patches/series` cùng `/home/tritm/hakios-picasso/patches/UPSTREAM`.
+1. Chỉnh sửa trong cây làm việc (`build/hakios-xnu-kernel/xnu/files/...` hoặc `xnu-src/xnu-8796.121.2/...`) rồi chạy `./xnu/export.sh`.
+2. Xuất bản vá downstream định danh rõ ràng vào `patches/` (`0001`..`0006`) và cập nhật `patches/series` cùng `patches/UPSTREAM`.
+3. Chạy `./build.sh all --clean` để kiểm chứng toàn bộ patch apply sạch trên bản clone mới từ `upstream/`, biên dịch thành công Kernel + Loader + Userland + UEFI, và kiểm thử thực tế trên thiết bị qua RAM boot.
 
 ### Bước 5: Kiểm Định Chất Lượng (CI Checks) & Ghi Chép (`device.conf` + `note.md`)
 Trước khi commit và push:
-1. Chạy bộ công cụ kiểm định chuẩn HakiOS tại `/home/tritm/hakios-u`:
+1. Chạy bộ công cụ kiểm định chuẩn HakiOS trong cây `build/hakios-xnu-kernel`:
    ```bash
    python3 tools/hakios-device.py check picasso
    python3 tools/hakios-config.py check

@@ -36,6 +36,12 @@ def assert_modem_lines(fd):
     wanted = termios.TIOCM_DTR | termios.TIOCM_RTS
     fcntl.ioctl(fd, termios.TIOCMBIS, struct.pack('I', wanted))
 
+REPO_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+OUT_DIR = os.path.join(REPO_DIR, 'build', 'out')
+KERNEL_WS = os.path.join(REPO_DIR, 'build', 'hakios-xnu-kernel')
+if not os.path.isdir(KERNEL_WS):
+    KERNEL_WS = os.path.join(os.path.dirname(REPO_DIR), 'hakios-u')
+
 print('=== Step 1: Checking fastboot device ===', flush=True)
 devs = run('fastboot devices')
 if 'xnuloader' not in devs and 'fastboot' not in devs:
@@ -45,7 +51,8 @@ print('=== Step 2: Stage resident system.apfs (2.4 GB) ===', flush=True)
 run('fastboot oem ramdisk', timeout=10)
 t0 = time.time()
 print('Uploading system.apfs to RAM (this takes ~75-100s)...', flush=True)
-run('fastboot stage /home/tritm/hakios-u/userland/system.apfs', timeout=300)
+sys_apfs = os.path.join(OUT_DIR, 'system.apfs') if os.path.isfile(os.path.join(OUT_DIR, 'system.apfs')) else os.path.join(KERNEL_WS, 'userland/system.apfs')
+run(f'fastboot stage {sys_apfs}', timeout=300)
 print(f'Upload complete in {time.time() - t0:.1f}s!', flush=True)
 
 print('=== Step 3: Create Boot Payload ===', flush=True)
@@ -57,7 +64,7 @@ cmdline = (
 )
 
 mkpayload_cmd = (
-    'cd /home/tritm/hakios-u && ./xnuloader/mkpayload.py -o /tmp/payload_gui_full.bin '
+    f'cd {KERNEL_WS} && ./xnuloader/mkpayload.py -o /tmp/payload_gui_full.bin '
     'loader.efi=xnuloader/loader.efi kernel=hakios-kernel ramdisk=userland/root.apfs --usb '
     f'--cmdline "{cmdline}"'
 )
@@ -92,7 +99,8 @@ if fd is None:
     sys.exit(0)
 
 try:
-    log_file = open('/home/tritm/gui_springboard.log', 'wb')
+    os.makedirs(os.path.join(REPO_DIR, 'build'), exist_ok=True)
+    log_file = open(os.path.join(REPO_DIR, 'build', 'gui_springboard.log'), 'wb')
     stream_start = time.time()
     while time.time() - stream_start < 150:
         r, _, _ = select.select([fd], [], [], 0.3)

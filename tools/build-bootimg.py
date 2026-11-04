@@ -15,12 +15,14 @@ usage: build-bootimg.py [-o OUT] [--mu MU] [--hakios HAKIOS] [--xnup XNUP] [--dt
 import argparse, gzip, os, subprocess, sys
 
 FD_BASE, FD_SIZE = 0x9F100000, 0x200000
+REPO_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+WS_DIR = os.path.dirname(REPO_DIR)
 
 ap = argparse.ArgumentParser()
-ap.add_argument('-o', '--output', default='/tmp/hakios-picasso-boot.img')
-ap.add_argument('--mu', default='/home/tritm/hakios-mu')
-ap.add_argument('--hakios', default='/home/tritm/hakios-u')
-ap.add_argument('--uefi', default='/home/tritm/uefi_picasso')
+ap.add_argument('-o', '--output', default=os.path.join(REPO_DIR, 'build/out/boot-picasso.img'))
+ap.add_argument('--mu', default=os.path.join(REPO_DIR, 'build/Mu-Silicium'))
+ap.add_argument('--hakios', default=os.path.join(REPO_DIR, 'build/hakios-xnu-kernel'))
+ap.add_argument('--uefi', default=os.path.join(REPO_DIR, 'build/Mu-Silicium'))
 ap.add_argument('--xnup', default='')
 ap.add_argument('--dtb', default='')
 ap.add_argument('--cmdline', default='debug=0x8 hv_wdt_pet=1 cpus=1')

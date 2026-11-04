@@ -27,10 +27,10 @@ Hệ điều hành: **Apple Darwin Kernel 22.5.0 (`xnu-8796.121.2`) + iOS 16.5 (
 
 ## 2. Phân Tích Root-Cause Vấn Đề Chưa Lên Homescreen (3 Dải Màu + Console)
 
-Qua đối chiếu nhật ký thực tế (`/home/tritm/gpu_gui.log` lúc 15:28 và `/home/tritm/gui_springboard.log` lúc 16:53) cùng kết quả dịch ngược `dyld_shared_cache_arm64` (`20F66` — `IOMobileFramebuffer`, `QuartzCore`, `CoreBrightness`):
+Qua đối chiếu nhật ký thực tế (`gpu_gui.log` lúc 15:28 và `gui_springboard.log` lúc 16:53) cùng kết quả dịch ngược `dyld_shared_cache_arm64` (`20F66` — `IOMobileFramebuffer`, `QuartzCore`, `CoreBrightness`):
 
-### 2.1. Nguyên nhân trực tiếp khiến `backboardd` dừng ở `/home/tritm/gpu_gui.log` (15:28)
-Trong `/home/tritm/gpu_gui.log`:
+### 2.1. Nguyên nhân trực tiếp khiến `backboardd` dừng ở `gpu_gui.log` (15:28)
+Trong `gpu_gui.log`:
 - Dòng 2149–2163: `backboardd[11]` gọi các selector `57, 15, 22, 8, 28, 29, 33, 79, 74` của `MiniIOMobileFramebuffer`.
 - Dòng 2203–2370: Ngay sau selector 74, `backboardd` **không hề dừng lại vì selector 74** mà tiếp tục nạp `libhakios.gl.dylib`, khởi tạo ngữ cảnh OpenGL ES 3.2 Adreno 620 (`FD620`), và tạo `CAWindowServerDisplay:0x10200d970 size:{1125,2436} scale:3`.
 - Dòng 2395:
@@ -89,10 +89,10 @@ Kết quả dịch ngược `IOMobileFramebuffer` (`dyld_shared_cache_arm64.13`)
      - Do đó: Mặc định giữ `out[0] = 0` (như thiết kế gốc của `MiniIOMobileFramebuffer`), hoặc chỉ bật `out[0] > 0` qua boot-arg `fb_frameinfo=1` khi đồng thời gửi notification type 3.
 
 ### 2.4. Vấn đề `lsd[25]` spam `denied attempt to escape CPU monitor`
-- Trong `/home/tritm/gpu_gui.log`, `lsd[25]` gây bão log console 701 lần với thông báo:
+- Trong `gpu_gui.log`, `lsd[25]` gây bão log console 701 lần với thông báo:
   `lsd[25] corp: denied attempt to escape CPU monitor (missing required entitlement)`
 - **Nguyên nhân:** `minisandbox_priv_grant()` trong `xnu/files/bsd/kern/kern_minimac.c` (dòng 325) chỉ mới cấp tự động `PRIV_WORK_INTERVAL`.
-- **Cách khắc phục:** Cấp thêm `PRIV_PROC_CPUMON_OVERRIDE` (1016) tại `minisandbox_priv_grant()`:
+- **Cách khắc phục (Đã áp dụng trong patch `0001`):** Cấp thêm `PRIV_PROC_CPUMON_OVERRIDE` (`10012`) tại `minisandbox_priv_grant()`:
   ```c
   if (priv == PRIV_WORK_INTERVAL || priv == PRIV_PROC_CPUMON_OVERRIDE) {
       return 0;
@@ -101,18 +101,18 @@ Kết quả dịch ngược `IOMobileFramebuffer` (`dyld_shared_cache_arm64.13`)
 
 ---
 
-## 3. Kế Hoạch Hành Động Ở Phiên Tiếp Theo (Next Session Checklist)
+## 3. Trạng Thái Refactor & Build Kiểm Chứng Từ `upstream/` (2026-11-04)
 
-1. **Cập nhật Kernel (`MiniIOMobileFramebuffer.cpp` & `kern_minimac.c`) và xuất Patch Downstream:**
-   - Thêm properties `"CanvasWidth"`, `"CanvasHeight"` và các selector `15`, `22`, `29`, `33`, `57` vào `MiniIOMobileFramebuffer.cpp`.
-   - Thêm `PRIV_PROC_CPUMON_OVERRIDE` vào `minisandbox_priv_grant()` trong `kern_minimac.c`.
-   - Chạy `xnu/export.sh` và cập nhật patch trong `hakios-picasso/patches/`.
-2. **Làm gọn `userland/src/inject.c` và đóng gói lại `userland/root.apfs`:**
-   - Bỏ vòng lặp in 34 dòng `IOService` và các lệnh mở thử `IOMobileFramebufferOpen` dư thừa trong `setup_primary_display_descriptor()`.
-   - Đảm bảo `dlopen` `CoreBrightness.framework` trong `brightness_fixes()` nếu `BLControl` chưa nạp, và in log xác nhận khi đã cài hook `-[BLControl waitForALSArrival]`.
-   - Chạy `cd /home/tritm/hakios-u/userland && ./build.sh GL=1` để cập nhật `userland/root.apfs`.
-3. **Boot Test GUI cô lập (`boot_gpu_gui.py`):**
-   - Dùng cmdline cô lập (tắt `wifi=0 modem=0 adsp=0 sound=0 mic=0`, bật `adreno=22 gpu=1 adreno_keep=1 ca_vbl=1 buttons=1`).
-   - Kiểm tra `/home/tritm/gpu_gui.log` xác nhận `backboardd` vượt qua `[Backlight] instantiating BrightnessSystem`, khởi chạy `SpringBoard`, và thực hiện `SwapBegin` / `SwapEnd` (`MiniIOMobileFramebuffer: swap #1`).
-4. **Sửa lỗi `tlmm.size` trong `drivers/audio/hakios.sound.c`:**
-   - Khi `is_picasso = true`, đặt `tlmm.phys = 0x0f500000; tlmm.size = 0x5d000;` (đúng kích thước vùng nhớ South TLMM của SM7250 theo DeviceTree) để tránh lỗi `_io_map` khi bật `sound=4`.
+1. **Đã chuẩn hóa cấu trúc `hakios-picasso` & Bộ 6 Patch (`patches/series`):**
+   - `0001-xnu-picasso-smp-timer-iomap-display.patch`: XNU SMP, `sweettick` (đã xóa console debug spam `.`, `T%u `, `W%d `), `IO_MAP_SIZE` 32MB, `PRIV_PROC_CPUMON_OVERRIDE`, `MiniIOMobileFramebuffer` (`CanvasWidth`/`CanvasHeight` + selectors 15, 22, 29, 33, 57, 74, 79).
+   - `0002-xnu-picasso-usb-cdc-console-driver.patch`: Tách riêng driver `xnu/files/bsd/dev/picasso_usb.c` (+3155 dòng).
+   - `0003-drivers-picasso-adreno620-audio-ufs-mpss-buttons.patch`: Common drivers cho Adreno 620, Audio (`tlmm.size = 0x5d000`), UFS 2.1, MPSS PAS.
+   - `0004-userland-picasso-init-inject-springboard.patch`: Userland `init.c`, `inject.c` (`BrightnessSystem` & `BKSDisplayServicesStart` hooks, dọn gọn `setup_primary_display_descriptor()`).
+   - `0005-loader-configs-and-tools-picasso.patch`: `xnuloader` (`oem paniclog`), `manifest.conf`, `common_defconfig`, `boot-args.md`.
+   - `0006-hakios-metal-clang15-constexpr-signbit.patch`: Sửa lỗi biên dịch `constexpr signbit` trên Clang 15 cho `hakios-metal`.
+2. **Đã thiết lập `upstream/` (Read-Only) và kiểm chứng bằng `./build.sh all --clean`:**
+   - Toàn bộ 6 patch apply sạch 100% lên bản clone mới từ `upstream/`.
+   - Biên dịch thành công toàn bộ tạo tác tại `build/out/`: `hakios-kernel` (15 MB), `loader.efi` (70 KB), `root.apfs` (5.8 MB), `system.apfs` (2.4 GB), `SILICIUM_UEFI.fd` (2.0 MB), `payload.bin` (21 MB) và `boot-picasso.img` (12 MB).
+3. **Bước tiếp theo trên thiết bị thực tế:**
+   - Nạp `build/out/system.apfs` và `build/out/payload.bin` qua RAM boot với cmdline cô lập GUI (`wifi=0 modem=0 adsp=0 sound=0 mic=0 adreno=22 gpu=1 adreno_keep=1 ca_vbl=1 buttons=1`).
+   - Kiểm tra log console xác nhận `backboardd` vượt qua `[Backlight] instantiating BrightnessSystem`, khởi chạy `SpringBoard`, và thực hiện chu kỳ `SwapBegin` / `SwapEnd` (`MiniIOMobileFramebuffer: swap #1`).

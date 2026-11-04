@@ -80,6 +80,7 @@ hakios-picasso/
 ├── pull-firmware.sh            # Pulls proprietary vendor firmware from device over adb
 ├── pull-firmware-root.sh       # Pulls proprietary vendor firmware via root staging over adb
 ├── pull-soc.sh                 # Pulls /sys/firmware/fdt over adb and generates soc.args
+├── build.sh                    # Clean end-to-end build script (clones upstream/ -> build/, applies patches, builds all)
 ├── tools/
 │   ├── build-bootimg.py        # Packs BootShim + Mu-Silicium FD + XnuLoader into boot payload
 │   ├── boot_gui_full.py        # Full GUI boot & CDC console monitor script
@@ -88,7 +89,12 @@ hakios-picasso/
 │   └── raw_download.py         # USB bulk download helper for xnuloader
 ├── AGENT.md                    # Standard porting & verification workflow for AI agents
 ├── note.md                     # Technical debug notes & bringup status
-└── patches/                    # Clean, reproducible downstream patch series against upstream HakiOS
+├── patches/                    # Clean, reproducible 6-patch downstream series against upstream HakiOS
+│   ├── UPSTREAM                # Exact upstream repository URLs and base commit hashes
+│   ├── series                  # Ordered patch list (0001..0006)
+│   └── 000*.patch              # Split by subsystem: XNU core, USB CDC, Drivers, Userland, Loader/Configs, Metal
+├── upstream/                   # (gitignored) Read-only pristine upstream repositories (NEVER modified)
+└── build/                      # (gitignored) Isolated build workspaces and build/out/ artifacts
 ```
 
 ---
@@ -96,36 +102,37 @@ hakios-picasso/
 ## 4. Building and Running
 
 ### Prerequisites
-* A Linux workstation with Python 3, bash, and fastboot.
-* The common HakiOS repository ([`hakios-xnu-kernel`](https://github.com/oosexgang/hakios-xnu-kernel)).
+* A Linux workstation with Python 3, bash, Clang 15/18, and fastboot.
+* Read-only upstream repositories cloned under `./upstream/` (`hakios-xnu-kernel`, `hakios-uefi`, `hakios-metal`, `xnu-8796.121.2`, `hfs-627.100.6`, `Mu-Silicium`).
 * Redmi K30 5G with unlocked bootloader.
 
-### Syncing into HakiOS
-In the root of the common HakiOS repository (`hakios-u`):
+### Automated Clean Build (Kernel + Loader + Userland + UEFI)
+Use `./build.sh` to clone `./upstream/` into `./build/`, apply all patches from `./patches/series`, and build everything without ever modifying `./upstream/`:
+```bash
+# Build all targets (kernel, loader, userland APFS images, UEFI firmware, and boot-picasso.img)
+./build.sh all --clean
+
+# Or build individual targets incrementally:
+./build.sh kernel
+./build.sh userland
+./build.sh uefi
+```
+All build outputs are placed in `./build/out/`:
+* `build/out/hakios-kernel` — Darwin 22.5.0 ARM64 kernel
+* `build/out/loader.efi` — HakiOS UEFI XnuLoader
+* `build/out/root.apfs` — Small boot APFS container (`init`, `LaunchDaemons`, `libhakios*.dylib`)
+* `build/out/system.apfs` — iOS 16.5 system root filesystem APFS container
+* `build/out/SILICIUM_UEFI.fd` — HakiOS Mu-Silicium UEFI firmware image
+* `build/out/payload.bin` — XNUP container (`loader.efi` + `hakios-kernel` + `root.apfs`)
+* `build/out/boot-picasso.img` — Complete Android boot image for `fastboot boot`
+
+### Syncing into an Existing HakiOS Common Tree
+In the root of the common HakiOS repository (`hakios-xnu-kernel`):
 ```bash
 # Clone or link this repository into devices/picasso
 python3 tools/hakios-device.py sync picasso
 # Check repository integrity
 python3 tools/hakios-device.py check picasso
-```
-
-### Building the Kernel
-```bash
-make picasso_defconfig
-make kernel
-```
-
-### Building HakiOS UEFI Firmware
-```bash
-# Apply HakiOS patches and install picasso platform
-cd /home/tritm/hakios-uefi
-./apply.sh picasso
-
-# Build UEFI image
-cd /home/tritm/hakios-mu
-source .venv/bin/activate
-python3 build_uefi.py -d picasso -r RELEASE
-# Output: Build/picassoPkg/RELEASE_CLANGPDB/FV/SILICIUM_UEFI.fd
 ```
 
 ### Development Loop (Staying in xnuloader)
@@ -134,25 +141,27 @@ python3 build_uefi.py -d picasso -r RELEASE
 
 1. **Boot into xnuloader (Fastboot Listener Mode):**
    ```bash
-   # Package boot image with loader.efi and --usb flag
-   python3 /home/tritm/hakios-u/xnuloader/mkpayload.py -o /tmp/loader-payload.bin \
-       loader.efi=/home/tritm/hakios-u/xnuloader/loader.efi --usb
+   # Boot the complete image directly into RAM
+   fastboot boot build/out/boot-picasso.img
 
-   python3 tools/build-bootimg.py --xnup /tmp/loader-payload.bin -o /tmp/loader-picasso.img
-   fastboot boot /tmp/loader-picasso.img
+   # Or package a loader-only boot image with --usb flag:
+   python3 build/hakios-xnu-kernel/xnuloader/mkpayload.py -o build/out/loader-payload.bin \
+       loader.efi=build/out/loader.efi --usb
+   python3 tools/build-bootimg.py --xnup build/out/loader-payload.bin -o build/out/loader-picasso.img
+   fastboot boot build/out/loader-picasso.img
    ```
    The phone boots into `xnuloader` and stays resident in USB Fastboot loop (`fastboot getvar product` -> `xnuloader`).
 
 2. **Stage System Ramdisk (APFS) once:**
    ```bash
-   ./xl ramdisk userland/system.apfs
+   ./xl ramdisk build/out/system.apfs
    ```
 
 3. **Stage and Run Kernel iteratively:**
    ```bash
    ./xl run
    # Or manually:
-   # fastboot stage build/hakios-kernel && fastboot oem run
+   # fastboot stage build/out/payload.bin && fastboot oem run
    ```
 
 4. **Collect Logs & Screenshots:**
