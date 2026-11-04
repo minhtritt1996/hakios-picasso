@@ -6,8 +6,8 @@ hakios-xnu-kernel:
 
 hakios-uefi:
   repository: https://github.com/oosexgang/hakios-uefi.git
-  revision:   1c6522893266157506c767e2ca427053ed3634a8
+  revision:   687fa6c6a5a70f43184de92980e0a76eea5f2c4b
 
 hakios-metal:
   repository: https://github.com/oosexgang/hakios-metal.git
-  revision:   fc63b36ee590866ab74c4514122607407fdbe8b6
+  revision:   7025778b8c0bbb1a99793f1be06474782d50cdaf

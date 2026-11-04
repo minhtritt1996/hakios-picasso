@@ -4,3 +4,6 @@ uefi/files/Binaries/picasso/*
 prebuilt/SILICIUM_UEFI.fd
 __pycache__/
 *.pyc
+upstream/
+build/
+
