@@ -2,4 +2,11 @@
 hakios/picasso/fdt.dtb
 hakios/picasso/fdt.dts
 *.dtb
+!uefi/files/Resources/DTBs/*.dtb
 *.dts
+
+# UEFI proprietary binaries and build outputs
+uefi/files/Binaries/picasso/*
+!uefi/files/Binaries/picasso/README.md
+prebuilt/SILICIUM_UEFI.fd
+prebuilt/BootShim.bin

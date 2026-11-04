@@ -19,7 +19,7 @@ This repository holds the device configuration (`device.conf`, `configs/`), the 
 | **Storage** | 64GB / 128GB / 256GB UFS 2.1 (109 partitions, 6 LUNs) |
 | **WLAN / BT** | Qualcomm WCN3990 via MPSS PAS 4 |
 | **Audio** | Qualcomm WCD938x codec over SoundWire, NXP TFA9874 amplifier on I2C-2 (0x34) & Secondary MI2S |
-| **Boot Chain** | Stock XBL -> Mu-Silicium UEFI (`YinCQL/uefi_picasso`) -> HakiOS XnuLoader -> Darwin Kernel 22.5.0 |
+| **Boot Chain** | Stock XBL -> HakiOS UEFI (Mu-Silicium `picassoPkg`) -> HakiOS XnuLoader (`loader.efi`) -> Darwin Kernel 22.5.0 |
 
 ---
 
@@ -99,15 +99,51 @@ make picasso_defconfig
 make kernel
 ```
 
-### Running (RAM-Boot Only)
-> [!IMPORTANT]
-> **Safety Invariant:** HakiOS runs entirely from RAM. It does not overwrite physical partitions on the device.
-
+### Building HakiOS UEFI Firmware
 ```bash
-# Boot Mu-Silicium UEFI into RAM
-fastboot stage payload.bin
-fastboot oem run
+# Apply HakiOS patches and install picasso platform
+cd /home/tritm/hakios-uefi
+./apply.sh picasso
+
+# Build UEFI image
+cd /home/tritm/hakios-mu
+source .venv/bin/activate
+python3 build_uefi.py -d picasso -r RELEASE
+# Output: Build/picassoPkg/RELEASE_CLANGPDB/FV/SILICIUM_UEFI.fd
 ```
+
+### Development Loop (Staying in xnuloader)
+> [!IMPORTANT]
+> **Safety Invariant:** HakiOS boots and runs entirely from RAM. It never writes to physical device storage partitions without explicit authorization.
+
+1. **Boot into xnuloader (Fastboot Listener Mode):**
+   ```bash
+   # Package boot image with loader.efi and --usb flag
+   python3 /home/tritm/hakios-u/xnuloader/mkpayload.py -o /tmp/loader-payload.bin \
+       loader.efi=/home/tritm/hakios-u/xnuloader/loader.efi --usb
+
+   python3 tools/build-bootimg.py --xnup /tmp/loader-payload.bin -o /tmp/loader-picasso.img
+   fastboot boot /tmp/loader-picasso.img
+   ```
+   The phone boots into `xnuloader` and stays resident in USB Fastboot loop (`fastboot getvar product` -> `xnuloader`).
+
+2. **Stage System Ramdisk (APFS) once:**
+   ```bash
+   ./xl ramdisk userland/system.apfs
+   ```
+
+3. **Stage and Run Kernel iteratively:**
+   ```bash
+   ./xl run
+   # Or manually:
+   # fastboot stage build/hakios-kernel && fastboot oem run
+   ```
+
+4. **Collect Logs & Screenshots:**
+   ```bash
+   ./xl log
+   ./xl screenshot
+   ```
 
 ---
 
