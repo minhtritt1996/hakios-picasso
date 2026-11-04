@@ -1,165 +1,115 @@
+# QUY TRÌNH PORT THIẾT BỊ, KIẾN TRÚC PHÂN TẦNG & QUẢN LÝ REPOSITORY HAKIOS (`AGENT.md`)
 
-# QUY TẮC UPSTREAM, DOWNSTREAM VÀ PATCH MANAGEMENT
+Tài liệu này quy định chuẩn mực kiến trúc, quy trình port thiết bị mới theo đúng chuẩn của **HakiOS** (`docs/porting/`), quy tắc phân tách Upstream / Downstream, và trạng thái kỹ thuật của dự án **Xiaomi Redmi K30 5G (`picasso` / `sm7250`)**.
+**Mọi Agent phải đọc kỹ tài liệu này và `note.md` trước khi thực hiện bất kỳ thay đổi nào.**
 
-## 1. Nguyên tắc bảo vệ HakiOS upstream
+---
 
-Repository upstream:
-https://github.com/oosexgang/hakios-xnu-kernel
+## 1. Kiến Trúc Phân Tầng Chuẩn HakiOS (`docs/porting/repositories.md`)
 
-Đây là nền tảng chung của HakiOS.
+HakiOS được tổ chức thành các tầng độc lập, tương tự mô hình AOSP (`common`, `<soc>-common`, `device/<vendor>/<name>`):
 
-Agent KHÔNG ĐƯỢC tự ý đưa các thay đổi riêng của Picasso
-vào repository upstream hoặc commit chúng vào common branch.
+```text
+hakios-u/                            # Tầng Common (Upstream: oosexgang/hakios-xnu-kernel)
+├── xnu/                             # Bản vá XNU chuẩn, xnu/files/, apply.sh, export.sh, sync-drivers.sh
+├── drivers/                         # Common drivers dùng chung (guarded bởi PE_parse_boot_argn)
+├── userland/                        # Darwin 16.5 init, libhakios.dylib (inject.c, eagl.c), Mesa/Turnip
+├── xnuloader/                       # UEFI OS Loader (loader.efi, mkpayload.py)
+├── tools/                           # Công cụ cấu hình & kiểm định (hakios-device.py, hakios-config.py, ...)
+├── devices/manifest.conf            # Danh mục các SoC và Device repositories
+└── devices/picasso/                 # Symlink hoặc clone của repo thiết bị (minhtritt1996/hakios-picasso)
+    ├── device.conf                  # Định nghĩa thiết bị & ma trận trạng thái từng phần cứng (works/partial/missing)
+    ├── soc.args                     # Các địa chỉ MMIO đặc thù của SoC trích xuất từ FDT của máy
+    ├── pull-firmware.sh             # Script kéo firmware từ phân vùng vendor của chính thiết bị
+    ├── configs/
+    │   ├── picasso_defconfig        # Gồm 3 dòng #include: common_defconfig, sm7250.config, picasso.config
+    │   └── picasso.config           # Cấu hình riêng của Picasso (CONFIG_DEVICE="picasso", bật/tắt drivers & boot-args)
+    ├── soc/
+    │   ├── soc.conf                 # Khai báo họ SoC Qualcomm SM7250 (Snapdragon 765G, 8 nhân, Adreno 620)
+    │   └── configs/sm7250.config    # Cấu hình cấp SoC (CONFIG_SOC="sm7250", CPUFREQ, THERMAL, SOCINFO...)
+    ├── drivers/                     # Driver đặc thù riêng của thiết bị (devices/picasso/drivers/<subsystem>/conf)
+    │   ├── bluetooth/               # CONFIG_HAKIOS_PICASSO_BT (/dev/hakios-bt)
+    │   ├── input/                   # CONFIG_HAKIOS_NOVATEK (Novatek NT36672C SPI touch)
+    │   └── wifi/                    # CONFIG_HAKIOS_PICASSO_WLAN (WCN3990 MPSS PAS)
+    ├── uefi/                        # Cấu hình Mu-Silicium UEFI cho Picasso
+    ├── patches/                     # Downstream patch series cho phần common/XNU khi chưa merge upstream
+    │   ├── UPSTREAM                 # Commit hash của upstream làm base
+    │   ├── series                   # Thứ tự áp dụng các file .patch
+    │   └── *.patch                  # Các bản vá đánh số thứ tự rõ ràng
+    └── note.md                      # Nhật ký kỹ thuật, kết quả debug và kế hoạch phiên tiếp theo
+```
 
-Mọi thay đổi dành riêng cho Picasso phải được quản lý
-trong repository hakios-picasso.
+### Quy tắc sở hữu mã nguồn (Ownership Rules):
+1. **Không sửa bẩn Upstream Common:** Không tự ý commit code riêng của `picasso` vào nhánh `main` của `hakios-xnu-kernel`. Mọi phát triển tích hợp tại `/home/tritm/hakios-u` nằm trên nhánh `picasso-main`, và mọi tài sản thiết bị phải được đồng bộ về `/home/tritm/hakios-picasso`.
+2. **Driver riêng của thiết bị (`devices/picasso/drivers/<subsystem>/conf`):**
+   - Khai báo qua symbol `CONFIG_HAKIOS_<NAME>`.
+   - Khi chạy `make kernel`, `xnu/sync-drivers.sh` (qua `tools/hakios-config.py external-files`) tự động chép file vào cây XNU dưới dạng `optional`.
+   - Khi chạy `xnu/export.sh`, các file driver của thiết bị được tự động loại trừ khỏi `xnu/hakios.patch` chung.
+3. **Không phát minh lại cơ chế đã có:** Nếu một thông số phần cứng là địa chỉ SoC đã được hỗ trợ qua `soc_*` boot-args, phải đặt trong `soc.args` hoặc `configs/picasso.config` thay vì hardcode vào mã nguồn common.
 
-Không sử dụng upstream repository như nơi lưu trữ
-các sửa đổi thử nghiệm riêng của thiết bị.
+---
 
-Upstream chỉ được thay đổi khi:
-- Người dùng yêu cầu đóng góp upstream.
-- Thay đổi thực sự phù hợp với kiến trúc common.
-- Đã tuân thủ quy trình CONTRIBUTING.md.
-- Đã được kiểm tra và chuẩn bị cho Pull Request.
+## 2. Quy Trình 5 Bước Port & Bringup Thiết Bị Mới Theo Chuẩn HakiOS (`docs/porting/index.md`)
 
-## 2. Tuân thủ kiến trúc phân tầng HakiOS
+### Bước 1: Khởi tạo & Cấu hình Repository Thiết bị từ FDT
+1. Trích xuất DeviceTree thực tế từ Android của máy (`adb pull /sys/firmware/fdt`).
+2. Tạo hoặc đồng bộ cấu trúc thiết bị:
+   ```bash
+   python3 tools/hakios-device.py check picasso
+   make picasso_defconfig
+   make config
+   ```
+3. Đối chiếu địa chỉ thanh ghi SoC (`soc_ipa_base`, `soc_gsi_base`, `soc_ipcc`, `soc_aoss`, `soc_rsc`, `soc_apps_smmu`, `soc_smem`, `soc_imem`, `soc_cmd_db`) trong `soc.args`.
+4. Trong `configs/picasso.config`, **tắt toàn bộ driver đặc thù của điện thoại khác** (`CONFIG_HAKIOS_GOODIX=n`, `CONFIG_HAKIOS_FOCALTECH=n`, ...) để tránh ghi nhầm vào GPIO/rail của máy.
 
-Bắt buộc đọc:
+### Bước 2: Boot Cơ Sở Tối Giản Từ RAM (Zero-Hardware First Boot)
+- **Nguyên tắc bất biến (RAM-Boot Only):** Tuyệt đối **KHÔNG BAO GIỜ** flash hay ghi đè vào phân vùng UFS vật lý của máy. Chỉ nạp và chạy trên RAM qua `xnuloader` Fastboot:
+  ```bash
+  fastboot oem ramdisk
+  fastboot stage userland/system.apfs
+  fastboot stage /tmp/payload.bin
+  fastboot oem run
+  ```
+- Đảm bảo kernel cơ sở (với `wifi=0 modem=0 adsp=0 sound=0 bt=0`) boot thẳng vào `launchd`, vượt qua 36/36 bài kiểm tra userland Darwin và hiển thị framebuffer UEFI.
 
-- CONTRIBUTING.md
-- docs/concepts/architecture.md
-- docs/porting/repositories.md
-- docs/porting/index.md
-- docs/porting/drivers.md
-- docs/configs.md
-- docs/drivers-config.md
-- docs/boot-args.md
-- docs/getting-started/building.md
+### Bước 3: Bringup Từng Subsystem Theo Đúng Thứ Tự Phụ Thuộc
+Khi bật hoặc gỡ lỗi một subsystem, **luôn cô lập bằng boot-args** (tắt các driver không liên quan) và tuân thủ thứ tự chuẩn của HakiOS:
 
-Quy tắc sở hữu mã nguồn:
+| Thứ tự | Subsystem / Driver | Boot-arg kiểm thử | Tiêu chí hoàn thành (Done Criteria) |
+|---|---|---|---|
+| **1** | **SoC Core:** `CPUFREQ`, `THERMAL`, `SOCINFO` | `cpus=8 small_cores_after=0` | Đọc đúng thông tin SoC, nhiệt độ và tần số CPU, không chạm phần cứng ngoại vi. |
+| **2** | **Input:** `BUTTONS`, Touch (`NOVATEK`) | `buttons=1 touchscreen=1` | Phím cứng và cảm ứng gửi sự kiện qua `/dev/hakios-touch` tới `backboardd` `IOHIDEventSystem`. |
+| **3** | **Storage:** `UFS` | `ufs=2 ufs_native=1` | Đọc bảng phân vùng UFS 2.1 (read-only), phục vụ nạp firmware cho modem/DSP. |
+| **4** | **GPU & Display GUI:** `ADRENO` + `MiniIOMobileFramebuffer` | `adreno=22 gpu=1 adreno_keep=1 ca_vbl=1` | GMU + Zap shader (`a620_zap.mdt`) lên nguồn; Step 22 vẽ 3 dải màu; `backboardd` khởi tạo GLES 3.2 (`FD620`) và `SpringBoard` swap frame (`SwapBegin`/`SwapEnd`) lên màn hình. |
+| **5** | **Audio & Battery:** `ADSP`, `SPEAKER`, `SOUND`, `MIC`, `BATTERY` | `adsp=1 sound=4 mic=4` | ADSP PAS 1 lên nguồn, GLINK/QRTR/APR thông suốt, phát âm thanh qua TFA9874 & thu âm qua WCD938x. |
+| **6** | **Wi-Fi / Network:** `PICASSO_WLAN` (`QMI`) | `wifi=1` | MPSS PAS 4 lên nguồn, WLFW QMI attach, quét beacon 802.11, WPA2-PSK và nhận IP DHCP trên `en0`. |
+| **7** | **Peripherals khác:** `PICASSO_BT`, `HAPTIC`, `CAMERA`, `TORCH`, `MODEM` | `bt=1`, ... | Khởi tạo từng thiết bị `/dev/hakios-*` và kiểm chứng bằng công cụ test userland. |
 
-- Common: hakios-xnu-kernel.
-- Device: devices/picasso.
-- SoC: devices/picasso/soc.
-- Device-specific drivers: devices/picasso/drivers.
-- SoC-specific drivers: devices/picasso/soc/drivers.
+### Bước 4: Quy Trình Phát Triển Kernel / XNU & Quản Lý Downstream Patch
+Khi cần sửa mã nguồn thuộc XNU (`xnu/files/` hoặc `xnu-src/`):
+1. Chỉnh sửa trong `xnu/files/...` và đồng bộ sang `xnu-src/xnu-8796.121.2/...` (hoặc sửa trong `xnu-src/` rồi chạy `./xnu/export.sh`).
+2. Biên dịch lại kernel và kiểm thử thực tế trên thiết bị qua RAM boot.
+3. Xuất bản vá downstream định danh rõ ràng vào `/home/tritm/hakios-picasso/patches/` và cập nhật `/home/tritm/hakios-picasso/patches/series` cùng `/home/tritm/hakios-picasso/patches/UPSTREAM`.
 
-Không tạo patch cho những chức năng đã có cơ chế
-extension chính thức trong HakiOS.
+### Bước 5: Kiểm Định Chất Lượng (CI Checks) & Ghi Chép (`device.conf` + `note.md`)
+Trước khi commit và push:
+1. Chạy bộ công cụ kiểm định chuẩn HakiOS tại `/home/tritm/hakios-u`:
+   ```bash
+   python3 tools/hakios-device.py check picasso
+   python3 tools/hakios-config.py check
+   python3 tools/drivers-check.py
+   python3 tools/boot-args.py --check
+   python3 tools/provenance-check.py
+   ```
+2. Cập nhật trạng thái trung thực trong `devices/picasso/device.conf` (`works` chỉ dành cho tính năng đã xác nhận chạy thật trên phần cứng; `partial` cho tính năng đang hoàn thiện kèm ghi chú rõ ràng; `missing` cho phần chưa làm).
+3. Cập nhật nhật ký kỹ thuật vào `note.md` để phiên làm việc sau nắm bắt ngay ngữ cảnh mà không phải dò lại từ đầu.
 
-## 3. Downstream Patch Series
+---
 
-Mọi thay đổi cần thiết phải tác động vào source chung
-nhưng chỉ phục vụ Picasso phải được đóng gói thành
-patch trong:
+## 3. Các Kho Mã Nguồn Tham Khảo Trọng Yếu
 
-hakios-picasso/patches/
-
-Không sửa trực tiếp source trong upstream checkout
-đang được người dùng sử dụng.
-
-Patch series phải có:
-
-- patches/UPSTREAM
-- patches/series
-- Các file patch được đánh số.
-- Thứ tự áp dụng xác định.
-- Mô tả chức năng.
-- Phạm vi ảnh hưởng.
-- Kết quả kiểm thử.
-- Trạng thái tương thích với upstream.
-
-Không tạo patch không có mục đích hoặc không có
-nguồn gốc rõ ràng.
-
-## 4. Quy trình phát triển patch
-
-Khi thay đổi mã nguồn XNU:
-
-1. Tạo HakiOS workspace riêng.
-2. Kiểm tra upstream commit.
-3. Apply patch series hiện tại.
-4. Chạy xnu/apply.sh để tạo XNU working tree.
-5. Chỉnh sửa XNU trong xnu-src/.
-6. Chạy xnu/export.sh theo quy trình HakiOS.
-7. Kiểm tra thay đổi được export.
-8. Tạo downstream patch mới.
-9. Lưu patch trong hakios-picasso/patches/.
-10. Cập nhật patches/series.
-11. Kiểm thử lại từ workspace sạch.
-
-Không sửa trực tiếp generated XNU source mà không
-thực hiện quy trình export phù hợp.
-
-Driver device-specific phải được đặt trong repository
-thiết bị, không đóng gói thành common driver patch.
-
-## 5. Quy trình Apply Patch
-
-Patch phải được áp dụng tại thư mục gốc của HakiOS
-build workspace.
-
-Không áp dụng toàn bộ series trực tiếp vào xnu-src/.
-
-Trình tự:
-
-1. Xác nhận đúng upstream base commit.
-2. Tạo workspace sạch.
-3. Chuẩn bị repository Picasso.
-4. Kiểm tra patches/series.
-5. Lần lượt chạy git apply --check cho từng patch.
-6. Nếu hợp lệ, áp dụng patch đó.
-7. Tiếp tục patch tiếp theo.
-8. Dừng ngay nếu một patch thất bại.
-9. Không tự ý bỏ qua patch lỗi.
-10. Không sửa upstream checkout để xử lý lỗi apply.
-
-Patch series phải được áp dụng trước khi chạy
-quy trình build kernel chính thức.
-
-## 6. Quy trình đồng bộ upstream
-
-Khi upstream có commit mới:
-
-1. Không thay đổi upstream checkout của người dùng.
-2. Tạo workspace mới tại commit được chọn.
-3. Kiểm tra tương thích của từng patch.
-4. Sửa patch có conflict.
-5. Không tự động loại bỏ thay đổi.
-6. Build lại với Picasso configuration.
-7. Kiểm tra device repository.
-8. Kiểm tra các HakiOS CI tools.
-9. Cập nhật patches/UPSTREAM.
-10. Ghi lại kết quả đồng bộ.
-
-Không được tuyên bố đã đồng bộ thành công
-nếu patch series chưa được kiểm tra.
-
-## 7. Điều kiện tạo Pull Request upstream
-
-Trước khi đề xuất merge:
-
-- Phân biệt code common và code Picasso.
-- Không đưa firmware độc quyền vào Git.
-- Không đưa Apple userland binary vào Git.
-- Tuân thủ APSL-2.0 và giấy phép bên thứ ba.
-- Không phá vỡ Redwood/QEMU.
-- Chạy các HakiOS quality checks.
-- Có log và kết quả thực tế.
-- Mô tả rõ thay đổi và lý do.
-
-Sau khi thay đổi đã được upstream chấp nhận,
-phải loại bỏ patch tương ứng khỏi downstream series
-ở lần cập nhật tiếp theo.
-
-## 8. Quy tắc bất biến
-
-Không sửa upstream checkout tùy tiện.
-Không phát triển trực tiếp trên common branch.
-Không để patch thất bại bị bỏ qua.
-Không áp dụng patch không rõ base commit.
-Không để patch series mất thứ tự.
-Không đưa device-specific code vào common.
-Không để downstream patch che giấu thay đổi
-trong upstream source.
+1. **[oosexgang/hakios-xnu-kernel](https://github.com/oosexgang/hakios-xnu-kernel):** Upstream HakiOS XNU Kernel, tài liệu kiến trúc (`docs/porting/`), chuẩn driver và CI tools.
+2. **[minhtritt1996/hakios-picasso](https://github.com/minhtritt1996/hakios-picasso):** Repository thiết bị chính thức của Xiaomi Redmi K30 5G (`picasso`).
+3. **[YinCQL/UniXNU-picasso](https://github.com/YinCQL/UniXNU-picasso):** Tham khảo cấu hình DeviceTree, MMIO và framebuffer của Redmi K30 5G.
+4. **[silenzio111/UniXNU-picasso](https://github.com/silenzio111/UniXNU-picasso/commits/stage12/picasso-cpufreq-big/):** Tham khảo mở khóa bảo mật Adreno 620 (`a620_zap.mdt`, `CP_SET_SECURE_MODE`) và CPU frequency scaling.
+5. **[dipa-studio/ios-sweet](https://github.com/dipa-studio/ios-sweet):** Tài liệu dịch ngược `StartWindowServer`, `CAWindowServer`, `IOMobileFramebuffer` và `QuartzCore` trên iOS 16.5 (`20F66`).

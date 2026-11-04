@@ -34,3 +34,4 @@
 0035-bluetooth-picasso-wcn3990-userland-support.patch
 0036-adreno-zap-aligned-page-picasso.patch
 0037-gpu-display-minifb-early-bringup-and-windowserver-unblank.patch
+0038-buttons-picasso-and-backboardd-als-skip.patch
