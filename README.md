@@ -62,17 +62,33 @@ hakios-picasso/
 │   │   └── hakios.picasso_bt.c # Picasso WCN3990 Bluetooth UART driver (/dev/hakios-bt)
 │   ├── input/
 │   │   ├── conf                # driver NOVATEK declaration
-│   │   ├── hakios.novatek.c    # Novatek NT36672C SPI touch driver
-│   │   └── hakios.novatek_fw.h # Novatek firmware array
+│   │   └── hakios.novatek.c    # Novatek NT36672C SPI touch driver + embedded fw01
 │   └── wifi/
 │       ├── conf                # driver PICASSO_WLAN declaration
 │       └── hakios.picasso_wlan.cpp # Picasso WLAN driver via MPSS PAS
+├── uefi/
+│   ├── apply.sh                # Delegates to common uefi/apply.sh picasso
+│   ├── export.sh               # Exports picassoPkg, picasso.toml, picasso.dtb from Mu-Silicium
+│   ├── README.md               # UEFI build and vendor binary extraction instructions
+│   └── files/                  # picassoPkg platform, picasso.toml, picasso.dtb
+├── prebuilt/
+│   ├── BootShim.bin            # Mu-Silicium BootShim with HakiOS XNUP payload support
+│   ├── device-tree.dtb         # Xiaomi Redmi K30 5G device tree
+│   ├── mkbootimg.py            # Android boot image v1/v2 packager
+│   └── ramdisk                 # Minimal dummy ramdisk for Android boot header
 ├── soc.args                    # SoC hardware MMIO addresses extracted from device tree
 ├── pull-firmware.sh            # Pulls proprietary vendor firmware from device over adb
+├── pull-firmware-root.sh       # Pulls proprietary vendor firmware via root staging over adb
+├── pull-soc.sh                 # Pulls /sys/firmware/fdt over adb and generates soc.args
 ├── tools/
 │   ├── build-bootimg.py        # Packs BootShim + Mu-Silicium FD + XnuLoader into boot payload
-│   └── pull-picasso-fdt.sh     # Dumps device tree from Android /sys/firmware/fdt
-└── patches/                    # Historical bringup fix series and bootloader patches
+│   ├── boot_gui_full.py        # Full GUI boot & CDC console monitor script
+│   ├── fetch_data.py           # USB bulk upload helper for xnuloader
+│   ├── raw2bmp.py              # Converts 1080x2400 BGRA raw framebuffer dumps to BMP
+│   └── raw_download.py         # USB bulk download helper for xnuloader
+├── AGENT.md                    # Standard porting & verification workflow for AI agents
+├── note.md                     # Technical debug notes & bringup status
+└── patches/                    # Clean, reproducible downstream patch series against upstream HakiOS
 ```
 
 ---

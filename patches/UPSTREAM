@@ -1,2 +1,13 @@
-url: https://github.com/oosexgang/hakios-xnu-kernel
-commit: cc0001bf5cf86541e1d1ef1b910b11579ec1ce73
+# Upstream Base Repositories and Revisions for hakios-picasso Patches
+
+hakios-xnu-kernel:
+  repository: https://github.com/oosexgang/hakios-xnu-kernel.git
+  revision:   96ffbc532e970f3540885755d457e401e04d4707
+
+hakios-uefi:
+  repository: https://github.com/oosexgang/hakios-uefi.git
+  revision:   1c6522893266157506c767e2ca427053ed3634a8
+
+hakios-metal:
+  repository: https://github.com/oosexgang/hakios-metal.git
+  revision:   fc63b36ee590866ab74c4514122607407fdbe8b6

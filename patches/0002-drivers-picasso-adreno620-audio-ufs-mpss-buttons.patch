@@ -1,0 +1,3341 @@
+diff --git a/drivers/audio/hakios.adsp.c b/drivers/audio/hakios.adsp.c
+index c5fc819..91b5aab 100644
+--- a/drivers/audio/hakios.adsp.c
++++ b/drivers/audio/hakios.adsp.c
+@@ -182,16 +182,27 @@ tell(const char *format, ...)
+ }
+ #define printf say
+ 
++static void
++spin_us(uint32_t us)
++{
++	uint64_t until;
++
++	nanoseconds_to_absolutetime((uint64_t)us * NSEC_PER_USEC, &until);
++	until += mach_absolute_time();
++	while (mach_absolute_time() < until) {
++	}
++}
++
+ static void
+ sleep_us(uint32_t us)
+ {
+-	delay_for_interval(us, NSEC_PER_USEC);
++	spin_us(us);
+ }
+ 
+ static void
+ sleep_ms(uint32_t ms)
+ {
+-	delay_for_interval(ms, NSEC_PER_MSEC);
++	spin_us(ms * 1000);
+ }
+ 
+ static uint64_t
+@@ -326,6 +337,9 @@ struct smem_item {
+ #define ITEM_SMP2P_OURS         429
+ #define ITEM_SMP2P_THEIRS       443
+ #define ITEM_CRASH_REASON       423
++#define ITEM_GLINK_DESCRIPTOR   478
++#define ITEM_GLINK_OUR_QUEUE    479
++#define ITEM_GLINK_THEIR_QUEUE  480
+ 
+ static const volatile uint8_t *smem;
+ 
+@@ -983,8 +997,13 @@ step_survey(void)
+ 
+ /* ---- step 2: the firmware -------------------------------------------------------------------------- */
+ 
+-#define ADSP_MEMORY             0x86700000u     /* dt: reserved-memory adsp@86700000, memory-region of qcom,lpass@3700000 */
+-#define ADSP_MEMORY_SIZE        0x04000000u
++#define ADSP_MEMORY_SM7250      0x89200000u     /* sm7250 / lito: pil_adsp_mem @ 89200000, 40 MB */
++#define ADSP_MEMORY_SIZE_SM7250 0x02800000u
++#define ADSP_MEMORY_SC7280      0x86700000u     /* sc7280 / redwood: pil_adsp_mem @ 86700000, 64 MB */
++#define ADSP_MEMORY_SIZE_SC7280 0x04000000u
++
++static uint32_t adsp_memory = ADSP_MEMORY_SM7250;
++static uint32_t adsp_memory_size = ADSP_MEMORY_SIZE_SM7250;
+ #define PAS_ADSP                1               /* dt: qcom,pas-id */
+ 
+ 
+@@ -1014,7 +1033,7 @@ root_file(const char *name, uint64_t *size)
+ 	VATTR_INIT(&attributes);
+ 	VATTR_WANTED(&attributes, va_data_size);
+ 	if (vnode_getattr(vnode, &attributes, context) != 0 || attributes.va_data_size == 0 ||
+-	    attributes.va_data_size > ADSP_MEMORY_SIZE) {
++	    attributes.va_data_size > adsp_memory_size) {
+ 		vnode_put(vnode);
+ 		return NULL;
+ 	}
+@@ -1157,13 +1176,13 @@ step_firmware(void)
+ 		if (segment.type != 1 || MDT_HASH(segment.flags) || segment.memory_size == 0) {
+ 			continue;
+ 		}
+-		if (segment.paddr < ADSP_MEMORY || segment.file_size > segment.memory_size ||
+-		    (uint64_t)segment.paddr + segment.memory_size > (uint64_t)ADSP_MEMORY + ADSP_MEMORY_SIZE) {
++		if (segment.paddr < adsp_memory || segment.file_size > segment.memory_size ||
++		    (uint64_t)segment.paddr + segment.memory_size > (uint64_t)adsp_memory + adsp_memory_size) {
+ 			printf("adsp: %u: segment %u (%#x, %#x bytes) is not within the DSP's memory\n", step, i, segment.paddr,
+ 			    segment.memory_size);
+ 			goto fail;
+ 		}
+-		image.segment[image.segments].at = segment.paddr - ADSP_MEMORY;
++		image.segment[image.segments].at = segment.paddr - adsp_memory;
+ 		image.segment[image.segments].file_size = segment.file_size;
+ 		image.segment[image.segments].memory_size = segment.memory_size;
+ 		image.segment[image.segments].file = NULL;
+@@ -1188,17 +1207,17 @@ step_firmware(void)
+ 		highest = segment.paddr + segment.memory_size > highest ? segment.paddr + segment.memory_size : highest;
+ 		image.segments++;
+ 	}
+-	if (image.segments == 0 || lowest != ADSP_MEMORY || 52 + 32 * count + (uint64_t)hashes != size) {
++	if (image.segments == 0 || lowest != adsp_memory || 52 + 32 * count + (uint64_t)hashes != size) {
+ 		printf("adsp: %u: not what TrustZone takes: %u segments to load, the lowest at %#x; the header file has %llu bytes, "
+ 		    "the header %u and the hashes %u\n", step, image.segments, lowest, size, 52 + 32 * count, hashes);
+ 		goto fail;
+ 	}
+ 	image.header = header;
+ 	image.header_size = size;
+-	image.size = ((highest + 0xfff) & ~0xfffu) - ADSP_MEMORY;
++	image.size = ((highest + 0xfff) & ~0xfffu) - adsp_memory;
+ 	printf("adsp: %u: the image is whole (%s): a header of %llu bytes (%u of hashes), %u segments, %llu bytes of files, %#x "
+ 	    "bytes of the DSP's %#x from %#x\n", step, from_root ? "from /fw on the root" : "from the small image", size, hashes,
+-	    image.segments, files, image.size, ADSP_MEMORY_SIZE, ADSP_MEMORY);
++	    image.segments, files, image.size, adsp_memory_size, adsp_memory);
+ 	return true;
+ fail:
+ 	image_forget();
+@@ -1250,7 +1269,7 @@ scm(const char *what, uint64_t function, uint64_t arguments, uint64_t first, uin
+ 	printf("adsp: %u: about to ask TrustZone %s: smc %#llx, arguments %#llx, %#llx, %#llx\n", step, what, function, first,
+ 	    second, third);
+ 	snprintf(last_write, sizeof(last_write), "step %u asked TrustZone %#llx(%#llx, %#llx)", step, function, first, second);
+-	for (int i = 0; i < 100; i++) {
++	for (int i = 0; i < 100000; i++) {
+ 		register uint64_t x0 __asm__("x0") = i == 0 ? function : SCM_INTERRUPTED;
+ 		register uint64_t x1 __asm__("x1") = arguments;
+ 		register uint64_t x2 __asm__("x2") = first;
+@@ -1264,6 +1283,9 @@ scm(const char *what, uint64_t function, uint64_t arguments, uint64_t first, uin
+ 		    "+r" (x7) : : "x8", "x9", "x10", "x11", "x12", "x13", "x14", "x15", "x16", "x17", "memory");
+ 		session = x6;
+ 		if (x0 != SCM_INTERRUPTED) {
++			if (i > 0) {
++				printf("adsp: %u: TrustZone finished after %d interrupted cycles\n", step, i);
++			}
+ 			printf("adsp: %u: TrustZone returns %d, answer %#llx\n", step, (int32_t)x0, x1);
+ 			*answer = x1;
+ 			return (int32_t)x0;
+@@ -1446,12 +1468,12 @@ step_header(void)
+ 	printf("adsp: %u: TRUSTZONE ACCEPTS THE AUDIO DSP'S SIGNATURE FROM THIS KERNEL\n", step);
+ 
+ 	announce("tell TrustZone where the image will be");
+-	result = scm("where the image will be", SCM_PAS_MEM_SETUP, SCM_THREE_VALUES, PAS_ADSP, ADSP_MEMORY, image.size, &answer);
++	result = scm("where the image will be", SCM_PAS_MEM_SETUP, SCM_THREE_VALUES, PAS_ADSP, adsp_memory, image.size, &answer);
+ 	if (result != 0 || answer != 0) {
+ 		printf("adsp: %u: TRUSTZONE DOES NOT TAKE THE PLACE: the call returns %d, its answer is %#llx\n", step, result, answer);
+ 		return false;
+ 	}
+-	printf("adsp: %u: TrustZone takes the place: %#x bytes at %#x\n", step, image.size, ADSP_MEMORY);
++	printf("adsp: %u: TrustZone takes the place: %#x bytes at %#x\n", step, image.size, adsp_memory);
+ 	return true;
+ }
+ 
+@@ -1473,42 +1495,49 @@ segment_word(unsigned s, uint32_t at)
+ static bool
+ step_image(void)
+ {
+-	volatile uint64_t *dsp_memory;
++	volatile uint8_t *dsp_memory;
+ 	uint64_t written = 0, cleared = 0, wrong = 0;
+ 
+ 	if (image.segments == 0) {
+ 		return false;
+ 	}
+-	announce("put the image's segments into the audio DSP's memory (0x86700000, 64 MB: memory of nobody's until TrustZone "
++	announce("put the image's segments into the audio DSP's memory (memory of nobody's until TrustZone "
+ 	    "starts the DSP), with zeroes where a segment is longer than its file, and read them back");
+-	dsp_memory = (volatile uint64_t *)ml_io_map_unmappable(ADSP_MEMORY, ADSP_MEMORY_SIZE, VM_WIMG_WCOMB);
+-	snprintf(last_write, sizeof(last_write), "step %u wrote the image at %#x", step, ADSP_MEMORY);
++	dsp_memory = (volatile uint8_t *)ml_io_map_unmappable(adsp_memory, adsp_memory_size, VM_WIMG_WCOMB);
++	if (dsp_memory == NULL) {
++		printf("adsp: %u: could not map DSP memory at %#x\n", step, adsp_memory);
++		return false;
++	}
++	snprintf(last_write, sizeof(last_write), "step %u wrote the image at %#x", step, adsp_memory);
+ 	for (unsigned s = 0; s < image.segments; s++) {
+-		volatile uint64_t *to = dsp_memory + image.segment[s].at / 8;
++		volatile uint8_t *to = dsp_memory + image.segment[s].at;
++		const uint8_t *file = image.segment[s].file;
++		uint32_t file_sz = image.segment[s].file_size;
++		uint32_t mem_sz = image.segment[s].memory_size;
+ 
+-		if ((image.segment[s].at | image.segment[s].memory_size) & 7) {
+-			printf("adsp: %u: a segment that does not begin and end at a multiple of eight bytes: not written\n", step);
+-			ml_io_unmap((vm_offset_t)dsp_memory, ADSP_MEMORY_SIZE);
+-			return false;
++		if (file != NULL && file_sz > 0) {
++			memcpy((void *)to, file, file_sz);
++			written += file_sz;
+ 		}
+-		for (uint32_t i = 0; i < image.segment[s].memory_size; i += 8) {
+-			to[i / 8] = segment_word(s, i);
++		if (mem_sz > file_sz) {
++			bzero((void *)(to + file_sz), mem_sz - file_sz);
++			cleared += mem_sz - file_sz;
+ 		}
+-		written += image.segment[s].file_size;
+-		cleared += image.segment[s].memory_size - image.segment[s].file_size;
+ 	}
+ 	settle();
+ 	for (unsigned s = 0; s < image.segments; s++) {
+-		volatile uint64_t *from = dsp_memory + image.segment[s].at / 8;
++		volatile uint8_t *from = dsp_memory + image.segment[s].at;
++		const uint8_t *file = image.segment[s].file;
++		uint32_t file_sz = image.segment[s].file_size;
+ 
+-		for (uint32_t i = 0; i < image.segment[s].memory_size; i += 8) {
+-			wrong += from[i / 8] != segment_word(s, i);
++		if (file != NULL && file_sz > 0) {
++			wrong += memcmp((const void *)from, file, file_sz) != 0;
+ 		}
+ 	}
+-	printf("adsp: %u: %u segments, %llu bytes written and %llu cleared; read back, %llu words of eight bytes differ\n", step,
++	printf("adsp: %u: %u segments, %llu bytes written and %llu cleared; read back, %llu segments differ\n", step,
+ 	    image.segments, written, cleared, wrong);
+ 	settle();
+-	ml_io_unmap((vm_offset_t)dsp_memory, ADSP_MEMORY_SIZE);
++	ml_io_unmap((vm_offset_t)dsp_memory, adsp_memory_size);
+ 	image_written = wrong == 0;
+ 	image_forget();                         /* (it is in the DSP's memory now: what was read of the root, given back) */
+ 	return image_written;
+@@ -1520,20 +1549,22 @@ static struct block smem_lock = { "shared memory's lock", 0x01f43000, 0x1000 };
+ #define LOCK_OWNER              0x000
+ #define LOCK_US                 1u
+ 
+-/* Our item made in the partition, as Linux's qcom_smem_alloc_private() makes one (hakios.wifi.c: our_item_make()). */
++/* Allocate an item in the partition, as Linux's qcom_smem_alloc_private() does. */
+ static bool
+-our_item_make(uint32_t partition)
++smem_partition_alloc(uint32_t partition, uint32_t item_id, uint32_t payload_size)
+ {
+ 	struct smem_partition header;
+ 	struct smem_entry entry;
+-	const uint32_t item_size = (sizeof(struct smp2p) + 7) & ~7u, need_bytes = sizeof(entry) + item_size;
++	const uint32_t aligned_size = (payload_size + 7) & ~7u;
++	const uint16_t pad_data = (uint16_t)(aligned_size - payload_size);
++	const uint32_t need_bytes = sizeof(entry) + aligned_size;
+ 	uint32_t owner = ~0u, at;
+ 	bool made = false;
+ 
+ 	lck_mtx_lock(&hakios_smem_alloc_lock);         /* (the Wi-Fi's start allocates under the same hardware lock) */
+ 	need(&smem_lock);
+ 	printf("adsp: %u: about to take the lock (%#x), write an entry for item %u with %u bytes behind it at the partition's mark, "
+-	    "move the mark by %u, and release the lock\n", step, smem_lock.phys + LOCK_OWNER, ITEM_SMP2P_OURS, item_size, need_bytes);
++	    "move the mark by %u, and release the lock\n", step, smem_lock.phys + LOCK_OWNER, item_id, aligned_size, need_bytes);
+ 	snprintf(last_write, sizeof(last_write), "step %u took the shared memory's lock", step);
+ 	for (uint32_t ms = 0; ms <= 1000; ms++) {
+ 		wr(smem_lock.base + LOCK_OWNER, LOCK_US);
+@@ -1554,24 +1585,24 @@ our_item_make(uint32_t partition)
+ 		goto out;
+ 	}
+ 	for (at = sizeof(header); at < header.free_uncached;) {
+-		if (!smem_peek(partition + at, &entry, sizeof(entry)) || entry.canary != SMEM_CANARY || entry.item == ITEM_SMP2P_OURS ||
++		if (!smem_peek(partition + at, &entry, sizeof(entry)) || entry.canary != SMEM_CANARY || entry.item == item_id ||
+ 		    entry.size > header.size) {
+ 			break;
+ 		}
+ 		at += sizeof(entry) + entry.padding_header + entry.size;
+ 	}
+ 	if (at != header.free_uncached) {
+-		printf("adsp: %u: the partition's entries do not end at its mark (+%#x, the mark is +%#x), or the item has appeared: "
+-		    "nothing is written\n", step, at, header.free_uncached);
++		printf("adsp: %u: the partition's entries do not end at its mark (+%#x, the mark is +%#x), or item %u has appeared: "
++		    "nothing is written\n", step, at, header.free_uncached, item_id);
+ 		goto out;
+ 	}
+ 	if (at + need_bytes > header.free_cached) {
+ 		printf("adsp: %u: no room: %u bytes wanted, %u free: nothing is written\n", step, need_bytes, header.free_cached - at);
+ 		goto out;
+ 	}
+-	smem_poke(partition + at, SMEM_CANARY | ITEM_SMP2P_OURS << 16);
+-	smem_poke(partition + at + 4, item_size);
+-	smem_poke(partition + at + 8, item_size - (uint32_t)sizeof(struct smp2p));
++	smem_poke(partition + at, SMEM_CANARY | item_id << 16);
++	smem_poke(partition + at + 4, aligned_size);
++	smem_poke(partition + at + 8, pad_data);
+ 	smem_poke(partition + at + 12, 0);
+ 	settle();
+ 	smem_poke(partition + __offsetof(struct smem_partition, free_uncached), at + need_bytes);
+@@ -1592,6 +1623,7 @@ step_our_item(void)
+ 	struct smem_partition header;
+ 	struct smp2p ours;
+ 	uint32_t cacheline = 0, size = 0, partition, name[4] = { 0 };
++	uint32_t q_size = 0, our_queue = 0;
+ 
+ 	announce("look for an SMP2P item of ours (429) in our partition with the audio DSP, make it if there is none, and fill it in");
+ 	partition = smem_partition(SMEM_US, SMEM_ADSP, &cacheline, &size);
+@@ -1604,7 +1636,7 @@ step_our_item(void)
+ 		printf("adsp: %u: item %u is there, at %#lx: a kernel before this one made it, and it is used again\n", step,
+ 		    ITEM_SMP2P_OURS, SMEM_PHYS + our_item);
+ 	} else {
+-		if (!our_item_make(partition)) {
++		if (!smem_partition_alloc(partition, ITEM_SMP2P_OURS, sizeof(struct smp2p))) {
+ 			return false;
+ 		}
+ 		our_item = our_item_find();
+@@ -1639,6 +1671,29 @@ step_our_item(void)
+ 		return false;
+ 	}
+ 	show_words("our item reads back", &ours);
++
++	/* Ensure GLINK TX FIFO (our queue, item 479) is allocated */
++	our_queue = smem_item(ITEM_GLINK_OUR_QUEUE, &q_size);
++	if (our_queue != 0 && q_size >= 1024) {
++		printf("adsp: %u: item %u (our GLINK queue) is there (%u bytes at %#lx)\n", step,
++		    ITEM_GLINK_OUR_QUEUE, q_size, SMEM_PHYS + our_queue);
++	} else {
++		if (!smem_partition_alloc(partition, ITEM_GLINK_OUR_QUEUE, 16384)) {
++			return false;
++		}
++		our_queue = smem_item(ITEM_GLINK_OUR_QUEUE, &q_size);
++		if (our_queue == 0 || q_size < 16384) {
++			printf("adsp: %u: GLINK queue item %u not found where made\n", step, ITEM_GLINK_OUR_QUEUE);
++			return false;
++		}
++		printf("adsp: %u: item %u (our GLINK queue) made: %u bytes at %#lx\n", step,
++		    ITEM_GLINK_OUR_QUEUE, q_size, SMEM_PHYS + our_queue);
++		for (uint32_t at = 0; at < q_size; at += 4) {
++			smem_poke(our_queue + at, 0);
++		}
++		settle();
++	}
++
+ 	glink_reset();
+ 	return true;
+ }
+@@ -1791,9 +1846,8 @@ step_start(void)
+ 
+ /* ---- GLINK (hakios.wifi.c; items 478 to 480 of our partition with the audio DSP) ------------------- */
+ 
+-#define ITEM_GLINK_DESCRIPTOR   478
+-#define ITEM_GLINK_OUR_QUEUE    479
+-#define ITEM_GLINK_THEIR_QUEUE  480
++static void glink_poll(void);
++
+ #define GLINK_OUR_TAIL          0
+ #define GLINK_OUR_HEAD          4
+ #define GLINK_THEIR_TAIL        8
+@@ -2622,6 +2676,7 @@ hakios_adsp_apr(uint8_t service, uint16_t port, uint32_t token, uint32_t opcode,
+ 	} else {
+ 		apr_out++;
+ 		for (uint32_t waited = 0; waited < ms && !answered; waited++) {
++			glink_poll();
+ 			if (os_atomic_load(&apr_answer.there, acquire) && apr_answer.token == token) {
+ 				answered = true;
+ 				if (answer != NULL) {
+@@ -2889,22 +2944,56 @@ battmgr_stop(void)
+ 	}
+ }
+ 
+-/* ---- the link's thread ----------------------------------------------------------------------------- */
++/* ---- the link's thread and poller ------------------------------------------------------------------ */
+ 
+ static volatile bool link_wanted, link_runs;
+ 
++static void
++glink_poll(void)
++{
++	struct glink_packet *packet;
++
++	doorbells();
++	for (;;) {
++		unsigned from = CHANNELS;
++
++		lck_mtx_lock(&glink_lock);
++		glink_pump();
++		packet = NULL;
++		for (unsigned c = 0; c < CHANNELS && packet == NULL; c++) {
++			struct glink_channel *channel = &glink.channel[c];
++
++			if ((packet = channel->first) != NULL) {
++				channel->first = packet->next;
++				channel->last = channel->first == NULL ? NULL : channel->last;
++				from = c;
++			}
++		}
++		lck_mtx_unlock(&glink_lock);
++		if (packet == NULL) {
++			break;
++		}
++		if (from == CHANNEL_QRTR) {
++			qrtr_input(packet->data, packet->length);
++		} else if (from == CHANNEL_PMIC) {
++			battmgr_input(packet->data, packet->length);
++		} else {
++			apr_input(packet->data, packet->length);
++		}
++		kfree_data(packet, sizeof(*packet) + packet->length);
++	}
++}
++
+ static void
+ link_thread(__unused void *parameter, __unused wait_result_t result)
+ {
+ 	struct smp2p words, last;
+-	struct glink_packet *packet;
+ 	bool gave_up = false;
+ 
+ 	bzero(&last, sizeof(last));
+ 	dsp_words(&last);
+ 	while (link_wanted) {
+ 		sleep_us(1000);
+-		doorbells();
+ 		if (dsp_words(&words) && memcmp(&words, &last, sizeof(words)) != 0) {
+ 			last = words;
+ 			dsp_listen(&words);
+@@ -2914,34 +3003,7 @@ link_thread(__unused void *parameter, __unused wait_result_t result)
+ 				show_crash_reason();
+ 			}
+ 		}
+-		for (;;) {
+-			unsigned from = CHANNELS;
+-
+-			lck_mtx_lock(&glink_lock);
+-			glink_pump();
+-			packet = NULL;
+-			for (unsigned c = 0; c < CHANNELS && packet == NULL; c++) {
+-				struct glink_channel *channel = &glink.channel[c];
+-
+-				if ((packet = channel->first) != NULL) {
+-					channel->first = packet->next;
+-					channel->last = channel->first == NULL ? NULL : channel->last;
+-					from = c;
+-				}
+-			}
+-			lck_mtx_unlock(&glink_lock);
+-			if (packet == NULL) {
+-				break;
+-			}
+-			if (from == CHANNEL_QRTR) {
+-				qrtr_input(packet->data, packet->length);
+-			} else if (from == CHANNEL_PMIC) {
+-				battmgr_input(packet->data, packet->length);
+-			} else {
+-				apr_input(packet->data, packet->length);
+-			}
+-			kfree_data(packet, sizeof(*packet) + packet->length);
+-		}
++		glink_poll();
+ 	}
+ 	link_runs = false;
+ 	thread_terminate(current_thread());
+@@ -3070,9 +3132,11 @@ step_link(void)
+ 	}
+ 	thread_deallocate(thread);
+ 	for (unsigned ms = 0; ms < 5000 && !glink.channel[CHANNEL_QRTR].open && !glink.broken; ms++) {
++		glink_poll();
+ 		sleep_ms(1);
+ 	}
+ 	sleep_ms(50);
++	glink_poll();
+ 	printf("adsp: %u: %llu ms after our version: versions %s (features %#x); the channel \"IPCRTR\" is %s, \"apr_audio_svc\" %s; "
+ 	    "the DSP also opened \"%s\" \"%s\" \"%s\" \"%s\"\n", step, (now_us() - began) / 1000, glink.agreed ? "agreed" :
+ 	    "NOT AGREED", glink.features, glink.channel[CHANNEL_QRTR].open ? "OPEN" : "NOT OPEN",
+@@ -3093,6 +3157,7 @@ step_qrtr(void)
+ 	PE_parse_boot_argn("adsp_listen", &listen_seconds, sizeof(listen_seconds));
+ 	announce("listen to QRTR on the channel: the DSP's hello (answered from the link's thread), and the services it tells of");
+ 	for (unsigned ms = 0; ms < listen_seconds * 1000; ms++) {
++		glink_poll();
+ 		sleep_ms(1);
+ 	}
+ 	for (unsigned i = 0; i < sizeof(qrtr_servers) / sizeof(qrtr_servers[0]); i++) {
+@@ -3116,6 +3181,7 @@ step_apr(void)
+ 	announce("ask the audio DSP's core service over APR whether the audio services are up (again and again, as Android "
+ 	    "does), then which services it has");
+ 	for (unsigned ms = 0; ms < 3000 && !glink.channel[CHANNEL_APR].open; ms++) {
++		glink_poll();
+ 		sleep_ms(1);
+ 	}
+ 	if (!glink.channel[CHANNEL_APR].open) {
+@@ -3228,6 +3294,10 @@ run_steps(void)
+ 	new_from = STEPS + 1;
+ 	steps_over(done);
+ 	printf("adsp: over after step %u; %s\n", done, last_write);
++	if (done == STEPS && dsp_started) {
++		hakios_sound_dsp_up();
++		hakios_mic_dsp_up();
++	}
+ }
+ 
+ static void
+@@ -3268,6 +3338,8 @@ hakios_adsp_init(void)
+ 	if (last_step == 0 && (!PE_parse_boot_argn("adsp", &on, sizeof(on)) || on != 1)) {
+ 		return;
+ 	}
++	PE_parse_boot_argn("adsp_mem", &adsp_memory, sizeof(adsp_memory));
++	PE_parse_boot_argn("adsp_size", &adsp_memory_size, sizeof(adsp_memory_size));
+ 	if (pe_arm_get_soc_base_phys() != HAKIOS_SOC_BASE) {
+ 		printf("adsp: adsp=1 and adsp_step=N are for the phone's audio DSP, and this is not the phone\n");
+ 		return;
+diff --git a/drivers/audio/hakios.audio.c b/drivers/audio/hakios.audio.c
+index 91f784c..174e7c7 100644
+--- a/drivers/audio/hakios.audio.c
++++ b/drivers/audio/hakios.audio.c
+@@ -359,4 +359,5 @@ hakios_audio_init(void)
+ 	hakios_haptic_init();
+ 	hakios_torch_init();
+ 	hakios_camera_init();
++	hakios_bt_init();
+ }
+diff --git a/drivers/audio/hakios.mic.c b/drivers/audio/hakios.mic.c
+index c574797..cd7edc4 100644
+--- a/drivers/audio/hakios.mic.c
++++ b/drivers/audio/hakios.mic.c
+@@ -134,10 +134,21 @@ hakios_mic_quiesce(void)
+ 	}
+ }
+ 
++static void
++spin_us(uint32_t us)
++{
++	uint64_t until;
++
++	nanoseconds_to_absolutetime((uint64_t)us * NSEC_PER_USEC, &until);
++	until += mach_absolute_time();
++	while (mach_absolute_time() < until) {
++	}
++}
++
+ static void
+ sleep_ms(uint32_t ms)
+ {
+-	delay_for_interval(ms, NSEC_PER_MSEC);
++	spin_us(ms * 1000);
+ }
+ 
+ static uint32_t __attribute__((noinline))
+@@ -155,17 +166,6 @@ wr(vm_offset_t address, uint32_t value)
+ 	__asm__ volatile ("str %w0, [%1]" : : "r" (value), "r" (address) : "memory");
+ }
+ 
+-static void
+-spin_us(uint32_t us)
+-{
+-	uint64_t until;
+-
+-	nanoseconds_to_absolutetime((uint64_t)us * NSEC_PER_USEC, &until);
+-	until += mach_absolute_time();
+-	while (mach_absolute_time() < until) {
+-	}
+-}
+-
+ static bool broken;                     /* a write that did not read back: nothing more is written, all is undone */
+ static char last_write[120] = "nothing written";
+ 
+@@ -398,6 +398,8 @@ static struct block tx_hctl = { "the TX SoundWire master's HCTL", 0x032a9000, 0x
+ static struct block lpi = { "the LPASS pins", 0x033c0000, 0x10000 };
+ static struct block lpi_high = { "the LPASS pins", 0x033ce000, 0x1000 };
+ static struct block tlmm = { "the pin controller", 0x0f100000, 0x100000 };
++static unsigned reset_pin = 83;
++static bool is_picasso = false;
+ 
+ static void
+ look(void)
+@@ -431,8 +433,13 @@ look(void)
+ 	}
+ 	(void)get(&lpi_high, "gpio14 config (SoundWire TX data 2)", 0);
+ 	(void)get(&lpi_high, "gpio14 in/out", 4);
+-	(void)get(&tlmm, "gpio83 config (the codec's reset)", 0x1000 * 83);
+-	(void)get(&tlmm, "gpio83 in/out", 0x1000 * 83 + 4);
++	{
++		char name[64];
++		snprintf(name, sizeof(name), "gpio%u config (the codec's reset)", reset_pin);
++		(void)get(&tlmm, name, 0x1000 * reset_pin);
++		snprintf(name, sizeof(name), "gpio%u in/out", reset_pin);
++		(void)get(&tlmm, name, 0x1000 * reset_pin + 4);
++	}
+ 	/* (last: the master is a block of its own, and not yet known; with its version above 1.5.1 the votes are all it needs) */
+ 	for (size_t i = 0; i < sizeof(swr) / sizeof(swr[0]); i++) {
+ 		(void)get(&tx_swr, swr[i].name, swr[i].offset);
+@@ -442,27 +449,32 @@ look(void)
+ 
+ /* ---- the codec's reset, the master's pins ------------------------------------------------------------ */
+ 
+-#define TLMM_CFG_83             (0x1000 * 83)
+-#define TLMM_IO_83              (0x1000 * 83 + 4)
+ static uint32_t found_reset_cfg, found_reset_io;
+ static bool reset_taken;
+ 
+ static bool
+ reset_release(void)
+ {
++	char name[64];
++
+ 	if (tlmm.base == 0) {
+ 		tlmm.base = ml_io_map(tlmm.phys, tlmm.size);
+ 	}
+-	found_reset_cfg = rd(tlmm.base + TLMM_CFG_83);
+-	found_reset_io = rd(tlmm.base + TLMM_IO_83);
++	found_reset_cfg = rd(tlmm.base + 0x1000 * reset_pin);
++	found_reset_io = rd(tlmm.base + 0x1000 * reset_pin + 4);
+ 	reset_taken = true;
+ 	/* the sleep state: gpio, 16 mA, no pull, output low; 20 us; the active state: output high */
+-	if (!put(&tlmm, "gpio83 out (the codec's reset)", TLMM_IO_83, 0, 2) ||
+-	    !put(&tlmm, "gpio83 config: gpio, 16 mA, no pull, output", TLMM_CFG_83, 0x3c0, 0x3ff)) {
++	snprintf(name, sizeof(name), "gpio%u out (the codec's reset)", reset_pin);
++	if (!put(&tlmm, name, 0x1000 * reset_pin + 4, 0, 2)) {
++		return false;
++	}
++	snprintf(name, sizeof(name), "gpio%u config: gpio, 16 mA, no pull, output", reset_pin);
++	if (!put(&tlmm, name, 0x1000 * reset_pin, 0x3c0, 0x3ff)) {
+ 		return false;
+ 	}
+ 	spin_us(30);
+-	if (!put(&tlmm, "gpio83 out: high (the codec out of reset)", TLMM_IO_83, 2, 2)) {
++	snprintf(name, sizeof(name), "gpio%u out: high (the codec out of reset)", reset_pin);
++	if (!put(&tlmm, name, 0x1000 * reset_pin + 4, 2, 2)) {
+ 		return false;
+ 	}
+ 	spin_us(30);
+@@ -472,13 +484,18 @@ reset_release(void)
+ static void
+ reset_restore(void)
+ {
++	char name[64];
++
+ 	if (!reset_taken) {
+ 		return;
+ 	}
+ 	broken = false;         /* (putting back is done whatever went before) */
+-	(void)put(&tlmm, "gpio83 out: low (the codec in reset)", TLMM_IO_83, 0, 2);
+-	(void)put(&tlmm, "gpio83 config, as it was found", TLMM_CFG_83, found_reset_cfg, 0x3ff);
+-	(void)put(&tlmm, "gpio83 out, as it was found", TLMM_IO_83, found_reset_io & 2, 2);
++	snprintf(name, sizeof(name), "gpio%u out: low (the codec in reset)", reset_pin);
++	(void)put(&tlmm, name, 0x1000 * reset_pin + 4, 0, 2);
++	snprintf(name, sizeof(name), "gpio%u config, as it was found", reset_pin);
++	(void)put(&tlmm, name, 0x1000 * reset_pin, found_reset_cfg, 0x3ff);
++	snprintf(name, sizeof(name), "gpio%u out, as it was found", reset_pin);
++	(void)put(&tlmm, name, 0x1000 * reset_pin + 4, found_reset_io & 2, 2);
+ 	reset_taken = false;
+ }
+ 
+@@ -510,9 +527,13 @@ pins_on(void)
+ 	pins_taken = true;
+ 	slew = found_slew;
+ 	for (unsigned i = 0; i < SWR_PINS; i++) {
++		if (is_picasso && swr_pins[i].pin == 14) {
++			continue;
++		}
+ 		slew = (slew & ~(3u << swr_pins[i].slew_bit)) | (1u << swr_pins[i].slew_bit);
+ 	}
+-	if (!put(&lpi_slew, "slew rates: 1 for the four", 0, slew, 0xff)) {
++	if (!put(&lpi_slew, is_picasso ? "slew rates: 1 for the three" : "slew rates: 1 for the four", 0, slew,
++	    is_picasso ? 0x3f : 0xff)) {
+ 		return false;
+ 	}
+ 	for (unsigned i = 0; i < SWR_PINS; i++) {
+@@ -538,7 +559,7 @@ pins_restore(void)
+ 		(void)put(&lpi, "a pin, as it was found", 0x1000 * swr_pins[i].pin, found_pin_cfg[i], 0x3ff);
+ 		(void)put(&lpi, "its direction, as it was found", 0x1000 * swr_pins[i].pin + 4, found_pin_dir[i], 2);
+ 	}
+-	(void)put(&lpi_slew, "slew rates, as they were found", 0, found_slew, 0xff);
++	(void)put(&lpi_slew, "slew rates, as they were found", 0, found_slew, is_picasso ? 0x3f : 0xff);
+ 	pins_taken = false;
+ }
+ 
+@@ -637,16 +658,18 @@ master_on(void)
+ 	uint32_t ssp = SWR_BUS_HZ * 2 / (SWR_ROWS * SWR_COLUMNS * SWR_FRAME_SYNC_HZ), cfg;
+ 	bool linked = false;
+ 
+-	if (tx_hctl.base == 0) {
+-		tx_hctl.base = ml_io_map(tx_hctl.phys, tx_hctl.size);
+-	}
+-	found_hctl = rd(tx_hctl.base + 0x0a8);
+ 	master_taken = true;
+-	/* "SW workaround to gate hw_ctl for SWR version >= 1.6" */
+-	if (!put(&tx_hctl, "HCTL: bit 1 cleared", 0x0a8, found_hctl & ~2u, 0x3)) {
+-		return false;
++	if (!is_picasso) {
++		if (tx_hctl.base == 0) {
++			tx_hctl.base = ml_io_map(tx_hctl.phys, tx_hctl.size);
++		}
++		found_hctl = rd(tx_hctl.base + 0x0a8);
++		/* "SW workaround to gate hw_ctl for SWR version >= 1.6" */
++		if (!put(&tx_hctl, "HCTL: bit 1 cleared", 0x0a8, found_hctl & ~2u, 0x3)) {
++			return false;
++		}
++		spin_us(505);
+ 	}
+-	spin_us(505);
+ 	/* swrm_runtime_resume() */
+ 	if (!put(&tx_swr, "COMP_SW_RESET", SWRM_COMP_SW_RESET, 1, 0) || !put(&tx_swr, "COMP_SW_RESET", SWRM_COMP_SW_RESET, 1, 0) ||
+ 	    !put(&tx_swr, "MCP_BUS_CTRL", SWRM_MCP_BUS_CTRL, 1, 0)) {
+@@ -691,7 +714,9 @@ master_off(void)
+ 	(void)put(&tx_swr, "INTERRUPT_EN: none", SWRM_INTERRUPT_EN, 0, 0);
+ 	(void)put(&tx_swr, "CPU1_INTERRUPT_EN: none", SWRM_CPU1_INTERRUPT_EN, 0, 0);
+ 	(void)put(&tx_swr, "COMP_SW_RESET", SWRM_COMP_SW_RESET, 1, 0);
+-	(void)put(&tx_hctl, "HCTL, as it was found", 0x0a8, found_hctl, 0x3);
++	if (!is_picasso) {
++		(void)put(&tx_hctl, "HCTL, as it was found", 0x0a8, found_hctl, 0x3);
++	}
+ 	master_taken = false;
+ }
+ 
+@@ -981,13 +1006,24 @@ port_config(uint8_t bank, bool first)
+ 	write_id = write_id < 14 ? write_id + 1 : 0;
+ 	swr_write(codec_device, SWRS_DP_LANE_CONTROL_BANK(0, bank), 1, write_id);
+ 	note("mic: the codec's data port 1, bank %u: channel 1 on, sample interval %u, offsets 0 0, lane 1\n", bank, codec_interval);
+-	/* the master's port 1 */
+-	return put(&tx_swr, "DP_PORT_CTRL (port 1): channel 1, offsets 0 0, interval 7", SWRM_DP_PORT_CTRL_BANK(1, bank),
+-	           0x01u << 24 | 0u << 16 | 0u << 8 | master_interval, 0xffffffff) &&
+-	       put(&tx_swr, "DP_SAMPLECTRL2 (port 1)", SWRM_DP_SAMPLECTRL2_BANK(1, bank), 0, 0xff) &&
+-	       put(&tx_swr, "DP_PORT_CTRL_2 (port 1): lane 1", SWRM_DP_PORT_CTRL_2_BANK(1, bank), 1, 0xff) &&
+-	       /* (it reads 0 back on the phone whatever is written; Android writes it and never reads it) */
+-	       put(&tx_swr, "DP_PORT_HCTRL (port 1): hstop 15, hstart 0", SWRM_DP_PORT_HCTRL_BANK(1, bank), 0xf0, 0);
++	/* the master's ports: port 1 on Redwood (DMIC on Picasso), port 2 for ADC1 on Picasso (configure both) */
++	for (unsigned p = 1; p <= 2; p++) {
++		if (!put(&tx_swr, p == 1 ? "DP_PORT_CTRL (port 1): channel 1, offsets 0 0, interval 7" :
++		                          "DP_PORT_CTRL (port 2): channel 1, offsets 0 0, interval 7",
++		         SWRM_DP_PORT_CTRL_BANK(p, bank),
++		         0x01u << 24 | 0u << 16 | 0u << 8 | master_interval, 0xffffffff) ||
++		    !put(&tx_swr, p == 1 ? "DP_SAMPLECTRL2 (port 1)" : "DP_SAMPLECTRL2 (port 2)",
++		         SWRM_DP_SAMPLECTRL2_BANK(p, bank), 0, 0xff) ||
++		    !put(&tx_swr, p == 1 ? "DP_PORT_CTRL_2 (port 1): lane 1" : "DP_PORT_CTRL_2 (port 2): lane 1",
++		         SWRM_DP_PORT_CTRL_2_BANK(p, bank), 1, 0xff) ||
++		    /* (it reads 0 back on the phone whatever is written; Android writes it and never reads it) */
++		    !put(&tx_swr, p == 1 ? "DP_PORT_HCTRL (port 1): hstop 15, hstart 0" :
++		                          "DP_PORT_HCTRL (port 2): hstop 15, hstart 0",
++		         SWRM_DP_PORT_HCTRL_BANK(p, bank), 0xf0, 0)) {
++			return false;
++		}
++	}
++	return true;
+ }
+ 
+ static bool
+@@ -1094,7 +1130,7 @@ adc1_on(void)
+ static uint32_t found_dec[10], found_va_mic[3];
+ static uint32_t smic_input = 1;         /* boot-arg mic_input=N: TX SMIC MUX1's input (1 SWR_MIC0, Android's; 0 ZERO, a test) */
+ static bool dec_taken, va_mic_taken;
+-static unsigned bolero_version;         /* 20 or 21: the digital codec's own core ID (bolero_soc_codec_probe()) */
++static unsigned bolero_version;         /* 12, 20 or 21: the digital codec's own core ID (bolero_soc_codec_probe()) */
+ static uint8_t hpf_cut_off;             /* the decimator's high-pass filter as it was found */
+ 
+ static const uint32_t dec_regs[] = {
+@@ -1113,10 +1149,10 @@ bolero_look(void)
+ {
+ 	uint32_t id0 = get(&va_macro, "CORE_ID_0", VA_CORE_ID_0) & 0xff, id1 = get(&va_macro, "CORE_ID_1", VA_CORE_ID_1) & 0xff;
+ 
+-	bolero_version = id0 == 0x01 && id1 == 0x0f ? 20 : id0 == 0x02 && id1 == 0x0e ? 21 : 0;
+-	say("mic: the digital codec is bolero %s\n", bolero_version == 20 ? "2.0" : bolero_version == 21 ? "2.1" : "OF AN UNKNOWN VERSION");
++	bolero_version = id0 == 0x01 && id1 == 0x0f ? 20 : id0 == 0x02 && id1 == 0x0e ? 21 : id0 == 0x00 && id1 == 0x0f ? 12 : 0;
++	say("mic: the digital codec is bolero %s\n", bolero_version == 20 ? "2.0" : bolero_version == 21 ? "2.1" : bolero_version == 12 ? "1.2" : "OF AN UNKNOWN VERSION");
+ 	if (bolero_version != 21) {
+-		return bolero_version == 20;
++		return bolero_version == 20 || bolero_version == 12;
+ 	}
+ 	for (unsigned i = 0; i < 3; i++) {
+ 		found_va_mic[i] = get(&va_macro, "SWR_MIC_CTL (as found)", VA_SWR_MIC_CTL0 + 4 * i);
+@@ -1300,7 +1336,12 @@ mic_read(unsigned period)
+ {
+ 	uint32_t read[5] = { (uint32_t)(mic_address + 4096 * period), (uint32_t)((mic_address + 4096 * period) >> 32),
+ 		             mic_map_handle, MIC_PERIOD_BYTES, period };
++	vm_offset_t p = mic_memory + 4096 * period;
+ 
++	for (vm_offset_t line = p; line < p + MIC_PERIOD_BYTES; line += 64) {
++		__asm__ volatile ("dc civac, %0" : : "r" (line));
++	}
++	__asm__ volatile ("dsb sy");
+ 	return hakios_adsp_apr(APR_SVC_ASM, MIC_STREAM_PORT, READ_TOKEN | period, ASM_DATA_CMD_READ_V2, read, sizeof(read), 0, NULL);
+ }
+ 
+@@ -1787,6 +1828,12 @@ for_darwin(void)
+ static void
+ mic_thread(__unused void *parameter, __unused wait_result_t result)
+ {
++	uint32_t val;
++	if (PE_parse_boot_argn("picasso_usb", &val, sizeof(val))) {
++		is_picasso = true;
++		reset_pin = 57;
++		tlmm.phys = 0x0f500000;
++	}
+ 	say("mic: level %u: %s\n", level, level == 1 ? "a look, after the LPASS's votes and clocks; nothing written to the codec" :
+ 	    level == 2 ? "the codec brought up to answer on SoundWire, nothing of it set; then all undone" :
+ 	    level == 3 ? "the main microphone, as Android records from it, listened to; then all undone" :
+@@ -1820,6 +1867,13 @@ void
+ hakios_mic_dsp_up(void)
+ {
+ 	thread_t thread;
++	uint32_t val;
++
++	if (PE_parse_boot_argn("picasso_usb", &val, sizeof(val))) {
++		is_picasso = true;
++		reset_pin = 57;
++		tlmm.phys = 0x0f500000;
++	}
+ 
+ 	if (!PE_parse_boot_argn("mic", &level, sizeof(level)) || level == 0) {
+ 		return;
+diff --git a/drivers/audio/hakios.sound.c b/drivers/audio/hakios.sound.c
+index f75fc60..ac34ff4 100644
+--- a/drivers/audio/hakios.sound.c
++++ b/drivers/audio/hakios.sound.c
+@@ -117,10 +117,21 @@ say(const char *format, ...)
+ 	return length;
+ }
+ 
++static void
++spin_us(uint32_t us)
++{
++	uint64_t until;
++
++	nanoseconds_to_absolutetime((uint64_t)us * NSEC_PER_USEC, &until);
++	until += mach_absolute_time();
++	while (mach_absolute_time() < until) {
++	}
++}
++
+ static void
+ sleep_ms(uint32_t ms)
+ {
+-	delay_for_interval(ms, NSEC_PER_MSEC);
++	spin_us(ms * 1000);
+ }
+ 
+ static uint64_t
+@@ -202,6 +213,15 @@ put(struct block *b, const char *name, uint32_t offset, uint32_t value)
+ 
+ /* ---- the TDM pins ------------------------------------------------------------------------------------- */
+ 
++static bool is_picasso = false;
++static unsigned pin_sck = 97;
++static unsigned pin_ws = 100;
++static uint16_t afe_port = 0x9000;
++static uint32_t afe_clk_id = 0x200;
++static uint32_t afe_clk_rate = 48000 * 32 * 2;
++static uint16_t afe_clk_attr = 4;
++static uint32_t audio_stream = 0x1801;
++
+ static struct block tlmm = { "pin controller", 0x0f100000, 0x100000 };
+ #define GPIO_CFG(n)             (0x1000u * (n))         /* [1:0] pull, [5:2] function, [8:6] drive (mA / 2 - 1), [9] output */
+ #define GPIO_IO(n)              (0x1000u * (n) + 4)     /* bit 0 in, bit 1 out */
+@@ -218,35 +238,44 @@ static const struct {
+ 	{ 100, "gpio100 (frame sync)", CFG_MI2S0 | CFG_8MA | CFG_OUTPUT, 2 },
+ 	{ 98, "gpio98 (data in)", CFG_MI2S0 | CFG_8MA, 0 },
+ 	{ 99, "gpio99 (data out)", CFG_MI2S0 | CFG_8MA, 0 },
++}, mi2s_pins[] = {
++	{ 70, "gpio70 (SEC MI2S bit clock)", CFG_MI2S0 | CFG_8MA | CFG_OUTPUT, 2 },
++	{ 71, "gpio71 (SEC MI2S word select)", CFG_MI2S0 | CFG_8MA | CFG_OUTPUT, 2 },
++	{ 72, "gpio72 (SEC MI2S data 0)", CFG_MI2S0 | CFG_8MA, 0 },
++	{ 74, "gpio74 (SEC MI2S data 1)", CFG_MI2S0 | CFG_8MA, 0 },
+ };
+-#define TDM_PINS                (sizeof(tdm_pins) / sizeof(tdm_pins[0]))
++#define TDM_PINS                4
+ static uint32_t found_cfg[TDM_PINS], found_io[TDM_PINS];
+ static bool pins_taken;
+ 
+ static void
+ pins_on(void)
+ {
++	const struct { unsigned pin; const char *name; uint32_t cfg, io; } *p = is_picasso ? mi2s_pins : tdm_pins;
++
+ 	for (unsigned i = 0; i < TDM_PINS; i++) {
+-		found_cfg[i] = get(&tlmm, tdm_pins[i].name, GPIO_CFG(tdm_pins[i].pin));
+-		found_io[i] = get(&tlmm, tdm_pins[i].name, GPIO_IO(tdm_pins[i].pin));
++		found_cfg[i] = get(&tlmm, p[i].name, GPIO_CFG(p[i].pin));
++		found_io[i] = get(&tlmm, p[i].name, GPIO_IO(p[i].pin));
+ 	}
+ 	pins_taken = true;
+ 	for (unsigned i = 0; i < TDM_PINS; i++) {
+-		put(&tlmm, tdm_pins[i].name, GPIO_IO(tdm_pins[i].pin), tdm_pins[i].io);
+-		put(&tlmm, tdm_pins[i].name, GPIO_CFG(tdm_pins[i].pin), tdm_pins[i].cfg);
++		put(&tlmm, p[i].name, GPIO_IO(p[i].pin), p[i].io);
++		put(&tlmm, p[i].name, GPIO_CFG(p[i].pin), p[i].cfg);
+ 	}
+ }
+ 
+ static void
+ pins_off(void)
+ {
++	const struct { unsigned pin; const char *name; uint32_t cfg, io; } *p = is_picasso ? mi2s_pins : tdm_pins;
++
+ 	if (!pins_taken) {
+ 		return;
+ 	}
+ 	for (unsigned i = 0; i < TDM_PINS; i++) {
+-		put(&tlmm, tdm_pins[i].name, GPIO_CFG(tdm_pins[i].pin), found_cfg[i]);
+-		put(&tlmm, tdm_pins[i].name, GPIO_IO(tdm_pins[i].pin), found_io[i] & 2);
+-		get(&tlmm, tdm_pins[i].name, GPIO_CFG(tdm_pins[i].pin));
++		put(&tlmm, p[i].name, GPIO_CFG(p[i].pin), found_cfg[i]);
++		put(&tlmm, p[i].name, GPIO_IO(p[i].pin), found_io[i] & 2);
++		get(&tlmm, p[i].name, GPIO_CFG(p[i].pin));
+ 	}
+ 	pins_taken = false;
+ }
+@@ -408,7 +437,7 @@ afe_port_param(const char *what, uint32_t module, uint32_t param, const void *da
+ 	struct afe_param *p = (struct afe_param *)(packet + 16);
+ 
+ 	bzero(packet, sizeof(packet));
+-	*(uint16_t *)packet = PORT;
++	*(uint16_t *)packet = afe_port;
+ 	*(uint16_t *)(packet + 2) = (uint16_t)(sizeof(*p) + size);
+ 	p->module = module;
+ 	p->param = param;
+@@ -422,15 +451,54 @@ static bool clock_on, group_on, port_on;
+ static bool
+ afe_clock(bool on)
+ {
+-	struct afe_clock_set clock = { 1, CLOCK_PRI_TDM_IBIT, RATE * SLOT_BITS * SLOTS, CLOCK_INVERT_COUPLE_NO, 0, on };
++	struct afe_clock_set clock = { 1, afe_clk_id, afe_clk_rate, afe_clk_attr, 0, on };
+ 
+-	return afe_service_param(on ? "the TDM bit clock (0x200) at 3.072 MHz, on" : "the TDM bit clock, off", AFE_MODULE_CLOCK_SET,
++	return afe_service_param(on ? "the audio bit clock, on" : "the audio bit clock, off", AFE_MODULE_CLOCK_SET,
+ 	           AFE_PARAM_ID_CLOCK_SET, &clock, sizeof(clock));
+ }
+ 
++#define AFE_PARAM_ID_I2S_CONFIG 0x0001020du
++struct afe_param_id_i2s_cfg {
++	uint32_t i2s_cfg_minor_version;
++	uint16_t bit_width;
++	uint16_t channel_mode;
++	uint16_t mono_stereo;
++	uint16_t ws_src;
++	uint32_t sample_rate;
++	uint16_t data_format;
++	uint16_t reserved;
++} __attribute__((packed));
++
+ static bool
+ afe_on(void)
+ {
++	uint16_t start[2] = { afe_port, 0 };
++
++	if (is_picasso) {
++		struct afe_param_id_i2s_cfg i2s = {
++			.i2s_cfg_minor_version = 1,
++			.bit_width = 16,
++			.channel_mode = 1, /* AFE_PORT_I2S_SD0 */
++			.mono_stereo = 1,  /* AFE_PORT_I2S_STEREO */
++			.ws_src = 1,       /* internal WS */
++			.sample_rate = 48000,
++			.data_format = 0,  /* linear PCM */
++			.reserved = 0,
++		};
++
++		announce("the DSP is asked for the Secondary MI2S bit clock, the port and its start (AFE)");
++		clock_on = afe_clock(true);
++		if (!clock_on) {
++			return false;
++		}
++		if (!afe_port_param("the port 0x1002: 16-bit stereo at 48 kHz, SD0, internal WS",
++		    AFE_MODULE_AUDIO_DEV_INTERFACE, AFE_PARAM_ID_I2S_CONFIG, &i2s, sizeof(i2s))) {
++			return false;
++		}
++		port_on = command("the port 0x1002, started", APR_SVC_AFE, 0, AFE_PORT_CMD_DEVICE_START, start, sizeof(start), 0, NULL);
++		return port_on;
++	}
++
+ 	struct afe_group_tdm group = {
+ 		.version = 1, .group = GROUP, .ports = { PORT, GROUP_OTHER_PORT, PORT_INVALID, PORT_INVALID, PORT_INVALID,
+ 		                                         PORT_INVALID, PORT_INVALID, PORT_INVALID },
+@@ -443,7 +511,6 @@ afe_on(void)
+ 	};
+ 	struct afe_slot_mapping mapping = { .version = 1, .channels = 2, .bits = PORT_BITS, .align = 0,
+ 		                            .offsets = { 0, 4, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff } };
+-	uint16_t start[2] = { PORT, 0 };
+ 
+ 	announce("the DSP is asked for the TDM interface's bit clock, the group, the port and its start (AFE)");
+ 	clock_on = afe_clock(true);
+@@ -470,14 +537,15 @@ afe_on(void)
+ static void
+ afe_off(void)
+ {
+-	uint16_t stop[2] = { PORT, 0 };
+-	struct afe_group_enable disable = { GROUP, 0 };
++	uint16_t stop[2] = { afe_port, 0 };
+ 
+ 	if (port_on) {
+-		command("the port 0x9000, stopped", APR_SVC_AFE, 0, AFE_PORT_CMD_DEVICE_STOP, stop, sizeof(stop), 0, NULL);
++		command("the port, stopped", APR_SVC_AFE, 0, AFE_PORT_CMD_DEVICE_STOP, stop, sizeof(stop), 0, NULL);
+ 		port_on = false;
+ 	}
+-	if (group_on) {
++	if (!is_picasso && group_on) {
++		struct afe_group_enable disable = { GROUP, 0 };
++
+ 		afe_service_param("the group 0x9100, off", AFE_MODULE_GROUP_DEVICE, AFE_PARAM_ID_GROUP_DEVICE_ENABLE, &disable,
+ 		    sizeof(disable));
+ 		group_on = false;
+@@ -525,9 +593,8 @@ static struct block apps_smmu_context = { "apps smmu, the audio context", 0, 0x1
+ #define PTE_ADDRESS             0x0000fffffffff000ull
+ #define AUDIO_PTE               (3ull | 1ull << 6 | 2ull << 8 | 1ull << 10 | 1ull << 11)       /* as hakios.wifi.c's */
+ 
+-#define AUDIO_STREAM            0x1801
+ #define AUDIO_ADDRESSES         0x10000000ull   /* dt: qcom,iommu-dma-addr-pool of qcom,msm-audio-ion */
+-#define AUDIO_STREAM_BITS       (1ull << 32)    /* the stream's low bits (0x1801 & 0xf), where the DSP takes them from */
++#define AUDIO_STREAM_BITS       ((uint64_t)(audio_stream & 0xf) << 32)
+ 
+ #define PERIODS                 8
+ #define PERIOD_FRAMES           960             /* 20 ms */
+@@ -569,7 +636,7 @@ space_find(void)
+ 
+ 		if (smr >> 31) {
+ 			used[s2cr & 0xff] = true;
+-			if (((stream ^ AUDIO_STREAM) & ~mask) == 0) {
++			if (((stream ^ audio_stream) & ~mask) == 0) {
+ 				say("sound: match register %u covers the audio stream already: stream %#x mask %#x, s2cr %#x\n", n,
+ 				    stream, mask, s2cr);
+ 				if ((s2cr >> 16 & 3) == 1) {
+@@ -594,7 +661,7 @@ space_find(void)
+ 	apps_smmu_second.phys = apps_smmu.phys + space.page;
+ 	apps_smmu_context.phys = apps_smmu.phys + (space.pages + space.context) * space.page;
+ 	say("sound: the boot chain has set nothing up for stream %#x; free: match register %u (smr %#x, s2cr %#x) and context %u, at "
+-	    "%#x\n", AUDIO_STREAM, space.match, space.old_smr, space.old_s2cr, space.context, apps_smmu_context.phys);
++	    "%#x\n", audio_stream, space.match, space.old_smr, space.old_s2cr, space.context, apps_smmu_context.phys);
+ 	space.old_sctlr = get(&apps_smmu_context, "sctlr", SMMU_CB_SCTLR);
+ 	if (space.old_sctlr & 1) {
+ 		say("sound: CONTEXT %u IS SWITCHED ON although no stream is sent through it: it is somebody's, and is left alone\n",
+@@ -630,7 +697,7 @@ static bool
+ space_on(void)
+ {
+ 	uint64_t *root, *second, *third, table_root;
+-	uint32_t smr = SMMU_SMR(space.match), s2cr = SMMU_S2CR(space.match), sees = 1u << 31 | AUDIO_STREAM;
++	uint32_t smr = SMMU_SMR(space.match), s2cr = SMMU_S2CR(space.match), sees = 1u << 31 | audio_stream;
+ 
+ 	/*
+ 	 * (the page tables are allocated once and reused: this runs at every first user of the DSP's buffers, and nothing frees
+@@ -658,7 +725,7 @@ space_on(void)
+ 	table_root = kvtophys(space.tables) | (uint64_t)space.context << 48;
+ 	say("sound: THE SMMU IS ABOUT TO BE WRITTEN: context %u gets page tables of ours (root %#llx) for the %u KB of the periods and the microphones' "
+ 	    "at %#llx, and match register %u sends stream %#x through it\n", space.context, table_root & PTE_ADDRESS,
+-	    SHARED_BYTES / 1024, AUDIO_ADDRESSES, space.match, AUDIO_STREAM);
++	    SHARED_BYTES / 1024, AUDIO_ADDRESSES, space.match, audio_stream);
+ 	if (pause_ms) {
+ 		sleep_ms(pause_ms);
+ 	}
+@@ -690,7 +757,7 @@ space_on(void)
+ 	if (get(&apps_smmu, "smr", smr) != sees || (get(&apps_smmu, "s2cr", s2cr) & 0x300ff) != space.context ||
+ 	    !(get(&apps_smmu_context, "sctlr", SMMU_CB_SCTLR) & 1) ||
+ 	    get(&apps_smmu_context, "ttbr0, low", SMMU_CB_TTBR0) != (uint32_t)table_root) {
+-		say("sound: THE SMMU DID NOT TAKE WHAT WAS WRITTEN: stream %#x is not going through context %u\n", AUDIO_STREAM,
++		say("sound: THE SMMU DID NOT TAKE WHAT WAS WRITTEN: stream %#x is not going through context %u\n", audio_stream,
+ 		    space.context);
+ 		return false;
+ 	}
+@@ -774,6 +841,10 @@ hakios_audio_dsp_memory(uintptr_t *memory, uint64_t *dsp_address, uint32_t *byte
+ 		*memory = buffer + BUFFER_BYTES;
+ 		*dsp_address = buffer_address + BUFFER_BYTES;
+ 		*bytes = MIC_BYTES;
++		for (vm_offset_t line = *memory; line < *memory + MIC_BYTES; line += 64) {
++			__asm__ volatile ("dc civac, %0" : : "r" (line));
++		}
++		__asm__ volatile ("dsb sy");
+ 	}
+ 	return ok;
+ }
+@@ -866,7 +937,7 @@ stream_on(void)
+ 		uint16_t channels, bits;
+ 		uint32_t rate;
+ 		uint8_t map[8];
+-	} __attribute__((packed)) open = { 0, ADM_PATH_PLAYBACK, PORT, 0xffff, ADM_TOPOLOGY_NONE, 2, ADM_BITS, RATE,
++	} __attribute__((packed)) open = { 0, ADM_PATH_PLAYBACK, afe_port, 0xffff, ADM_TOPOLOGY_NONE, 2, ADM_BITS, RATE,
+ 		                           { PCM_CHANNEL_FL, PCM_CHANNEL_FR } };
+ 	struct {
+ 		uint32_t matrix, sessions;
+@@ -896,7 +967,7 @@ stream_on(void)
+ 	mapped = true;
+ 	map_handle = answer.words[0];
+ 	say("sound: our %u KB at %#llx are the DSP's handle %#x\n", BUFFER_BYTES / 1024, buffer_address, map_handle);
+-	if (!command("a device path to the port: playback, no processing, 2 channels of 24 bits at 48 kHz", APR_SVC_ADM, PORT,
++	if (!command("a device path to the port: playback, no processing, 2 channels of 24 bits at 48 kHz", APR_SVC_ADM, afe_port,
+ 	    ADM_CMD_DEVICE_OPEN_V5, &open, sizeof(open), ADM_CMDRSP_DEVICE_OPEN_V5, &answer)) {
+ 		return false;
+ 	}
+@@ -1384,9 +1455,22 @@ sound_thread(__unused void *parameter, __unused wait_result_t result)
+ {
+ 	const uint8_t *acf = NULL;
+ 	uint64_t acf_size = 0;
+-	uint32_t changes, ones, sync_changes, sync_ones;
++	uint32_t changes, ones, sync_changes, sync_ones, val;
+ 	bool ok = false;
+ 
++	if (PE_parse_boot_argn("picasso_usb", &val, sizeof(val))) {
++		is_picasso = true;
++		tlmm.phys = 0x0f500000;
++		tlmm.size = 0x5d000;
++		pin_sck = 70;
++		pin_ws = 71;
++		afe_port = 0x1002;
++		afe_clk_id = 0x102;
++		afe_clk_rate = 1536000;
++		afe_clk_attr = 1;
++		audio_stream = 0x1401;
++	}
++
+ 	lck_mtx_lock(&sound_lock);
+ 	if (taken_down) {
+ 		lck_mtx_unlock(&sound_lock);
+@@ -1395,11 +1479,11 @@ sound_thread(__unused void *parameter, __unused wait_result_t result)
+ 	if (level == 4) {
+ 		say("sound: level 4: what Darwin plays, through the port, a stream and the amplifiers, until the run ends\n");
+ 	} else {
+-		say("sound: level %u: %s, for %u s\n", level, level == 1 ? "the speakers' TDM port" : level == 2 ?
++		say("sound: level %u: %s, for %u s\n", level, level == 1 ? (is_picasso ? "the Secondary MI2S port" : "the speakers' TDM port") : level == 2 ?
+ 		    "the port and a stream with a test tone, the amplifiers off" :
+ 		    "the port, a stream with a test tone, and the amplifiers", seconds);
+ 	}
+-	if (level >= 3) {
++	if (level >= 3 && !is_picasso) {
+ 		acf = hakios_adsp_fw_file("aw882xx_acf.bin", &acf_size);
+ 		if (acf == NULL) {
+ 			say("sound: no /fw/aw882xx_acf.bin: put the phone's /vendor/etc/aw882xx_acf.bin into fw-audio/ and run SYSTEM=1 "
+@@ -1417,16 +1501,18 @@ sound_thread(__unused void *parameter, __unused wait_result_t result)
+ 		ok = false;
+ 		hakios_adsp_apr_events(events);
+ 	}
+-	announce("the TDM pins (GPIO 97 to 100) to the interface, as Android's active state has them");
++	announce(is_picasso ? "the SEC MI2S pins (GPIO 70, 71, 72, 74) to the interface, as Android's active state has them" :
++	    "the TDM pins (GPIO 97 to 100) to the interface, as Android's active state has them");
+ 	pins_on();
+ 	if (!afe_on()) {
+ 		goto out;
+ 	}
+ 	sleep_ms(20);
+-	pin_activity(97, "the bit clock (gpio97)", &changes, &ones);
+-	pin_activity(100, "the frame sync (gpio100)", &sync_changes, &sync_ones);
+-	say("sound: %s\n", changes > 100 && sync_changes > 4 ? "THE TDM CLOCK AND FRAME SYNC RUN at the pins" :
+-	    "THE PINS DO NOT SHOW A RUNNING TDM CLOCK");
++	pin_activity(pin_sck, is_picasso ? "the SEC MI2S bit clock (gpio70)" : "the bit clock (gpio97)", &changes, &ones);
++	pin_activity(pin_ws, is_picasso ? "the SEC MI2S word select (gpio71)" : "the frame sync (gpio100)", &sync_changes, &sync_ones);
++	say("sound: %s\n", changes > 100 && sync_changes > 4 ?
++	    (is_picasso ? "THE SEC MI2S CLOCK AND WORD SELECT RUN at the pins" : "THE TDM CLOCK AND FRAME SYNC RUN at the pins") :
++	    "THE PINS DO NOT SHOW A RUNNING CLOCK");
+ 	if (level == 1) {
+ 		sleep_ms(seconds * 1000);
+ 		ok = true;
+@@ -1442,8 +1528,10 @@ sound_thread(__unused void *parameter, __unused wait_result_t result)
+ 		if (!hakios_speaker_prepare(acf, acf_size)) {
+ 			goto out;
+ 		}
+-		hakios_adsp_fw_free(acf, acf_size);
+-		acf = NULL;
++		if (acf != NULL) {
++			hakios_adsp_fw_free(acf, acf_size);
++			acf = NULL;
++		}
+ 		feeder_runs = true;
+ 		if (kernel_thread_start(feeder_thread, NULL, &feeder) != KERN_SUCCESS) {
+ 			feeder_runs = false;
+@@ -1498,6 +1586,20 @@ void
+ hakios_sound_dsp_up(void)
+ {
+ 	thread_t thread;
++	uint32_t val;
++
++	if (PE_parse_boot_argn("picasso_usb", &val, sizeof(val))) {
++		is_picasso = true;
++		tlmm.phys = 0x0f500000;
++		tlmm.size = 0x5d000;
++		pin_sck = 70;
++		pin_ws = 71;
++		afe_port = 0x1002;
++		afe_clk_id = 0x102;
++		afe_clk_rate = 1536000;
++		afe_clk_attr = 1;
++		audio_stream = 0x1401;
++	}
+ 
+ 	if (!PE_parse_boot_argn("sound", &level, sizeof(level)) || level == 0) {
+ 		return;
+diff --git a/drivers/audio/hakios.speaker.c b/drivers/audio/hakios.speaker.c
+index 86cf8c9..bde5da6 100644
+--- a/drivers/audio/hakios.speaker.c
++++ b/drivers/audio/hakios.speaker.c
+@@ -128,41 +128,74 @@ spin_us(uint32_t us)
+ static void
+ wait_ms(uint32_t ms)
+ {
+-	if (leaving) {
+-		spin_us(ms * 1000);
+-	} else {
+-		delay_for_interval(ms, NSEC_PER_MSEC);
+-	}
++	spin_us(ms * 1000);
+ }
+ 
+ /* ---- pins ------------------------------------------------------------------------------------------ */
+ 
+-#define TLMM_PHYS               0x0f100000UL
+-#define TLMM_SIZE               0x100000UL
+-#define GPIO_CFG(n)             (tlmm + 0x1000UL * (n))         /* [1:0] pull, [5:2] function, [8:6] drive, [9] output */
+-#define GPIO_IO(n)              (tlmm + 0x1000UL * (n) + 4)     /* bit 0 in, bit 1 out */
++#define TLMM_PHYS_SC7280        0x0f100000UL
++#define TLMM_SIZE_SC7280        0x100000UL
++
++static bool is_picasso = false;
++static unsigned pin_sda = 12;
++static unsigned pin_scl = 13;
++static vm_offset_t tlmm_west = 0, tlmm_east = 0;
++
++static inline vm_offset_t
++gpio_addr(unsigned pin, unsigned offset)
++{
++	if (is_picasso) {
++		/* SM7250 / Lito TLMM tiles:
++		 * WEST: 0x0f500000 (pins 46..63, 70..72, 74, 83)
++		 * EAST: 0x0f900000 (pins 0..45, 64..69, 73, 87..89)
++		 * SOUTH: 0x0f100000 (pins 75..82, 84..86, 90..150)
++		 */
++		if ((pin >= 46 && pin <= 63) || (pin >= 70 && pin <= 72) || pin == 74 || pin == 83) {
++			if (tlmm_west == 0) {
++				tlmm_west = ml_io_map(0x0f500000UL, 0x100000UL);
++			}
++			return tlmm_west + 0x1000UL * pin + offset;
++		}
++		if (tlmm_east == 0) {
++			tlmm_east = ml_io_map(0x0f900000UL, 0x100000UL);
++		}
++		return tlmm_east + 0x1000UL * pin + offset;
++	}
++	return tlmm + 0x1000UL * pin + offset;
++}
++
++#define GPIO_CFG(n)             gpio_addr((n), 0)
++#define GPIO_IO(n)              gpio_addr((n), 4)
+ #define CFG_PULL_UP             3
+ #define CFG_OUTPUT              (1u << 9)
+ 
+-#define PIN_SDA                 12      /* the serial engine's first pin is the data line, the second the clock */
+-#define PIN_SCL                 13
++#define PIN_SDA                 pin_sda
++#define PIN_SCL                 pin_scl
+ 
+ static const struct {
+ 	unsigned pin;
+ 	const char *what;
+-} pins[] = {
++} pins_redwood[] = {
+ 	{ 12, "I2C data" }, { 13, "I2C clock" }, { 97, "MI2S 0 bit clock" }, { 100, "MI2S 0 word select" },
+ 	{ 98, "MI2S 0 data 0" }, { 99, "MI2S 0 data 1" }, { 102, "the amplifier 0x35's interrupt" },
+ 	{ 45, "the amplifier 0x34's interrupt" },
++}, pins_picasso[] = {
++	{ 49, "I2C data / SDA (qup12)" }, { 50, "I2C clock / SCL (qup12)" }, { 58, "TFA98xx reset" },
++	{ 65, "TFA98xx interrupt" }, { 70, "SEC MI2S bit clock (sck)" }, { 71, "SEC MI2S word select (ws)" },
++	{ 72, "SEC MI2S data 0" }, { 74, "SEC MI2S data 1" },
+ };
+ 
+ static void
+ show_pins(void)
+ {
+-	for (unsigned i = 0; i < sizeof(pins) / sizeof(pins[0]); i++) {
+-		uint32_t cfg = rd(GPIO_CFG(pins[i].pin)), io = rd(GPIO_IO(pins[i].pin));
++	const struct { unsigned pin; const char *what; } *p = is_picasso ? pins_picasso : pins_redwood;
++	size_t count = is_picasso ? (sizeof(pins_picasso) / sizeof(pins_picasso[0])) :
++	                            (sizeof(pins_redwood) / sizeof(pins_redwood[0]));
++
++	for (size_t i = 0; i < count; i++) {
++		uint32_t cfg = rd(GPIO_CFG(p[i].pin)), io = rd(GPIO_IO(p[i].pin));
+ 
+-		say("speaker: gpio%u (%s): function %u, pull %u, %u mA, %s, reads %u\n", pins[i].pin, pins[i].what,
++		say("speaker: gpio%u (%s): function %u, pull %u, %u mA, %s, reads %u\n", p[i].pin, p[i].what,
+ 		    (cfg >> 2) & 15, cfg & 3, (((cfg >> 6) & 7) + 1) * 2, (cfg & CFG_OUTPUT) ? (io & 2 ? "drives high" : "drives low") :
+ 		    "input", io & 1);
+ 	}
+@@ -346,7 +379,15 @@ amplifier_name(uint16_t id)
+ 	case 0x2113: return "AW88261";
+ 	case 0x2183: return "AW88399";
+ 	case 0x2308: return "AW88230";
++	case 0x0074:
++	case 0x0174:
++	case 0x0274:
++	case 0x9874: return "NXP TFA9874";
++	case 0x0072:
++	case 0x9872: return "NXP TFA9872";
+ 	}
++	if ((id & 0xff) == 0x74) return "NXP TFA9874";
++	if ((id & 0xff) == 0x72) return "NXP TFA9872";
+ 	return "an amplifier this list does not know";
+ }
+ 
+@@ -734,15 +775,65 @@ faulty(struct amplifier *a, uint16_t *status)
+ 	return (*status & SYSST_FAULTS) != 0;
+ }
+ 
++static bool tfa_prepared = false;
++static bool tfa_started = false;
++
++static const struct {
++	uint8_t reg;
++	uint16_t val;
++} tfa9874_init_regs[] = {
++	{ 0x02, 0x01e8 }, { 0x0f, 0x5a6b }, { 0x21, 0x0001 }, { 0x23, 0x0018 },
++	{ 0x26, 0x1000 }, { 0x27, 0x0000 }, { 0x58, 0x0010 }, { 0x61, 0x0110 },
++	{ 0x62, 0x0000 }, { 0x64, 0x0000 }, { 0x66, 0x0000 }, { 0x68, 0x004a },
++	{ 0x6f, 0x00a0 }, { 0x70, 0x0180 }, { 0x74, 0x1098 }, { 0x75, 0x0d00 },
++	{ 0x76, 0x7e00 }, { 0x83, 0x0715 }, { 0x84, 0x0080 }, { 0x85, 0x0002 },
++	{ 0x88, 0x0002 }, { 0x8f, 0x0000 }, { 0xa0, 0x005a }, { 0xa1, 0x005a },
++	{ 0xc4, 0x0000 }, { 0xf8, 0x6000 },
++};
++
+ bool
+ hakios_speaker_prepare(const uint8_t *acf, uint64_t size)
+ {
+-	if (tlmm == 0) {
+-		tlmm = ml_io_map(TLMM_PHYS, TLMM_SIZE);
++	uint32_t val;
++	if (PE_parse_boot_argn("picasso_usb", &val, sizeof(val))) {
++		is_picasso = true;
++		pin_sda = 49;
++		pin_scl = 50;
++	} else if (tlmm == 0) {
++		tlmm = ml_io_map(TLMM_PHYS_SC7280, TLMM_SIZE_SC7280);
+ 	}
+ 	broken = false;
+ 	say("speaker: the amplifiers are prepared as Android's driver prepares them; the I2C pins as found:\n");
+ 	show_pins();
++	if (is_picasso) {
++		say("speaker: picasso: resetting TFA9874 via gpio58 (pulse high then low)\n");
++		wr(GPIO_IO(58), 2);
++		wr(GPIO_CFG(58), CFG_PULL_UP | CFG_OUTPUT);
++		wait_ms(10);
++		wr(GPIO_IO(58), 0);
++		wait_ms(10);
++
++		uint16_t rev = 0;
++		if (!register_read(0x34, 0x03, &rev)) {
++			say("speaker: picasso: TFA9874 at 0x34 did not respond\n");
++			return false;
++		}
++		say("speaker: picasso: TFA9874 rev %#06x (%s)\n", rev, amplifier_name(rev));
++
++		for (size_t i = 0; i < sizeof(tfa9874_init_regs) / sizeof(tfa9874_init_regs[0]); i++) {
++			if (!register_write(0x34, tfa9874_init_regs[i].reg, tfa9874_init_regs[i].val)) {
++				say("speaker: picasso: failed to write TFA9874 reg %#x\n", tfa9874_init_regs[i].reg);
++				return false;
++			}
++		}
++		if (!register_write(0x34, 0x01, 0x0004)) {
++			say("speaker: picasso: failed to set MANSCONF\n");
++			return false;
++		}
++		tfa_prepared = true;
++		say("speaker: picasso: TFA9874 PREPARED (configured from tfa98xx.cnt)\n");
++		return true;
++	}
+ 	if (!acf_profiles(acf, size)) {
+ 		return false;
+ 	}
+@@ -827,6 +918,29 @@ hakios_speaker_prepare(const uint8_t *acf, uint64_t size)
+ bool
+ hakios_speaker_start(void)
+ {
++	if (is_picasso) {
++		if (broken || !tfa_prepared) {
++			return false;
++		}
++		say("speaker: picasso: starting TFA9874 (reg 0x00 <- 0x0018, reg 0x20 <- 0x0010)\n");
++		tfa_started = true;
++		if (!register_write(0x34, 0x00, 0x0018)) {
++			say("speaker: picasso: failed to power up TFA9874\n");
++			return false;
++		}
++		if (!register_write(0x34, 0x20, 0x0010)) {
++			say("speaker: picasso: failed to enable TDM on TFA9874\n");
++			return false;
++		}
++		wait_ms(2);
++		uint16_t status = 0;
++		if (register_read(0x34, 0x00, &status)) {
++			say("speaker: picasso: TFA9874 status reg 0x00 = %#06x\n", status);
++		}
++		say("speaker: picasso: TFA9874 RUNS unmuted\n");
++		return true;
++	}
++
+ 	for (unsigned i = 0; i < 2; i++) {
+ 		struct amplifier *a = &amplifiers[i];
+ 		uint16_t status = 0, interrupts = 0;
+@@ -900,6 +1014,20 @@ hakios_speaker_volume(uint32_t below, uint32_t step_ms)
+ {
+ 	uint16_t status;
+ 
++	if (is_picasso) {
++		if (broken || !tfa_started) {
++			return false;
++		}
++		uint32_t half_dbs = below / 4;
++		if (half_dbs > 255) {
++			half_dbs = 255;
++		}
++		uint16_t vol_reg = (uint16_t)(half_dbs << 8);
++		say("speaker: picasso: setting TFA9874 volume to -%u.%03u dB (reg 0x51 <- %#06x)\n",
++		    below / 8, below % 8 * 125, vol_reg);
++		return register_write(0x34, 0x51, vol_reg);
++	}
++
+ 	/* Nothing is quieter than the driver's mute volume. Without this a huge `below' wraps volume_at + below to a level
+ 	   under volume_at, which the fade loop below can never reach (set_volume() never goes louder than Android), so it
+ 	   would spin forever with the amplifiers at their loudest. */
+@@ -959,6 +1087,21 @@ hakios_speaker_volume(uint32_t below, uint32_t step_ms)
+ bool
+ hakios_speaker_healthy(void)
+ {
++	if (is_picasso) {
++		if (broken) {
++			return false;
++		}
++		if (!tfa_started) {
++			return true;
++		}
++		uint16_t status = 0;
++		if (!register_read(0x34, 0x00, &status)) {
++			say("speaker: picasso: failed to read TFA9874 status\n");
++			return false;
++		}
++		return true;
++	}
++
+ 	for (unsigned i = 0; i < 2; i++) {
+ 		struct amplifier *a = &amplifiers[i];
+ 		uint16_t status;
+@@ -1005,6 +1148,18 @@ hakios_speaker_monitor(bool tell)
+ {
+ 	uint32_t wanted = 0;
+ 
++	if (is_picasso) {
++		if (broken || !tfa_started) {
++			return 0;
++		}
++		uint16_t bat = 0;
++		register_read(0x34, 0x02, &bat);
++		if (tell) {
++			say("speaker: picasso: TFA9874 battery %#06x\n", bat);
++		}
++		return 0;
++	}
++
+ 	for (unsigned i = 0; i < 2; i++) {
+ 		struct amplifier *a = &amplifiers[i];
+ 		uint16_t vbat = 0, temp = 0, pvdd = 0, isn = 0, vsn = 0;
+@@ -1059,6 +1214,18 @@ stop_failed(void)
+ void
+ hakios_speaker_stop(void)
+ {
++	if (is_picasso) {
++		if (!tfa_started) {
++			return;
++		}
++		say("speaker: picasso: stopping TFA9874 (reg 0x20 <- 0x0000, reg 0x00 <- 0x0001)\n");
++		register_write(0x34, 0x20, 0x0000);
++		register_write(0x34, 0x00, 0x0001);
++		tfa_started = false;
++		say("speaker: picasso: TFA9874 IS POWERED DOWN\n");
++		return;
++	}
++
+ 	if (broken) {
+ 		return;                 /* (already powered down) */
+ 	}
+@@ -1098,12 +1265,19 @@ hakios_speaker_stop(void)
+ void
+ hakios_speaker_quiesce(void)
+ {
++	if (is_picasso) {
++		if (tfa_started) {
++			hakios_speaker_stop();
++		}
++		return;
++	}
++
+ 	bool any = false;
+ 
+ 	for (unsigned i = 0; i < 2; i++) {
+ 		any |= amplifiers[i].started;
+ 	}
+-	if (!any || tlmm == 0) {
++	if (!any || (tlmm == 0 && tlmm_west == 0)) {
+ 		return;
+ 	}
+ 	leaving = true;
+@@ -1121,6 +1295,36 @@ show_amplifiers(void)
+ 		const char *name;
+ 	} more[] = { { 0x01, "status" }, { 0x04, "system control" }, { 0x06, "I2S control" } };
+ 
++	if (is_picasso) {
++		say("speaker: picasso: resetting TFA9874 via gpio58 (pulse high then low)\n");
++		wr(GPIO_IO(58), 2);
++		wr(GPIO_CFG(58), CFG_PULL_UP | CFG_OUTPUT);
++		wait_ms(10);
++		wr(GPIO_IO(58), 0);
++		wait_ms(10);
++
++		say("speaker: picasso: probing I2C addresses 0x34..0x37\n");
++		bool found_any = false;
++		for (uint8_t addr = 0x34; addr <= 0x37; addr++) {
++			uint16_t rev = 0;
++			if (register_read(addr, 0x03, &rev)) {
++				say("speaker: amplifier at %#x responded: rev %#06x, %s\n", addr, rev, amplifier_name(rev));
++				uint16_t val = 0;
++				if (register_read(addr, 0x00, &val)) say("speaker:   register 0x00 (status) = %#06x\n", val);
++				if (register_read(addr, 0x01, &val)) say("speaker:   register 0x01 (sysctrl) = %#06x\n", val);
++				if (register_read(addr, 0x02, &val)) say("speaker:   register 0x02 (battery) = %#06x\n", val);
++				found_any = true;
++			} else if (register_read(addr, 0x00, &rev)) {
++				say("speaker: device at %#x responded to reg 0x00: %#06x\n", addr, rev);
++				found_any = true;
++			}
++		}
++		if (!found_any) {
++			say("speaker: nobody at I2C addresses 0x34..0x37: not powered, or not there\n");
++		}
++		return;
++	}
++
+ 	for (unsigned i = 0; i < 2; i++) {
+ 		uint16_t id = 0, value = 0;
+ 
+@@ -1213,8 +1417,13 @@ show_power(void)
+ static void
+ probe_thread(__unused void *parameter, __unused wait_result_t result)
+ {
+-	if (tlmm == 0) {
+-		tlmm = ml_io_map(TLMM_PHYS, TLMM_SIZE);
++	uint32_t val;
++	if (PE_parse_boot_argn("picasso_usb", &val, sizeof(val))) {
++		is_picasso = true;
++		pin_sda = 49;
++		pin_scl = 50;
++	} else if (tlmm == 0) {
++		tlmm = ml_io_map(TLMM_PHYS_SC7280, TLMM_SIZE_SC7280);
+ 	}
+ 	gcc = ml_io_map(GCC_PHYS, GCC_SIZE);
+ 	cmd_db = ml_io_map_wcomb(CMD_DB_PHYS, CMD_DB_SIZE);      /* memory, not registers: no alignment rules */
+diff --git a/drivers/core/hakios.stubs.c b/drivers/core/hakios.stubs.c
+index ed5ca7f..83d4ce9 100644
+--- a/drivers/core/hakios.stubs.c
++++ b/drivers/core/hakios.stubs.c
+@@ -15,8 +15,10 @@
+  */
+ #include <stdbool.h>
+ #include <stdint.h>
++#include <stdarg.h>
+ #include <sys/errno.h>
+ #include <sys/types.h>
++#include <sys/systm.h>
+ #include <sys/hakios.audio.h>
+ #include <sys/hakios.input.h>
+ #include <sys/hakios.net.h>
+@@ -32,6 +34,9 @@ void hakios_ufs_quiesce(void);
+ void hakios_var_save_on_return(void);
+ void hakios_mic_quiesce(void);
+ void HakiosWLANStart(const char *interface, const uint8_t *address);
++void hakios_init_sys_mark(uint32_t v);
++
++void hakios_init_sys_mark(__unused uint32_t v) {}
+ 
+ #ifndef HAKIOS_VIRTIO_INPUT
+ void hakios_virtio_input_init(void) {}
+@@ -41,6 +46,10 @@ void hakios_virtio_input_init(void) {}
+ void hakios_goodix_init(void) {}
+ #endif
+ 
++#ifndef HAKIOS_NOVATEK
++void hakios_novatek_init(void) {}
++#endif
++
+ #ifndef HAKIOS_BUTTONS
+ void hakios_buttons_init(void) {}
+ #endif
+@@ -80,8 +89,18 @@ void hakios_adreno_minute(void) {}
+ void hakios_wifi_init(void) {}
+ void hakios_wifi_stop(void) {}
+ void hakios_wifi_quiesce(void) {}
+-errno_t hakios_apple80211_ioctl(__unused u_long command, __unused void *data) { return EOPNOTSUPP; }
+-void HakiosWLANStart(__unused const char *interface, __unused const uint8_t *address) {}
++int hakios_wifi_tell(const char *format, ...)
++{
++	va_list ap;
++	va_start(ap, format);
++	int ret = vprintf(format, ap);
++	va_end(ap);
++	return ret;
++}
++#endif
++
++#ifndef HAKIOS_PICASSO_WLAN
++void picasso_modem_init(void) {}
+ #endif
+ 
+ #ifndef HAKIOS_ADSP
+@@ -135,3 +154,7 @@ void hakios_torch_quiesce(void) {}
+ void hakios_camera_init(void) {}
+ void hakios_camera_quiesce(void) {}
+ #endif
++
++#ifndef HAKIOS_BT
++void hakios_bt_init(void) {}
++#endif
+diff --git a/drivers/gpu/hakios.adreno.c b/drivers/gpu/hakios.adreno.c
+index 3f1f97a..241da2c 100644
+--- a/drivers/gpu/hakios.adreno.c
++++ b/drivers/gpu/hakios.adreno.c
+@@ -412,8 +412,8 @@ step_outside(void)
+  */
+ static struct block qfprom = { "qfprom", 0x00780000, 0x7000 };
+ #define QFPROM_CORRECTED        0x4000
+-#define QFPROM_GPU_SPEED_BIN    0x1e9
+-#define QFPROM_GPU_GAMING_BIN   0x1f5
++#define QFPROM_GPU_SPEED_BIN    0x1ea
++#define QFPROM_GPU_GAMING_BIN   0x212
+ 
+ static uint32_t
+ get8(struct block *b, const char *name, uint32_t offset)
+@@ -440,10 +440,8 @@ step_fuses(void)
+ 	bin |= get8(&qfprom, "speed bin, high", QFPROM_CORRECTED + QFPROM_GPU_SPEED_BIN + 1) << 8;
+ 	bin = bin >> 5 & 0xff;
+ 	speed_bin = bin;
+-	gaming = get8(&qfprom, "gaming bin", QFPROM_CORRECTED + QFPROM_GPU_GAMING_BIN) >> 5 & 1;
+-	/* dt: qcom,gpu-models: 0xac and 0xbe are sold as Adreno 643, anything else is the 642L */
+-	printf("adreno: %u: speed bin %u: an Adreno %s; gaming bin %u\n", step, bin, bin == 0xac || bin == 0xbe ? "643" : "642L",
+-	    gaming);
++	gaming = get8(&qfprom, "gaming bin", QFPROM_CORRECTED + QFPROM_GPU_GAMING_BIN) & 1;
++	printf("adreno: %u: speed bin %u: an Adreno 620; gaming bin %u\n", step, bin, gaming);
+ 
+ 	announce("read the same fuses where the phone's device tree has them (0x780000)");
+ 	bin = get8(&qfprom, "raw speed bin, low", QFPROM_GPU_SPEED_BIN);
+@@ -476,7 +474,7 @@ static struct block gpucc = { "gpucc", 0x03d90000, 0x9000 };
+ #define GPUCC_HUB_RCGR          0x117c          /* gpu_cc_hub_clk_src */
+ #define GPUCC_HUB_CX_INT_CBCR   0x1204          /* gpu_cc_hub_cx_int_clk */
+ #define GPUCC_CX_HW_CTRL        0x1540          /* dt: gpu_cx_hw_ctrl: bit 31 is where the vendor's driver sees CX come on */
+-#define GPUCC_GX_DOMAIN_MISC    0x158c          /* dt: gpu_gx_domain_addr */
++#define GPUCC_GX_DOMAIN_MISC    0x1508          /* dt: gpu_gx_domain_addr (0x3d91508 on SM7250) */          /* dt: gpu_gx_domain_addr */
+ #define GPUCC_SMMU_VOTE_CBCR    0x5000          /* gpu_cc_hlos1_vote_gpu_smmu_clk: our vote for the SMMU's clock */
+ 
+ #define GDSC_SW_COLLAPSE        (1u << 0)       /* a power switch's control register (gdsc.c): off, by software */
+@@ -506,16 +504,11 @@ step_gpucc(void)
+ 	get(&gpucc, "pll1 multiplier", GPUCC_PLL1_MODE + 4);
+ 	get(&gpucc, "gmu_clk_src command", GPUCC_GMU_RCGR);
+ 	get(&gpucc, "gmu_clk_src source", GPUCC_GMU_RCGR + 4);
+-	get(&gpucc, "hub_clk_src command", GPUCC_HUB_RCGR);
+-	get(&gpucc, "hub_clk_src source", GPUCC_HUB_RCGR + 4);
+ 	get(&gpucc, "cxo_aon", GPUCC_CXO_AON_CBCR);
+ 	get(&gpucc, "gx_gmu", GPUCC_GX_GMU_CBCR);
+ 	get(&gpucc, "ahb", GPUCC_AHB_CBCR);
+ 	get(&gpucc, "cx_gmu", GPUCC_CX_GMU_CBCR);
+ 	get(&gpucc, "cxo", GPUCC_CXO_CBCR);
+-	get(&gpucc, "cb", GPUCC_CB_CBCR);
+-	get(&gpucc, "hub_aon", GPUCC_HUB_AON_CBCR);
+-	get(&gpucc, "hub_cx_int", GPUCC_HUB_CX_INT_CBCR);
+ 	get(&gpucc, "smmu vote", GPUCC_SMMU_VOTE_CBCR);
+ 	return true;
+ }
+@@ -667,23 +660,25 @@ step_clocks(void)
+ 		return false;
+ 	}
+ 
+-	announce("in the GPU's clock controller: the GMU's clock to 200 MHz, the hub's to 150 MHz");
+-	if (!clock_source("gmu_clk_src", GPUCC_GMU_RCGR, RCG_GPLL0_DIV(3)) ||       /* 300 MHz / 1.5 */
+-	    !clock_source("hub_clk_src", GPUCC_HUB_RCGR, RCG_GPLL0_DIV(4))) {       /* 300 MHz / 2 */
++	announce("in the GPU's clock controller: the GMU's clock to 200 MHz");
++	if (!clock_source("gmu_clk_src", GPUCC_GMU_RCGR, RCG_GPLL0_DIV(3))) {       /* 300 MHz / 1.5 */
+ 		return false;
+ 	}
+ 
+ 	announce("in the GPU's clock controller: the clocks of the GMU and of the SMMU on");
+-	if (!clock_on(&gpucc, "cb", GPUCC_CB_CBCR, false) ||
++	set(&gpucc, "cx_gmu wake/sleep", GPUCC_CX_GMU_CBCR, (0xf << 8) | (0xf << 4));
++	if (!clock_on(&gpucc, "cxo_aon", GPUCC_CXO_AON_CBCR, false) ||
+ 	    !clock_on(&gpucc, "cxo", GPUCC_CXO_CBCR, true) ||
+ 	    !clock_on(&gpucc, "ahb", GPUCC_AHB_CBCR, false) ||
+-	    !clock_on(&gpucc, "hub_aon", GPUCC_HUB_AON_CBCR, true) ||
+-	    !clock_on(&gpucc, "hub_cx_int", GPUCC_HUB_CX_INT_CBCR, true) ||
+ 	    !clock_on(&gpucc, "cx_gmu", GPUCC_CX_GMU_CBCR, true) ||
+ 	    !clock_on(&gpucc, "smmu vote", GPUCC_SMMU_VOTE_CBCR, false)) {
+ 		return false;
+ 	}
+-	return measure_clocks();
++	if (rd(gpucc.base + GPUCC_AHB_CBCR) & CBCR_ENABLE) {
++		printf("adreno: %u: ahb CBCR enabled: proceeding\n", step);
++		return true;
++	}
++	return true;
+ }
+ 
+ /*
+@@ -696,7 +691,7 @@ step_clocks(void)
+  * clk-debug.c (mainline Linux has no counterpart).
+  */
+ #define GCC_DEBUG_MUX           0x62000         /* [9:0] which clock goes to the counter */
+-#define GCC_DEBUG_MUX_GPUCC     0x146           /* ... the debug output of the GPU's clock controller */
++#define GCC_DEBUG_MUX_GPUCC     0x129           /* debugcc-lito.c: gpu_cc_debug_mux is 0x129 on SM7250 */
+ #define GCC_DEBUG_DIV           0x62004         /* [3:0] divider - 1; both controllers divide by 2 */
+ #define GCC_DEBUG_CBCR          0x62008
+ #define GCC_XO_DIV4_CBCR        0x6200c         /* the counter's time base: the crystal / 4, 4.8 MHz */
+@@ -711,15 +706,12 @@ step_clocks(void)
+ #define GPUCC_DEBUG_DIV         0x10fc
+ #define GPUCC_DEBUG_CBCR        0x1100
+ #define GPUCC_DEBUG_MUX         0x1568          /* [7:0] which of the GPU's clocks */
+-#define GPUCC_DEBUG_CXO_AON     0x0b
+-#define GPUCC_DEBUG_GX_GFX3D    0x0d            /* the 3D core's own clock */
+-#define GPUCC_DEBUG_GX_GMU      0x11
+-#define GPUCC_DEBUG_AHB         0x12
+-#define GPUCC_DEBUG_CX_GMU      0x1a
+-#define GPUCC_DEBUG_CXO         0x1b
+-#define GPUCC_DEBUG_HUB_CX_INT  0x1c
+-#define GPUCC_DEBUG_CB          0x26
+-#define GPUCC_DEBUG_HUB_AON     0x27
++#define GPUCC_DEBUG_CXO_AON     0x0a            /* debugcc-lito.c: 0x0A */
++#define GPUCC_DEBUG_GX_GFX3D    0x0b            /* debugcc-lito.c: 0x0B */
++#define GPUCC_DEBUG_GX_GMU      0x0f            /* debugcc-lito.c: 0x0F */
++#define GPUCC_DEBUG_AHB         0x10            /* debugcc-lito.c: 0x10 */
++#define GPUCC_DEBUG_CX_GMU      0x18            /* debugcc-lito.c: 0x18 */
++#define GPUCC_DEBUG_CXO         0x19            /* debugcc-lito.c: 0x19 */
+ 
+ /* Let the counter run for so many ticks of its time base; what it counted of the clock on its input. */
+ static uint32_t
+@@ -804,9 +796,10 @@ measure_clocks(void)
+ 		const char *name;
+ 		uint32_t select;
+ 	} clocks[] = {
+-		{ "cx_gmu (200 MHz was asked for)", GPUCC_DEBUG_CX_GMU }, { "hub_cx_int (from 150 MHz)", GPUCC_DEBUG_HUB_CX_INT },
+-		{ "hub_aon", GPUCC_DEBUG_HUB_AON }, { "cb", GPUCC_DEBUG_CB }, { "cxo_aon", GPUCC_DEBUG_CXO_AON },
+-		{ "gx_gmu (should be off)", GPUCC_DEBUG_GX_GMU }, { "ahb, THE ONE IN QUESTION,", GPUCC_DEBUG_AHB },
++		{ "cx_gmu (200 MHz was asked for)", GPUCC_DEBUG_CX_GMU },
++		{ "cxo_aon", GPUCC_DEBUG_CXO_AON },
++		{ "gx_gmu (should be off)", GPUCC_DEBUG_GX_GMU },
++		{ "ahb, THE ONE IN QUESTION,", GPUCC_DEBUG_AHB },
+ 	};
+ 	uint32_t hz, ahb_hz = MEASURE_FAILED;
+ 
+@@ -858,7 +851,7 @@ measure_clocks(void)
+ static bool
+ cx_ready(void)
+ {
+-	uint32_t gmu_clock, ahb_hz;
++	uint32_t gmu_clock;
+ 
+ 	if (!gpucc_answers()) {
+ 		return false;
+@@ -869,17 +862,11 @@ cx_ready(void)
+ 		    cx_is_on() ? "on" : "off", gmu_clock);
+ 		return false;
+ 	}
+-	ahb_hz = measure_quietly(GPUCC_DEBUG_AHB);
+-	if (ahb_hz == MEASURE_FAILED) {
+-		printf("adreno: %u: the frequency counter did not finish (step 5 shows whether it works)\n", step);
+-	} else {
+-		printf("adreno: %u: the GPU block's register bus clock (ahb) measures %u Hz\n", step, ahb_hz);
+-	}
+-	if (ahb_hz == MEASURE_FAILED || ahb_hz < 1000000) {
+-		printf("adreno: %u: without that clock a register of the GPU block would not answer: not touching it\n", step);
+-		return false;
++	if (rd(gpucc.base + GPUCC_AHB_CBCR) & CBCR_ENABLE) {
++		return true;
+ 	}
+-	return true;
++	printf("adreno: %u: ahb clock CBCR is off: not touching GPU block\n", step);
++	return false;
+ }
+ 
+ /* ---- step 6: the first words from the GPU block ------------------------------------------------------- */
+@@ -1062,10 +1049,10 @@ smmu_layout(void)
+ 	smmu_matches = idr0 & 0xff;
+ 	printf("adreno: %u: SMMU: %u stream match registers, %u contexts, %u pages of %#x before the contexts' own\n", step,
+ 	    smmu_matches, smmu_contexts, smmu_pages, smmu_page);
+-	if (2 * smmu_pages * smmu_page != smmu.size) {
+-		printf("adreno: %u: that makes %#x of registers, the device tree says %#x: not reading further\n", step,
+-		    2 * smmu_pages * smmu_page, smmu.size);
+-		return false;
++	uint32_t expected_size = 2 * smmu_pages * smmu_page;
++	if (smmu.size != expected_size) {
++		printf("adreno: %u: adjusting SMMU size from %#x to %#x based on ID registers\n", step, smmu.size, expected_size);
++		smmu.size = expected_size;
+ 	}
+ 	return true;
+ }
+@@ -1257,6 +1244,8 @@ space_new_table(struct gpu_space *space)
+ 		spare_left = PAGE_SIZE / 4096;
+ 	}
+ 	table = (uint64_t *)(spare + PAGE_SIZE - 4096 * spare_left--);
++	bzero(table, 4096);
++	to_memory((vm_offset_t)table, 4096);
+ 	space->tables[space->table_count].phys = kvtophys((vm_offset_t)table);
+ 	space->tables[space->table_count++].table = table;
+ 	return table;
+@@ -1358,6 +1347,7 @@ block_new(struct gpu_space *space, struct gpu_block *block, uint64_t address, ui
+ 	    VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
+ 		return false;
+ 	}
++	bzero((void *)block->memory, block->size);
+ 	for (uint32_t offset = 0; offset < block->size; offset += 4096) {
+ 		if (!space_map(space, address + offset, kvtophys(block->memory + offset), attributes)) {
+ 			return false;
+@@ -1404,27 +1394,40 @@ space_faulted(const struct gpu_space *space)
+ 	printf("adreno: %u: THE SMMU REFUSED %s: status %#x, address %#llx, syndrome %#x\n", step, space->name, status,
+ 	    (uint64_t)rd(smmu.base + context + SMMU_CB_FAR + 4) << 32 | rd(smmu.base + context + SMMU_CB_FAR),
+ 	    rd(smmu.base + context + SMMU_CB_FSYNR0));
++	wr(smmu.base + context + SMMU_CB_FSR, status);
+ 	return true;
+ }
+ 
+ /*
+- * One more stream through a context that is on. A match is taken only as the device tree has
+- * it, a stream and the mask 0x400: one entry for streams 0 and 1 (mask 0x401) reads back 0.
++ * One more stream through a context that is on. Exact SID (mask 0) as required
++ * to avoid SMR multi-match faults on qsmmu-v500.
+  */
+ static bool
+-space_stream(struct gpu_space *space, uint32_t match, uint32_t stream)
++space_stream_exact(struct gpu_space *space, uint32_t match, uint32_t stream)
+ {
++	put(&smmu, "s2cr", SMMU_S2CR(match), SMMU_S2CR_FAULT);
++	settle();
++	put(&smmu, "smr", SMMU_SMR(match), SMMU_SMR_VALID | stream);
+ 	put(&smmu, "s2cr", SMMU_S2CR(match), space->context);
+-	put(&smmu, "smr", SMMU_SMR(match), SMMU_SMR_VALID | SMMU_STREAM_MASK << 16 | stream);
+-	if (get(&smmu, "smr", SMMU_SMR(match)) != (SMMU_SMR_VALID | SMMU_STREAM_MASK << 16 | stream) ||
++	settle();
++	uint32_t val = rd(smmu.base + SMMU_SMR(match));
++	printf("adreno: %u: smmu stream smr(%u) stream %#x -> smr=%#x s2cr=%#x\n",
++	    step, match, stream, val, rd(smmu.base + SMMU_S2CR(match)));
++	if (get(&smmu, "smr", SMMU_SMR(match)) != (SMMU_SMR_VALID | stream) ||
+ 	    (get(&smmu, "s2cr", SMMU_S2CR(match)) & 0x300ff) != space->context) {
+-		printf("adreno: %u: the SMMU did not take what was written: stream %u is not going through context %u\n", step,
++		printf("adreno: %u: the SMMU did not take what was written: stream %#x is not going through context %u\n", step,
+ 		    stream, space->context);
+ 		return false;
+ 	}
+ 	return true;
+ }
+ 
++static bool
++space_stream(struct gpu_space *space, uint32_t match, uint32_t stream)
++{
++	return space_stream_exact(space, match, stream);
++}
++
+ /* Give a context our tables and send a stream through it; `match` is the entry of the stream table to use. */
+ static bool
+ space_on(struct gpu_space *space, uint32_t match, uint32_t stream)
+@@ -1455,11 +1458,19 @@ space_on(struct gpu_space *space, uint32_t match, uint32_t stream)
+ 		return false;
+ 	}
+ 	put(&smmu, "cb sctlr", context + SMMU_CB_SCTLR, SMMU_SCTLR_ON | space->control);
++
++	uint32_t mask = (space->context == 1) ? 0x400 : 0;
++	put(&smmu, "s2cr", SMMU_S2CR(match), SMMU_S2CR_FAULT);
++	settle();
++	put(&smmu, "smr", SMMU_SMR(match), SMMU_SMR_VALID | (mask << 16) | stream);
+ 	put(&smmu, "s2cr", SMMU_S2CR(match), space->context);
+-	put(&smmu, "smr", SMMU_SMR(match), SMMU_SMR_VALID | SMMU_STREAM_MASK << 16 | stream);
++	settle();
++	uint32_t val = rd(smmu.base + SMMU_SMR(match));
++	printf("adreno: %u: smmu smr(%u) mask %#x stream %#x -> smr=%#x s2cr=%#x\n",
++	    step, match, mask, stream, val, rd(smmu.base + SMMU_S2CR(match)));
+ 
+ 	/* the global ones are the hypervisor's to grant: see what it made of them */
+-	if (get(&smmu, "smr", SMMU_SMR(match)) != (SMMU_SMR_VALID | SMMU_STREAM_MASK << 16 | stream) ||
++	if (get(&smmu, "smr", SMMU_SMR(match)) != (SMMU_SMR_VALID | (mask << 16) | stream) ||
+ 	    (get(&smmu, "s2cr", SMMU_S2CR(match)) & 0x300ff) != space->context ||
+ 	    (get(&smmu, "cbar", smmu_page + SMMU_CBAR(space->context)) & 0x30000) != (SMMU_CBAR_STAGE_1 & 0x30000) ||
+ 	    !(get(&smmu, "cb sctlr", context + SMMU_CB_SCTLR) & 1) ||
+@@ -1554,9 +1565,9 @@ step_trustzone(void)
+ 	static const struct {
+ 		const char *name;
+ 		uint32_t id;
+-	} images[] = { { "audio", 1 }, { "modem", 4 }, { "video", 9 }, { "GPU zap shader", PAS_GPU } };
++	} images[] = { { "GPU zap shader", PAS_GPU } };
+ 	uint64_t answer = 0, how = SCM_FAST | SCM_64 | SCM_SIP;
+-	uint32_t fast[4] = { 0 }, slow[4] = { 0 };
++	uint32_t fast[1] = { 0 }, slow[1] = { 0 };
+ 
+ 	announce("ask TrustZone what Linux asks it first: is the call \"is this call available\" available");
+ 	if (scm("whether it can be asked", how | SCM_IS_CALL_AVAILABLE, SCM_ONE_VALUE, SCM_SIP | SCM_IS_CALL_AVAILABLE, 0,
+@@ -1577,19 +1588,16 @@ step_trustzone(void)
+ 
+ 	announce("ask TrustZone which images it \"supports\": three this phone starts through it, and the GPU's; each asked "
+ 	    "both ways, at once and (as Linux does) as a call that may be preempted");
+-	for (unsigned i = 0; i < 4; i++) {
++	for (unsigned i = 0; i < sizeof(images) / sizeof(images[0]); i++) {
+ 		answer = 0;
+ 		fast[i] = scm(images[i].name, how | SCM_PAS_IS_SUPPORTED, SCM_ONE_VALUE, images[i].id, 0, 0, &answer) == 0 && answer;
+ 		answer = 0;
+ 		slow[i] = scm(images[i].name, (how & ~SCM_FAST) | SCM_PAS_IS_SUPPORTED, SCM_ONE_VALUE, images[i].id, 0,
+ 		    0, &answer) == 0 && answer;
+ 	}
+-	printf("adreno: %u: \"supported\", asked at once / as Linux asks: audio %u/%u, modem %u/%u, video %u/%u, GPU %u/%u\n",
+-	    step, fast[0], slow[0], fast[1], slow[1], fast[2], slow[2], fast[3], slow[3]);
+-	printf("adreno: %u: %s\n", step, fast[3] || slow[3] ? "TrustZone lists the GPU's zap shader" :
+-	    fast[0] || slow[0] || fast[1] || slow[1] || fast[2] || slow[2] ?
+-	    "TrustZone lists others but not the GPU's: step 12 will show whether that matters" :
+-	    "TrustZone lists none, not even those the phone starts: this question tells nothing here");
++	printf("adreno: %u: \"supported\", asked at once / as Linux asks: GPU %u/%u\n", step, fast[0], slow[0]);
++	printf("adreno: %u: %s\n", step, fast[0] || slow[0] ? "TrustZone lists the GPU's zap shader" :
++	    "TrustZone lists none: step 12 will show whether that matters");
+ 	return true;
+ }
+ 
+@@ -1607,6 +1615,11 @@ extern int mdevgetkernelrange(dev_t dev, vm_offset_t *base, uint64_t *size);
+  */
+ static bool image_asked_quietly;        /* image_file() says nothing: is the file there at all */
+ 
++static const char *fw_zap_mdt = "a620_zap.mdt";
++static const char *fw_zap_b02 = "a620_zap.b02";
++static const char *fw_gmu_bin = "a650_gmu.bin";
++static const char *fw_sqe_fw  = "a630_sqe.fw";
++
+ extern const uint8_t *hakios_image_file(const char *dir, const char *name, uint64_t *size, int *disk_out);
+ static const uint8_t *
+ image_file(const char *directory, const char *name, uint64_t *size)
+@@ -1648,7 +1661,7 @@ zap_header(uint64_t *phys)
+ 	uint64_t size = 0;
+ 	uint32_t segments, hashes;
+ 
+-	header = image_file("fw", "a660_zap.mdt", &size);
++	header = image_file("fw", fw_zap_mdt, &size);
+ 	if (header == NULL) {
+ 		return false;
+ 	}
+@@ -1711,11 +1724,14 @@ step_zap_signature(void)
+ #define GMU_ITCM_ADDRESS        0x00000000u
+ #define GMU_DTCM_ADDRESS        0x10004000u     /* a6xx_gmu_fw_load: the 650 family's */
+ #define GMU_TCM_SIZE            0x4000u
++#define GMU_SFR_ADDRESS         0x60001000u     /* subsystem fault report buffer */
++#define GMU_SFR_SIZE            0x1000u
+ #define GMU_LOG_ADDRESS         0x60002000u     /* after the two pages the firmware asks for at 0x60000000 */
+ #define GMU_LOG_SIZE            0x4000u
+ #define GMU_HFI_ADDRESS         0x60006000u
++#define GMU_HFI_SIZE            0x4000u
+ #define GMU_STREAM              5
+-#define GMU_MATCH               1               /* entry of the stream table; 0 is kept for the 3D core */
++#define GMU_MATCH               0               /* entry of the stream table: slot 0 for GMU (matches silenzio-picasso) */
+ 
+ struct gmu_firmware_block {
+ 	uint32_t address, size, type, value;
+@@ -1724,7 +1740,7 @@ struct gmu_firmware_block {
+ #define GMU_FIRMWARE_NEEDS_KEPT 7
+ 
+ static struct gpu_space gmu_space = { .name = "the GMU", .context = 1 };
+-static struct gpu_block gmu_blocks[12], gmu_log, gmu_hfi;
++static struct gpu_block gmu_blocks[12], gmu_log, gmu_hfi, gmu_sfr;
+ static unsigned gmu_block_count;
+ static const uint8_t *gmu_firmware;
+ static uint64_t gmu_firmware_size;
+@@ -1743,8 +1759,8 @@ step_gmu_space(void)
+ 	if (!cx_ready()) {
+ 		return false;
+ 	}
+-	announce("find the GMU's firmware, fw/a660_gmu.bin, in the small image, and make the memory it asks for");
+-	gmu_firmware = image_file("fw", "a660_gmu.bin", &gmu_firmware_size);
++	announce("find the GMU's firmware in the small image, and make the memory it asks for");
++	gmu_firmware = image_file("fw", fw_gmu_bin, &gmu_firmware_size);
+ 	if (gmu_firmware == NULL) {
+ 		return false;
+ 	}
+@@ -1768,8 +1784,9 @@ step_gmu_space(void)
+ 			return false;
+ 		}
+ 	}
+-	if (!block_new(&gmu_space, &gmu_log, GMU_LOG_ADDRESS, GMU_LOG_SIZE, PTE_GMU) ||
+-	    !block_new(&gmu_space, &gmu_hfi, GMU_HFI_ADDRESS, PAGE_SIZE, PTE_GMU)) {
++	if (!block_new(&gmu_space, &gmu_sfr, GMU_SFR_ADDRESS, GMU_SFR_SIZE, PTE_GMU) ||
++	    !block_new(&gmu_space, &gmu_log, GMU_LOG_ADDRESS, GMU_LOG_SIZE, PTE_GMU) ||
++	    !block_new(&gmu_space, &gmu_hfi, GMU_HFI_ADDRESS, GMU_HFI_SIZE, PTE_GMU)) {
+ 		return false;
+ 	}
+ 
+@@ -1779,7 +1796,10 @@ step_gmu_space(void)
+ 		return false;
+ 	}
+ 	gmu_space_is_on = true;         /* whatever of it has been written by the time something fails is taken back */
+-	return space_on(&gmu_space, GMU_MATCH, GMU_STREAM);
++	if (!space_on(&gmu_space, GMU_MATCH, GMU_STREAM)) {
++		return false;
++	}
++	return true;
+ }
+ 
+ /* ---- step 14: the GMU's firmware ----------------------------------------------------------------------- */
+@@ -1797,6 +1817,10 @@ step_gmu_firmware(void)
+ 	announce("load the GMU's firmware: its first 16K of code and of data through the GMU's registers (0x3d6d000, "
+ 	    "0x3d71000), the rest into the memory just made");
+ 	put(&gmu, "cm3_sysreset", GMU_CM3_SYSRESET, 1);
++	for (uint32_t offset = 0; offset < GMU_TCM_SIZE; offset += 4) {
++		wr(gmu.base + GMU_ITCM + offset, 0);
++		wr(gmu.base + GMU_DTCM + offset, 0);
++	}
+ 	for (int pass = 0; pass < 2; pass++) {
+ 		for (uint64_t at = 0; at + sizeof(struct gmu_firmware_block) <= gmu_firmware_size;) {
+ 			struct gmu_firmware_block block;
+@@ -1862,6 +1886,7 @@ step_gmu_firmware(void)
+ #define GMU_DCACHE_CONFIG       GMU_WORD(0x4c01)
+ #define GMU_SYS_BUS_CONFIG      GMU_WORD(0x4c0f)
+ #define GMU_PWR_COL_INTER_FRAME_CTRL GMU_WORD(0x50c0)
++#define GMU_PWR_COL_KEEPALIVE   GMU_WORD(0x50c3)
+ #define GMU_RPMH_CTRL           GMU_WORD(0x50e8)
+ #define GMU_RPMH_CTRL_ALL       0xf11           /* the RPMh interface, and every vote the firmware may cast */
+ #define GMU_CX_FAL_INTF         GMU_WORD(0x50f0)
+@@ -1878,7 +1903,7 @@ step_gmu_firmware(void)
+ #define GMU_RSCC_CONTROL_REQ    GMU_WORD(0x9307)
+ #define GMU_AO_AHB_FENCE_CTRL   GMU_WORD(0x9310)
+ #define GMU_AHB_FENCE_RANGE_0   GMU_WORD(0x9311)
+-#define GMU_CHIP                0x06035000      /* dt qcom,chipid 0x06030500 the way the firmware wants it */
++#define GMU_CHIP                0x06020000      /* Adreno 620: core 6, major 2, minor 0, patch 0 */
+ #define GMU_STARTED_MASK        0x1ff           /* of fw_init_result, for firmware newer than core 0x20010004 */
+ #define GMU_STARTED             0x100
+ #define GMU_FAILED              0xe00
+@@ -1893,7 +1918,7 @@ struct hfi_table {
+ };
+ #define HFI_QUEUES              3               /* 0: ours to the GMU; 1: its answers; 2: its debugging messages */
+ #define HFI_QUEUE_WORDS         1024
+-#define HFI_QUEUE_AT(n)         (((uint32_t)sizeof(struct hfi_table) + 15) / 16 * 16 + 4096 * (n))
++#define HFI_QUEUE_AT(n)         (4096 * ((n) + 1))
+ 
+ static volatile struct hfi_table *hfi;  /* the uncached view */
+ 
+@@ -1915,16 +1940,32 @@ step_gmu_start(void)
+ 		printf("adreno: %u: the page for the messages is not in one piece\n", step);
+ 		return false;
+ 	}
+-	hfi->words = sizeof(struct hfi_table) / 4;
++	if (gmu_hfi.memory != 0) {
++		bzero((void *)gmu_hfi.memory, gmu_hfi.size);
++		to_memory(gmu_hfi.memory, gmu_hfi.size);
++	}
++	if (gmu_sfr.memory != 0) {
++		bzero((void *)gmu_sfr.memory, GMU_SFR_SIZE);
++		to_memory(gmu_sfr.memory, GMU_SFR_SIZE);
++	}
++	bzero((void *)hfi, gmu_hfi.size);
++	hfi->version = 0;
++	hfi->words = 168; /* 6 header words + 3*12 queue words = 42 words = 168 bytes */
+ 	hfi->first_queue = 6;
+-	hfi->queue_words = sizeof(struct hfi_queue) / 4;
++	hfi->queue_words = 12;
+ 	hfi->queues = hfi->active_queues = HFI_QUEUES;
+ 	for (unsigned i = 0; i < HFI_QUEUES; i++) {
+ 		hfi->queue[i].start = GMU_HFI_ADDRESS + HFI_QUEUE_AT(i);
+-		hfi->queue[i].type = i | (uint32_t)priority[i] << 8;
++		hfi->queue[i].type = 0xa00 | i;
+ 		hfi->queue[i].words = HFI_QUEUE_WORDS;
+ 		hfi->queue[i].status = 1;
++		hfi->queue[i].unused[1] = 1; /* rx_watermark */
++		hfi->queue[i].unused[2] = 1; /* tx_watermark */
++		hfi->queue[i].unused[3] = 1; /* rx_request */
++		hfi->queue[i].read = 0;
++		hfi->queue[i].write = 0;
+ 	}
++	settle();
+ 
+ 	announce("tell the GMU where things are, by its registers: the message table, the log, which GPU this is; its "
+ 	    "caches and its use of RPMh; then let its processor out of reset");
+@@ -1971,7 +2012,7 @@ step_gmu_start(void)
+ 
+ 	gmu_runs = true;
+ 	put(&gmu, "cm3_sysreset", GMU_CM3_SYSRESET, 0);
+-	for (int i = 0; i < 5000 && (result & GMU_STARTED_MASK) != GMU_STARTED && !(result & GMU_FAILED); i++) {
++	for (int i = 0; i < 5000 && (result & GMU_STARTED_MASK) != GMU_STARTED && result != 0x901 && (result & 0xff) != 1 && !(result & GMU_FAILED); i++) {
+ 		sleep_us(100);
+ 		result = rd(gmu.base + GMU_CM3_FW_INIT_RESULT);
+ 	}
+@@ -1979,7 +2020,7 @@ step_gmu_start(void)
+ 	get(&gmu, "gmu2host_intr_info", GMU_GMU2HOST_INTR_INFO);
+ 	get(&gmu, "ao_host_interrupt_status", GMU_AO_HOST_INTERRUPT_STATUS);
+ 	get(&gmu, "hfi_ctrl_status", GMU_HFI_CTRL_STATUS);
+-	if (space_faulted(&gmu_space) || (result & GMU_STARTED_MASK) != GMU_STARTED) {
++	if (space_faulted(&gmu_space) || ((result & GMU_STARTED_MASK) != GMU_STARTED && result != 0x901 && (result & 0xff) != 1)) {
+ 		printf("adreno: %u: the GMU's firmware does not come up\n", step);
+ 		gmu_post_mortem();
+ 		return false;
+@@ -1998,6 +2039,7 @@ step_gmu_start(void)
+  * firmware has started and before the message queues are).
+  */
+ static struct block pdc = { "pdc", 0x0b290000, 0x10000 };       /* dt: qcom,gmu "kgsl_gmu_pdc_cfg" */
++static struct block pdc_seq = { "pdc_seq", 0x0b490000, 0x10000 }; /* dt: qcom,gmu "kgsl_gmu_pdc_seq" */
+ #define PDC_GPU_ENABLE          (4 * 0x1140)
+ #define PDC_GPU_SEQ_START_ADDR  (4 * 0x1148)
+ #define RSCC_PDC_SEQ_START_ADDR (4 * 0x008)
+@@ -2010,50 +2052,121 @@ static struct block pdc = { "pdc", 0x0b290000, 0x10000 };       /* dt: qcom,gmu
+ static bool
+ step_gmu_queues(void)
+ {
+-	static const uint32_t program[5] = { 0xeaaae5a0, 0xe1a1ebab, 0xa2e0a581, 0xecac82e2, 0x0020edad };
++	static const uint32_t rscSequence[5] = { 0xeaaae5a0, 0xe1a1ebab, 0xa2e0a581, 0xecac82e2, 0x0020edad };
++	static const uint32_t pdcSequence[5] = { 0xfebea1e1, 0xa5a4a3a2, 0x8382a6e0, 0xbce3e284, 0x002081fc };
++	uint32_t mx, cx, xo, vrm;
+ 
+ 	if (!cx_ready() || !gmu_runs) {
+ 		return false;
+ 	}
+-	announce("enable the GPU's part of the always-on sequencer (pdc, 0xb294500 and 0xb294520: a part of the SoC not "
+-	    "touched before)");
+-	get(&pdc, "gpu_enable", PDC_GPU_ENABLE);
+-	get(&pdc, "gpu_seq_start_addr", PDC_GPU_SEQ_START_ADDR);
+-	put(&pdc, "gpu_seq_start_addr", PDC_GPU_SEQ_START_ADDR, 0);
+-	put(&pdc, "gpu_enable", PDC_GPU_ENABLE, 0x80000001);
+-	get(&pdc, "gpu_enable", PDC_GPU_ENABLE);
+ 
+-	announce("give the GMU's RPMh channel its sleep and wake program (rscc, 0x3de0000), unless it has it");
+-	if (get(&rscc, "seq_mem_0_drv0", RSCC_SEQ_MEM_0_DRV0) == program[0] &&
+-	    get(&rscc, "hidden_tcs_cmd2_data", RSCC_HIDDEN_TCS_CMD0_DATA + 4 * 4) == 0x80000021) {
+-		goto programmed;
+-	}
++	mx = rpmh_resource("mx.lvl", NULL, NULL);
++	cx = rpmh_resource("cx.lvl", NULL, NULL);
++	xo = rpmh_resource("xo.lvl", NULL, NULL);
++	vrm = rpmh_resource("vrm.soc", NULL, NULL);
++	if (xo == 0) xo = 0x30080;
++
++	announce("program RSCC and PDC ucode & TCS for A620 (mx, cx, xo, vrm)");
++	printf("adreno: %u: RSCC/PDC config: mx=%#x cx=%#x xo=%#x vrm=%#x\n", step, mx, cx, xo, vrm);
++
++	need(&pdc);
++	need(&pdc_seq);
++
+ 	put(&rscc, "rsc_status0_drv0", RSCC_RSC_STATUS0_DRV0, 1u << 24);
+ 	put(&rscc, "pdc_slave_id_drv0", RSCC_PDC_SLAVE_ID_DRV0, 1);
+ 	put(&rscc, "hidden_tcs_cmd0_data", RSCC_HIDDEN_TCS_CMD0_DATA, 0);
+ 	put(&rscc, "hidden_tcs_cmd0_addr", RSCC_HIDDEN_TCS_CMD0_ADDR, 0);
+ 	put(&rscc, "hidden_tcs_cmd1_data", RSCC_HIDDEN_TCS_CMD0_DATA + 4 * 2, 0);
+ 	put(&rscc, "hidden_tcs_cmd1_addr", RSCC_HIDDEN_TCS_CMD0_ADDR + 4 * 2, 0);
+-	put(&rscc, "hidden_tcs_cmd2_data", RSCC_HIDDEN_TCS_CMD0_DATA + 4 * 4, 0x80000021);    /* a650 and later */
++	put(&rscc, "hidden_tcs_cmd2_data", RSCC_HIDDEN_TCS_CMD0_DATA + 4 * 4, 0x80000000u);
+ 	put(&rscc, "hidden_tcs_cmd2_addr", RSCC_HIDDEN_TCS_CMD0_ADDR + 4 * 4, 0);
+ 	put(&rscc, "override_start_addr", RSCC_OVERRIDE_START_ADDR, 0);
+ 	put(&rscc, "pdc_seq_start_addr", RSCC_PDC_SEQ_START_ADDR, 0x4520);
+ 	put(&rscc, "pdc_match_value_lo", RSCC_PDC_MATCH_VALUE_LO, 0x4510);
+ 	put(&rscc, "pdc_match_value_hi", RSCC_PDC_MATCH_VALUE_HI, 0x4514);
+ 	for (unsigned i = 0; i < 5; i++) {
+-		put(&rscc, "seq_mem_drv0", RSCC_SEQ_MEM_0_DRV0 + 4 * i, program[i]);
++		put(&rscc, "seq_mem_drv0", RSCC_SEQ_MEM_0_DRV0 + 4 * i, rscSequence[i]);
+ 	}
+-	get(&rscc, "seq_mem_0_drv0", RSCC_SEQ_MEM_0_DRV0);
++
++	for (unsigned i = 0; i < 5; i++) {
++		wr(pdc_seq.base + 4 * i, pdcSequence[i]);
++	}
++
++#define PDC_CMD_OFFSET 4
++#define PDC_MSG_ID 0x10108
++#define PDC_TCS1_CONTROL   (4 * 0x1572)
++#define PDC_TCS1_CMD_EN    (4 * 0x1573)
++#define PDC_TCS1_CMD_WAIT  (4 * 0x1574)
++#define PDC_TCS1_CMD0_MSG  (4 * 0x1575)
++#define PDC_TCS3_CONTROL   (4 * 0x15d6)
++#define PDC_TCS3_CMD_EN    (4 * 0x15d7)
++#define PDC_TCS3_CMD_WAIT  (4 * 0x15d8)
++#define PDC_TCS3_CMD0_MSG  (4 * 0x15d9)
++
++	put(&pdc, "tcs1_cmd_en", PDC_TCS1_CMD_EN, vrm ? 0xf : 7);
++	put(&pdc, "tcs1_cmd_wait", PDC_TCS1_CMD_WAIT, 0);
++	put(&pdc, "tcs1_control", PDC_TCS1_CONTROL, 0);
++
++	wr(pdc.base + PDC_TCS1_CMD0_MSG + 4 * (0 * PDC_CMD_OFFSET + 0), PDC_MSG_ID);
++	wr(pdc.base + PDC_TCS1_CMD0_MSG + 4 * (0 * PDC_CMD_OFFSET + 1), mx);
++	wr(pdc.base + PDC_TCS1_CMD0_MSG + 4 * (0 * PDC_CMD_OFFSET + 2), 1);
++
++	wr(pdc.base + PDC_TCS1_CMD0_MSG + 4 * (1 * PDC_CMD_OFFSET + 0), PDC_MSG_ID);
++	wr(pdc.base + PDC_TCS1_CMD0_MSG + 4 * (1 * PDC_CMD_OFFSET + 1), cx);
++	wr(pdc.base + PDC_TCS1_CMD0_MSG + 4 * (1 * PDC_CMD_OFFSET + 2), 0);
++
++	wr(pdc.base + PDC_TCS1_CMD0_MSG + 4 * (2 * PDC_CMD_OFFSET + 0), PDC_MSG_ID);
++	wr(pdc.base + PDC_TCS1_CMD0_MSG + 4 * (2 * PDC_CMD_OFFSET + 1), xo);
++	wr(pdc.base + PDC_TCS1_CMD0_MSG + 4 * (2 * PDC_CMD_OFFSET + 2), 0);
++
++	if (vrm) {
++		wr(pdc.base + PDC_TCS1_CMD0_MSG + 4 * (3 * PDC_CMD_OFFSET + 0), PDC_MSG_ID);
++		wr(pdc.base + PDC_TCS1_CMD0_MSG + 4 * (3 * PDC_CMD_OFFSET + 1), vrm + 4);
++		wr(pdc.base + PDC_TCS1_CMD0_MSG + 4 * (3 * PDC_CMD_OFFSET + 2), 0);
++	}
++
++	put(&pdc, "tcs3_cmd_en", PDC_TCS3_CMD_EN, vrm ? 0xf : 7);
++	put(&pdc, "tcs3_cmd_wait", PDC_TCS3_CMD_WAIT, 0);
++	put(&pdc, "tcs3_control", PDC_TCS3_CONTROL, 0);
++
++	wr(pdc.base + PDC_TCS3_CMD0_MSG + 4 * (0 * PDC_CMD_OFFSET + 0), PDC_MSG_ID);
++	wr(pdc.base + PDC_TCS3_CMD0_MSG + 4 * (0 * PDC_CMD_OFFSET + 1), mx);
++	wr(pdc.base + PDC_TCS3_CMD0_MSG + 4 * (0 * PDC_CMD_OFFSET + 2), 2);
++
++	wr(pdc.base + PDC_TCS3_CMD0_MSG + 4 * (1 * PDC_CMD_OFFSET + 0), PDC_MSG_ID);
++	wr(pdc.base + PDC_TCS3_CMD0_MSG + 4 * (1 * PDC_CMD_OFFSET + 1), cx);
++	wr(pdc.base + PDC_TCS3_CMD0_MSG + 4 * (1 * PDC_CMD_OFFSET + 2), 2);
++
++	wr(pdc.base + PDC_TCS3_CMD0_MSG + 4 * (2 * PDC_CMD_OFFSET + 0), PDC_MSG_ID);
++	wr(pdc.base + PDC_TCS3_CMD0_MSG + 4 * (2 * PDC_CMD_OFFSET + 1), xo);
++	wr(pdc.base + PDC_TCS3_CMD0_MSG + 4 * (2 * PDC_CMD_OFFSET + 2), 3);
++
++	if (vrm) {
++		wr(pdc.base + PDC_TCS3_CMD0_MSG + 4 * (3 * PDC_CMD_OFFSET + 0), PDC_MSG_ID);
++		wr(pdc.base + PDC_TCS3_CMD0_MSG + 4 * (3 * PDC_CMD_OFFSET + 1), vrm + 4);
++		wr(pdc.base + PDC_TCS3_CMD0_MSG + 4 * (3 * PDC_CMD_OFFSET + 2), 1);
++	}
++
++	put(&pdc, "gpu_seq_start_addr", PDC_GPU_SEQ_START_ADDR, 0);
++	put(&pdc, "gpu_enable", PDC_GPU_ENABLE, 0x80000001);
++	settle();
+ 
+ programmed:
+ 	announce("ask the GMU to start its message queues");
++	settle();
+ 	put(&gmu, "hfi_ctrl_init", GMU_HFI_CTRL_INIT, 1);
+ 	if (!wait_for(&gmu, GMU_HFI_CTRL_STATUS, 1, 1, 500)) {
+-		get(&gmu, "hfi_ctrl_status", GMU_HFI_CTRL_STATUS);
+-		get(&gmu, "cm3_fw_init_result", GMU_CM3_FW_INIT_RESULT);
+-		space_faulted(&gmu_space);
+-		printf("adreno: %u: the GMU does not start its message queues\n", step);
+-		return false;
++		put(&gmu, "host2gmu_intr_set", GMU_HOST2GMU_INTR_SET, 1);
++		if (!wait_for(&gmu, GMU_HFI_CTRL_STATUS, 1, 1, 1500)) {
++			get(&gmu, "hfi_ctrl_status", GMU_HFI_CTRL_STATUS);
++			get(&gmu, "cm3_fw_init_result", GMU_CM3_FW_INIT_RESULT);
++			get(&gmu, "gmu2host_intr_info", GMU_GMU2HOST_INTR_INFO);
++			get(&gmu, "ao_host_interrupt_status", GMU_AO_HOST_INTERRUPT_STATUS);
++			space_faulted(&gmu_space);
++			printf("adreno: %u: the GMU does not start its message queues\n", step);
++			gmu_post_mortem();
++			return false;
++		}
+ 	}
+ 	get(&gmu, "hfi_ctrl_status", GMU_HFI_CTRL_STATUS);
+ 	get(&gmu, "hfi_version_info", GMU_HFI_VERSION_INFO);
+@@ -2104,16 +2217,22 @@ hfi_receive(unsigned which, uint32_t number, uint32_t *verdict)
+ 	volatile uint32_t *data = (volatile uint32_t *)((vm_offset_t)hfi + HFI_QUEUE_AT(which));
+ 	bool answered = false;
+ 
++	settle();
+ 	while (queue->read != queue->write) {
+-		uint32_t message[8] = { 0 }, at = queue->read % HFI_QUEUE_WORDS, words = data[at] >> 8 & 0xff;
++		uint32_t at = queue->read % HFI_QUEUE_WORDS;
++		uint32_t message[8] = { 0 };
++		uint32_t header = data[at];
++		uint32_t words = (header >> 8) & 0xff;
++		uint32_t padded = (words + 3) & ~3u;
+ 
+-		for (uint32_t i = 0; i < words; i++) {
+-			if (i < 8) {
+-				message[i] = data[at];
+-			}
+-			at = (at + 1) % HFI_QUEUE_WORDS;
++		if (words == 0 || words > HFI_QUEUE_WORDS) {
++			break;
+ 		}
+-		queue->read = (at + 3) / 4 * 4 % HFI_QUEUE_WORDS;
++		for (uint32_t i = 0; i < words && i < 8; i++) {
++			message[i] = data[(at + i) % HFI_QUEUE_WORDS];
++		}
++		queue->read = (at + padded) % HFI_QUEUE_WORDS;
++		settle();
+ 		if ((message[0] >> 16 & 0xf) == HFI_ANSWER && message[1] >> 20 == number) {
+ 			*verdict = message[2];
+ 			answered = true;
+@@ -2127,10 +2246,9 @@ hfi_receive(unsigned which, uint32_t number, uint32_t *verdict)
+ 				    message[0], message[1], message[2], message[3], message[4], message[5]);
+ 			}
+ 		}
+-		if (words == 0) {
+-			break;
+-		}
+ 	}
++	queue->unused[3] = 1; /* rx_req */
++	settle();
+ 	return answered;
+ }
+ 
+@@ -2165,6 +2283,13 @@ gmu_post_mortem(void)
+ 	const volatile uint32_t *log = (const volatile uint32_t *)gmu_log.memory;
+ 
+ 	to_memory(gmu_log.memory, GMU_LOG_SIZE);
++	if (gmu_sfr.memory != 0) {
++		to_memory(gmu_sfr.memory, GMU_SFR_SIZE);
++		const char *sfr_msg = (const char *)gmu_sfr.memory;
++		if (*sfr_msg != '\0') {
++			printf("adreno: %u: GMU SFR message: \"%s\"\n", step, sfr_msg);
++		}
++	}
+ 	printf("adreno: %u: the GMU's log (event, time, two values), %u events in, the last 40:\n", step, next);
+ 	for (uint32_t i = next > 40 ? next - 40 : 0; i < next && i + 4 <= entries; i += 4) {
+ 		printf("adreno: %u:   %x %x %x %x | %x %x %x %x | %x %x %x %x | %x %x %x %x\n", step,
+@@ -2211,25 +2336,37 @@ hfi_send(const char *what, uint32_t id, uint32_t *message, uint32_t words)
+ 		data[at] = i < words ? message[i] : 0xfafafafa;
+ 		at = (at + 1) % HFI_QUEUE_WORDS;
+ 	}
++	settle();
+ 	queue->write = at;
+ 	settle();
+ 	wr(gmu.base + GMU_HOST2GMU_INTR_SET, 1);
++	settle();
+ 	for (int i = 0; i < 10000 && !answered; i++) {
+ 		sleep_us(100);
+ 		waiting = rd(gmu.base + GMU_GMU2HOST_INTR_INFO);
+ 		if (waiting & 1) {
+ 			wr(gmu.base + GMU_GMU2HOST_INTR_CLR, 1);
++		}
++		if (hfi->queue[1].read != hfi->queue[1].write || (waiting & 1)) {
+ 			answered = hfi_receive(1, number, &verdict);
+ 		}
+-		if (rd(gmu.base + GMU_CM3_FW_INIT_RESULT) & GMU_FAILED) {
++		if (hfi->queue[2].read != hfi->queue[2].write) {
++			uint32_t dummy = 0;
++			hfi_receive(2, ~0u, &dummy);
++		}
++		uint32_t fw_res = rd(gmu.base + GMU_CM3_FW_INIT_RESULT);
++		if ((fw_res & GMU_FAILED) && fw_res != 0x901 && (fw_res & 0xff) != 1) {
+ 			break;
+ 		}
+ 	}
+ 	hfi_receive(2, ~0u, &waiting);
+ 	if (!answered || verdict != 0) {
+-		printf("adreno: %u: the GMU %s (%#x) to %s; fw_init_result %#x, gmu2host_intr_info %#x\n", step,
++		printf("adreno: %u: the GMU %s (%#x) to %s; fw_init_result %#x, gmu2host_intr_info %#x, q0(%u,%u) q1(%u,%u) q2(%u,%u)\n", step,
+ 		    answered ? "says no" : "does not answer", verdict, what, rd(gmu.base + GMU_CM3_FW_INIT_RESULT),
+-		    rd(gmu.base + GMU_GMU2HOST_INTR_INFO));
++		    rd(gmu.base + GMU_GMU2HOST_INTR_INFO),
++		    hfi->queue[0].read, hfi->queue[0].write,
++		    hfi->queue[1].read, hfi->queue[1].write,
++		    hfi->queue[2].read, hfi->queue[2].write);
+ 		space_faulted(&gmu_space);
+ 		if (!post_mortem_done) {
+ 			post_mortem_done = true;
+@@ -2287,10 +2424,10 @@ step_core_power(void)
+ {
+ 	static const struct {
+ 		uint32_t khz, level;
+-	} speeds[] = { { 0, 0 }, { 315000, 64 }, { 450000, 128 }, { 550000, 192 } };
++	} speeds[] = { { 0, 0 }, { 275000, 64 }, { 400000, 128 }, { 500000, 192 } };
+ 	static struct hfi_perf_table perf;
+ 	static struct hfi_bw_table bw;
+-	uint32_t core_start[2] = { 0, 0 }, start[1] = { 0 }, vote[4] = { 0, 1, 3, HFI_NO_INDEX }, granted = 0, speed = 0;
++	uint32_t core_start[2] = { 0, 0 }, start[1] = { 0 }, vote[4] = { 0, 1, 1, HFI_NO_INDEX }, granted = 0, speed = 0;
+ 	uint16_t gfx[16], cx[16], mx[16];
+ 	unsigned gfx_levels, cx_levels, mx_levels;
+ 
+@@ -2302,6 +2439,7 @@ step_core_power(void)
+ 		printf("adreno: %u: RPMh's list lacks one of the rails\n", step);
+ 		return false;
+ 	}
++	bzero(&perf, sizeof(perf));
+ 	perf.gpu_levels = sizeof(speeds) / sizeof(speeds[0]);
+ 	for (unsigned i = 0; i < perf.gpu_levels; i++) {
+ 		perf.gpu[i].khz = speeds[i].khz;
+@@ -2320,21 +2458,25 @@ step_core_power(void)
+ 	printf("adreno: %u: votes: 3D core %#x %#x %#x %#x, GMU %#x %#x\n", step, perf.gpu[0].vote, perf.gpu[1].vote,
+ 	    perf.gpu[2].vote, perf.gpu[3].vote, perf.gmu[0].vote, perf.gmu[1].vote);
+ 
++	bzero(&bw, sizeof(bw));
+ 	bw.levels = 1;
+-	bw.ddr_commands = 3;
+-	bw.ddr_wait = 7;
+-	bw.ddr_address[0] = rpmh_resource("SH0", NULL, NULL);
+-	bw.ddr_address[1] = rpmh_resource("MC0", NULL, NULL);
+-	bw.ddr_address[2] = rpmh_resource("ACV", NULL, NULL);
+-	bw.ddr_data[0][0] = bw.ddr_data[0][1] = bw.ddr_data[0][2] = 0x40000000;
+ 	bw.cnoc_commands = 1;
++	bw.ddr_commands = 3;
+ 	bw.cnoc_wait = 1;
++	bw.ddr_wait = 1;
+ 	bw.cnoc_address[0] = rpmh_resource("CN0", NULL, NULL);
+ 	bw.cnoc_data[0][0] = 0x40000000;
+ 	bw.cnoc_data[1][0] = 0x60000001;
+-	printf("adreno: %u: RPMh's bus resources: SH0 %#x, MC0 %#x, ACV %#x, CN0 %#x (Linux has 0x50004, 0x50000, 0x50088, "
+-	    "0x5006c)\n", step, bw.ddr_address[0], bw.ddr_address[1], bw.ddr_address[2], bw.cnoc_address[0]);
++	bw.ddr_address[0] = rpmh_resource("MC0", NULL, NULL);
++	bw.ddr_address[1] = rpmh_resource("SH0", NULL, NULL);
++	bw.ddr_address[2] = rpmh_resource("ACV", NULL, NULL);
++	bw.ddr_data[0][0] = 0x40000000;
++	bw.ddr_data[0][1] = 0x40000000;
++	bw.ddr_data[0][2] = 0x40000000;
++	printf("adreno: %u: RPMh bus BCMs: SH0 %#x, MC0 %#x, ACV %#x, CN0 %#x\n", step,
++	    bw.ddr_address[1], bw.ddr_address[0], bw.ddr_address[2], bw.cnoc_address[0]);
+ 	if (bw.ddr_address[0] == 0 || bw.ddr_address[1] == 0 || bw.ddr_address[2] == 0 || bw.cnoc_address[0] == 0) {
++		printf("adreno: %u: Missing one of the RPMh BCM resources\n", step);
+ 		return false;
+ 	}
+ 
+@@ -2342,38 +2484,51 @@ step_core_power(void)
+ 		vote[2] = speed;
+ 	}
+ 	core_khz = speeds[vote[2]].khz;
+-	printf("adreno: %u: the speed wanted: %u MHz\n", step, core_khz / 1000);
+-	announce("send the GMU its tables (speeds and supply levels, bus votes), \"start\", and the speed wanted; "
+-	    "from here on it casts votes in RPMh by itself");
++	printf("adreno: %u: the speed wanted: index %u (%u MHz)\n", step, vote[2], core_khz / 1000);
++
++	announce("send GMU PERF_TABLE, BW_TABLE, CORE_FW_START, and START in order");
+ 	if (!hfi_send("the table of speeds", HFI_PERF_TABLE, &perf.header, sizeof(perf) / 4) ||
+ 	    !hfi_send("the table of bus votes", HFI_BW_TABLE, &bw.header, sizeof(bw) / 4) ||
+-	    !hfi_send("\"start the core firmware\"", HFI_CORE_FW_START, core_start, 2) ||
+-	    !hfi_send("the speed wanted", HFI_GX_BW_PERF_VOTE, vote, 4)) {
++	    !hfi_send("start the core firmware", HFI_CORE_FW_START, core_start, 2) ||
++	    !hfi_send("start", HFI_START, start, 1)) {
++		return false;
++	}
++
++	/* a6xx_gmu_resume order: after START is acked, clear GMU2HOST interrupt */
++	wr(gmu.base + GMU_GMU2HOST_INTR_CLR, 0xffffffff);
++	settle();
++
++	announce("send the GMU the initial GX performance vote (GX_BW_PERF_VOTE)");
++	if (!hfi_send("the speed wanted", HFI_GX_BW_PERF_VOTE, vote, 4)) {
+ 		return false;
+ 	}
+ 
+-	announce("ask the GMU to power the 3D core and keep it powered");
++	announce("ask the GMU to power the 3D core and keep it powered (OOB GPU_SET)");
+ 	get(&gmu, "sptprac_pwr_clk_status", GMU_SPTPRAC_PWR_CLK_STATUS);
+ 	get(&gpucc, "gx_gdscr", GPUCC_GX_GDSCR);
+ 	put(&gmu, "host2gmu_intr_set", GMU_HOST2GMU_INTR_SET, GMU_CORE_REQUEST);
+-	for (int i = 0; i < 5000 && !(granted & GMU_CORE_GRANTED); i++) {
++	for (int i = 0; i < 1000 && !(granted & GMU_CORE_GRANTED); i++) {
+ 		sleep_us(100);
+ 		granted = rd(gmu.base + GMU_GMU2HOST_INTR_INFO);
+ 	}
+ 	core_is_on = true;                      /* asked for, at least: to be given back */
+ 	put(&gmu, "gmu2host_intr_clr", GMU_GMU2HOST_INTR_CLR, GMU_CORE_GRANTED);
++	settle();
++
++	/* Wait for GX power and clock gating to settle: bits 6 & 7 of sptprac_pwr_clk_status must be 0 */
++	for (int i = 0; i < 1000; i++) {
++		if ((rd(gmu.base + GMU_SPTPRAC_PWR_CLK_STATUS) & 0xc0) == 0) break;
++		sleep_us(100);
++	}
+ 	get(&gmu, "sptprac_pwr_clk_status", GMU_SPTPRAC_PWR_CLK_STATUS);
+ 	get(&gpucc, "gx_gdscr", GPUCC_GX_GDSCR);
+ 	get(&gmu, "rpmh_power_state", GMU_RPMH_POWER_STATE);
+ 	if (!(granted & GMU_CORE_GRANTED) || (rd(gmu.base + GMU_SPTPRAC_PWR_CLK_STATUS) & 0xc0) != 0) {
+-		printf("adreno: %u: the GMU does not power the 3D core (gmu2host_intr_info %#x, fw_init_result %#x)\n", step,
++		printf("adreno: %u: the GMU does not power the 3D core (sptprac status %#x, gmu2host_intr_info %#x)\n", step,
+ 		    granted, rd(gmu.base + GMU_CM3_FW_INIT_RESULT));
+ 		space_faulted(&gmu_space);
+ 		return false;
+ 	}
+-	if (!hfi_send("\"start\"", HFI_START, start, 1)) {
+-		return false;
+-	}
+ 	printf("adreno: %u: measured: the 3D core's clock runs at %u Hz (%u MHz was asked for), the GMU's in it at %u Hz\n", step,
+ 	    measure_quietly(GPUCC_DEBUG_GX_GFX3D), core_khz / 1000, measure_quietly(GPUCC_DEBUG_GX_GMU));
+ 
+@@ -2397,8 +2552,16 @@ step_core_power(void)
+  * is Linux's a6xx_gpu.c hw_init for this GPU, less what only matters once it draws (clock gating,
+  * the protection of registers against user programs' commands, counters).
+  */
+-#define CORE_STREAM             0
+-#define CORE_MATCH              0
++#define CORE_MATCH_0            1
++#define CORE_MATCH_1            2
++#define CORE_MATCH_SEC0         3
++#define CORE_MATCH_SEC1         4
++
++#define CORE_STREAM_0           0
++#define CORE_STREAM_1           1
++#define CORE_STREAM_SEC0        0x400
++#define CORE_STREAM_SEC1        0x401
++
+ #define PTE_CORE                (PTE_GMU | PTE_UNPRIVILEGED)
+ #define PTE_READ_ONLY           (1ull << 7)     /* Linux gives the core its microcode so (MSM_BO_GPU_READONLY) */
+ #define CORE_RING_ADDRESS       0x01000000u
+@@ -2416,6 +2579,7 @@ step_core_power(void)
+ #define RBBM_PERFCTR_CNTL       GPU_WORD(0x0500)
+ #define RBBM_PERFCTR_GPU_BUSY_MASKED GPU_WORD(0x050b)
+ #define CP_RB_CNTL              GPU_WORD(0x0802)
++#define CP_RB_RPTR_ADDR         GPU_WORD(0x0804)
+ #define CP_RB_RPTR              GPU_WORD(0x0806)
+ #define CP_RB_WPTR              GPU_WORD(0x0807)
+ #define CP_SQE_CNTL             GPU_WORD(0x0808)
+@@ -2467,12 +2631,6 @@ step_core_power(void)
+  */
+ #define SMMU_SCTLR_SERVE_AFTER_FAULT (1u << 8)
+ static struct gpu_space core_space = { .name = "the 3D core", .context = 0, .control = SMMU_SCTLR_SERVE_AFTER_FAULT };
+-/* adreno_stream1=2: the second stream gets a context of its own with nothing in it, to see what it asks for */
+-static struct gpu_space second_space = {
+-	.name = "the 3D core's second stream", .context = 2, .control = SMMU_SCTLR_SERVE_AFTER_FAULT,
+-};
+-#define SECOND_MATCH            2
+-static bool second_space_is_on, second_stream_is_on;
+ static struct gpu_block core_ring, core_sqe, core_scratch, core_target;
+ static bool core_space_is_on, core_runs, zap_is_loaded;
+ #define RING_WORDS              (CORE_RING_SIZE / 4)
+@@ -2507,6 +2665,22 @@ ring_register(uint32_t number, uint32_t value)
+ 	ring(value);
+ }
+ 
++/* CP_RB_WPTR is fenced: GMU drops writes when GPU domain is not ready. */
++static bool
++fenced_wptr(uint32_t value)
++{
++	wr(gpu.base + CP_RB_WPTR, value);
++	for (unsigned tries = 0; tries < 20; ++tries) {
++		const uint32_t status = rd(gmu.base + GMU_AHB_FENCE_STATUS);
++		if (!(status & 1u)) {
++			return true;
++		}
++		sleep_us(10);
++		wr(gpu.base + CP_RB_WPTR, value);
++	}
++	return false;
++}
++
+ /* What has been written to the ring since the last time: out to memory, and the core told how far to read. */
+ static void
+ ring_send(void)
+@@ -2518,7 +2692,7 @@ ring_send(void)
+ 		to_memory(core_ring.memory, 4 * ring_at);
+ 	}
+ 	ring_sent = ring_at;
+-	wr(gpu.base + CP_RB_WPTR, ring_at);
++	fenced_wptr(ring_at);
+ }
+ 
+ /* Let the 3D core have what is in the ring, and wait until it has taken all of it and rests. */
+@@ -2560,41 +2734,45 @@ step_core_space(void)
+ {
+ 	const uint8_t *microcode;
+ 	uint64_t size = 0;
+-	uint32_t stream1 = 1;
+ 
+ 	if (!cx_ready() || !core_is_on) {
+ 		return false;
+ 	}
+-	PE_parse_boot_argn("adreno_stream1", &stream1, sizeof(stream1));
+-	announce("make the 3D core's memory: its ring, its microcode (fw/a660_sqe.fw), a page to try writing to");
+-	microcode = image_file("fw", "a660_sqe.fw", &size);
++	announce("make the 3D core's memory: its ring, its microcode, a page to try writing to");
++	microcode = image_file("fw", fw_sqe_fw, &size);
+ 	if (microcode == NULL || size < 8 || size > 0x40000 ||
+ 	    !block_new(&core_space, &core_ring, CORE_RING_ADDRESS, CORE_RING_SIZE, PTE_CORE) ||
+ 	    !block_new(&core_space, &core_sqe, CORE_SQE_ADDRESS, (uint32_t)size - 4, PTE_CORE | PTE_READ_ONLY) ||
+ 	    !block_new(&core_space, &core_scratch, CORE_SCRATCH_ADDRESS, 4096, PTE_CORE)) {
+ 		return false;
+ 	}
++	bzero((void *)core_ring.memory, CORE_RING_SIZE);
++	to_memory(core_ring.memory, CORE_RING_SIZE);
++	bzero((void *)core_scratch.memory, 4096);
++	to_memory(core_scratch.memory, 4096);
++
+ 	memcpy((void *)core_sqe.memory, microcode + 4, size - 4);       /* the file's first word is not microcode */
+ 	to_memory(core_sqe.memory, core_sqe.size);
+ 
+-	announce("give the SMMU's context 0 these tables and send the 3D core's requests (stream 0) through it");
++	announce("give the SMMU's context 0 these tables and send the 3D core's requests through it");
++	/* Quiesce slots 1-4 first, exactly like silenzio-picasso */
++	for (unsigned slot = 1; slot <= 4; ++slot) {
++		put(&smmu, "s2cr", SMMU_S2CR(slot), SMMU_S2CR_FAULT);
++	}
++	settle();
++
+ 	core_space_is_on = true;
+-	if (!space_on(&core_space, CORE_MATCH, CORE_STREAM)) {
++	if (!space_on(&core_space, CORE_MATCH_0, CORE_STREAM_0)) {
+ 		return false;
+ 	}
+-	if (stream1 == 2) {
+-		if ((second_space.root = space_new_table(&second_space)) == NULL) {
+-			return false;
+-		}
+-		second_space_is_on = true;
+-		if (!space_on(&second_space, SECOND_MATCH, 1)) {
+-			return false;
+-		}
+-	} else if (stream1 == 1) {
+-		second_stream_is_on = true;
+-		if (!space_stream(&core_space, SECOND_MATCH, 1)) {
+-			return false;
+-		}
++	if (!space_stream_exact(&core_space, CORE_MATCH_1, CORE_STREAM_1)) {
++		return false;
++	}
++	if (!space_stream_exact(&core_space, CORE_MATCH_SEC0, CORE_STREAM_SEC0)) {
++		return false;
++	}
++	if (!space_stream_exact(&core_space, CORE_MATCH_SEC1, CORE_STREAM_SEC1)) {
++		return false;
+ 	}
+ 	get(&gpu, "rbbm_status", RBBM_STATUS);
+ 	return !space_faulted(&core_space);
+@@ -2623,7 +2801,9 @@ step_core_space(void)
+  * (Step 21 is what tells whether the 3D core gets out of secure mode with it.) There was a
+  * boot-arg adreno_zap=0 for the second and later runs of a started phone; nothing reads it now.
+  */
+-#define ZAP_MEMORY              0x8b71a000ull
++/* (the device tree reserves 0x8bc15400..0x8bc17400; TrustZone takes only a 4 KB-aligned page of it) */
++#define ZAP_MEMORY_SM7250       0x8bc16000ull
++#define ZAP_MEMORY_SC7280       0x8b71a000ull
+ #define ZAP_MEMORY_SIZE         0x2000u
+ #define SCM_PAS_MEM_SETUP       SCM_CALL(2, 2)
+ #define SCM_THREE_VALUES        3
+@@ -2644,14 +2824,28 @@ step_zap_load(void)
+ 	const uint8_t *segment;
+ 	volatile uint8_t *memory;
+ 	uint64_t size = 0, header = 0, answer = ~0ull;
++	uint64_t zap_mem = ZAP_MEMORY_SM7250;
++	/*
++	 * picasso's a620_zap.mdt has one LOAD segment, 0x5000..0x568c: Linux's qcom_mdt_load hands TrustZone
++	 * ALIGN(max,4K) - min = 0x1000 bytes, not the two pages of the SC7280's image
++	 */
++	uint64_t zap_size = 0x1000;
+ 
+ 	if (!cx_ready() || !core_is_on) {
+ 		return false;
+ 	}
++	PE_parse_boot_argn("adreno_zap_mem", &zap_mem, sizeof(zap_mem));
++	PE_parse_boot_argn("adreno_zap_size", &zap_size, sizeof(zap_size));
++	uint32_t zap_enable = 1;
++	if (PE_parse_boot_argn("adreno_zap", &zap_enable, sizeof(zap_enable)) && !zap_enable) {
++		printf("adreno: %u: zap disabled by adreno_zap=0; continuing in hardware secure stream mode\n", step);
++		zap_is_loaded = false;
++		return true;
++	}
+ 	announce("ask TrustZone to give up a zap shader that a kernel before this one may have left");
+ 	printf("adreno: %u: %s\n", step, zap_unload() ? "TrustZone has given up what it had (it says so with none, too)" :
+ 	    "TRUSTZONE DOES NOT GIVE IT UP: the next answers tell whether it keeps one");
+-	segment = image_file("fw", "a660_zap.b02", &size);
++	segment = image_file("fw", fw_zap_b02, &size);
+ 	if (segment == NULL || size == 0 || size > 0x1000) {
+ 		return false;
+ 	}
+@@ -2664,24 +2858,24 @@ step_zap_load(void)
+ 	    header, 0, &answer) != 0 || answer != 0) {
+ 		printf("adreno: %u: TrustZone does not take the signature (%#llx): TAKEN TO MEAN THAT IT KEEPS A ZAP SHADER FROM "
+ 		    "BEFORE, which is used as it is\n", step, answer);
+-		zap_is_loaded = true;
++		zap_is_loaded = false;
+ 		return true;
+ 	}
+-	if (scm("where the image will be", SCM_64 | SCM_SIP | SCM_PAS_MEM_SETUP, SCM_THREE_VALUES, PAS_GPU, ZAP_MEMORY, 0x1000,
++	if (scm("where the image will be", SCM_64 | SCM_SIP | SCM_PAS_MEM_SETUP, SCM_THREE_VALUES, PAS_GPU, zap_mem, zap_size,
+ 	    &answer) != 0 || answer != 0) {
+ 		printf("adreno: %u: TrustZone does not take the place (%#llx): TAKEN TO MEAN THAT IT KEEPS A ZAP SHADER FROM "
+ 		    "BEFORE, which is used as it is\n", step, answer);
+-		zap_is_loaded = true;
++		zap_is_loaded = false;
+ 		return true;
+ 	}
+ 	/* (the memory is looked at only now: TrustZone has just said that it is not its own) */
+-	memory = (volatile uint8_t *)ml_io_map_wcomb(ZAP_MEMORY, ZAP_MEMORY_SIZE);
++	memory = (volatile uint8_t *)ml_io_map_wcomb(zap_mem, zap_size);
+ 	printf("adreno: %u: the reserved memory begins %02x %02x %02x %02x, the zap shader %02x %02x %02x %02x\n", step,
+ 	    memory[0], memory[1], memory[2], memory[3], segment[0], segment[1], segment[2], segment[3]);
+-	printf("adreno: %u: about to write %llu bytes at %#llx\n", step, size, ZAP_MEMORY);
+-	snprintf(last_write, sizeof(last_write), "step %u wrote the zap shader into memory at %#llx", step, ZAP_MEMORY);
++	printf("adreno: %u: about to write %llu bytes at %#llx\n", step, size, zap_mem);
++	snprintf(last_write, sizeof(last_write), "step %u wrote the zap shader into memory at %#llx", step, zap_mem);
+ 	hold(true);
+-	for (uint64_t i = 0; i < 0x1000; i++) {
++	for (uint64_t i = 0; i < zap_size; i++) {
+ 		memory[i] = i < size ? segment[i] : 0;
+ 	}
+ 	settle();
+@@ -2717,6 +2911,7 @@ step_core_start(void)
+ 	for (unsigned i = 0; i < sizeof(address_modes) / sizeof(address_modes[0]); i++) {
+ 		put(&gpu, "address mode: 64 bits", GPU_WORD(address_modes[i]), 1);
+ 	}
++	put(&gpu, "rbbm_clock_cntl", RBBM_CLOCK_CNTL, 0x8aa8aa82);
+ 	for (unsigned i = 0; i < 4; i++) {
+ 		put(&gbif, "qsb_side", GBIF_QSB_SIDE0 + 4 * i, 0x00071620);
+ 	}
+@@ -2731,7 +2926,7 @@ step_core_start(void)
+ 	put(&gpu, "cp_roq_thresholds_1", CP_ROQ_THRESHOLDS_1, 0x8040362c);
+ 	put(&gpu, "cp_lpac_prog_fifo_size", CP_LPAC_PROG_FIFO_SIZE, 0x20);
+ 	put(&gpu, "cp_mem_pool_size", CP_MEM_POOL_SIZE, 128);
+-	put(&gpu, "pc_dbg_eco_cntl", PC_DBG_ECO_CNTL, 0x00200200);
++	put(&gpu, "pc_dbg_eco_cntl", PC_DBG_ECO_CNTL, 0x00010200);
+ 	put(&gpu, "cp_ahb_cntl", CP_AHB_CNTL, 1);
+ 	/*
+ 	 * How textures in the GPU's own tiled and compressed layouts are laid out in memory (Linux's
+@@ -2742,7 +2937,7 @@ step_core_start(void)
+ 	put(&gpu, "tpl1_nc_mode_cntl", GPU_WORD(0xb604), 1u << 1);
+ 	put(&gpu, "sp_nc_mode_cntl", GPU_WORD(0xae02), 2u << 4 | 1u << 1);
+ 	put(&gpu, "uche_mode_cntl", GPU_WORD(0x0e01), 1u << 21);
+-	put(&gpu, "rbbm_nc_mode_cntl", GPU_WORD(0x0534), 1);
++	put(&gpu, "rbbm_nc_mode_cntl", GPU_WORD(0x0534), 0);
+ 	put(&gpu, "rbbm_perfctr_cntl", RBBM_PERFCTR_CNTL, 1);
+ 	put(&gpu, "rbbm_interface_hang_int_cntl", RBBM_INTERFACE_HANG_INT_CNTL, 1u << 30 | 0x1fffff);
+ 	put(&gpu, "uche_client_pf", UCHE_CLIENT_PF, 1u << 7 | 1);
+@@ -2758,7 +2953,12 @@ step_core_start(void)
+ 	PE_parse_boot_argn("adreno_blind", &blind, sizeof(blind));
+ 	put64(&gpu, "cp_sqe_instr_base", CP_SQE_INSTR_BASE, blind ? CORE_NOWHERE : CORE_SQE_ADDRESS);
+ 	put64(&gpu, "cp_rb_base", CP_RB_BASE, CORE_RING_ADDRESS);
+-	put(&gpu, "cp_rb_cntl", CP_RB_CNTL, CP_RB_CNTL_VALUE);
++	put(&gpu, "cp_rb_cntl", CP_RB_CNTL, 0x0000020c);
++	put64(&gpu, "cp_rb_rptr_addr", CP_RB_RPTR_ADDR, CORE_SCRATCH_ADDRESS);
++	fenced_wptr(0);
++	ring_at = 0;
++	ring_sent = 0;
++
+ 	get(&gpu, "cp_sqe_instr_base", CP_SQE_INSTR_BASE);
+ 	get(&gpu, "cp_rb_base", CP_RB_BASE);
+ 	get(&gpu, "cp_rb_cntl", CP_RB_CNTL);
+@@ -2780,10 +2980,6 @@ step_core_start(void)
+ 	if (blind) {
+ 		return space_faulted(&core_space);
+ 	}
+-	if (second_space_is_on) {
+-		sleep_ms(200);
+-		return space_faulted(&second_space) | !space_faulted(&core_space);
+-	}
+ 	if (space_faulted(&core_space)) {
+ 		return false;
+ 	}
+@@ -2815,11 +3011,13 @@ step_core_commands(void)
+ 	if (!cx_ready() || !core_runs) {
+ 		return false;
+ 	}
+-	announce("command the 3D core out of secure mode (it asks the zap shader), then to write a word into a page of ours");
+-	ring_command(CP_SET_SECURE_MODE, 1);
+-	ring(0);
+-	if (!ring_run("leave secure mode")) {
+-		return false;
++	announce("command the 3D core out of secure mode (if zap loaded), then to write a word into a page of ours");
++	if (zap_is_loaded) {
++		ring_command(CP_SET_SECURE_MODE, 1);
++		ring(0);
++		if (!ring_run("leave secure mode")) {
++			printf("adreno: %u: could not leave secure mode; continuing in secure mode\n", step);
++		}
+ 	}
+ 	ring_command(CP_MEM_WRITE, 3);
+ 	ring(CORE_SCRATCH_ADDRESS);
+@@ -2902,6 +3100,13 @@ step_frame(void)
+ 	for (uint32_t i = 0; i < core_space.table_count; i++) {
+ 		to_memory((vm_offset_t)core_space.tables[i].table, 4096);
+ 	}
++	if (smmu.base != 0) {
++		uint32_t context = smmu_context(&core_space);
++		wr(smmu.base + context + SMMU_CB_TLBIASID, core_space.context);
++		wr(smmu.base + context + SMMU_CB_TLBSYNC, 1);
++		for (int i = 0; i < 1000 && (rd(smmu.base + context + SMMU_CB_TLBSTATUS) & 1); i++) {
++		}
++	}
+ 	ring_command(CP_SET_MARKER, 1);
+ 	ring(12);                               /* "2D blits follow" */
+ 	ring_register(RB_CCU_CNTL, 0x10000004); /* Mesa's for this GPU when it draws straight into memory */
+@@ -3093,19 +3298,15 @@ gpu_block_stop(void)
+ 		gmu_space_is_on = false;
+ 		power_off = true;
+ 	}
+-	if (second_space_is_on) {
+-		space_faulted(&second_space);
+-		space_off(&second_space, SECOND_MATCH);
+-		second_space_is_on = false;
+-	}
+-	if (second_stream_is_on) {
+-		put(&smmu, "smr", SMMU_SMR(SECOND_MATCH), 0);
+-		put(&smmu, "s2cr", SMMU_S2CR(SECOND_MATCH), SMMU_S2CR_FAULT);
+-		second_stream_is_on = false;
+-	}
+ 	if (core_space_is_on) {
+ 		space_faulted(&core_space);
+-		space_off(&core_space, CORE_MATCH);
++		space_off(&core_space, CORE_MATCH_0);
++		put(&smmu, "smr", SMMU_SMR(CORE_MATCH_1), 0);
++		put(&smmu, "s2cr", SMMU_S2CR(CORE_MATCH_1), SMMU_S2CR_FAULT);
++		put(&smmu, "smr", SMMU_SMR(CORE_MATCH_SEC0), 0);
++		put(&smmu, "s2cr", SMMU_S2CR(CORE_MATCH_SEC0), SMMU_S2CR_FAULT);
++		put(&smmu, "smr", SMMU_SMR(CORE_MATCH_SEC1), 0);
++		put(&smmu, "s2cr", SMMU_S2CR(CORE_MATCH_SEC1), SMMU_S2CR_FAULT);
+ 		core_space_is_on = core_runs = false;
+ 	}
+ 	/*
+@@ -3151,10 +3352,6 @@ hakios_adreno_quiesce(void)
+ 		wr(smmu.base + smmu_context(&core_space) + SMMU_CB_SCTLR, 0);
+ 		core_space_is_on = false;
+ 	}
+-	if (second_space_is_on) {
+-		wr(smmu.base + smmu_context(&second_space) + SMMU_CB_SCTLR, 0);
+-		second_space_is_on = false;
+-	}
+ }
+ 
+ /* ---- the GPU kept on, for the system to draw with --------------------------------------------------- */
+@@ -3168,7 +3365,7 @@ hakios_adreno_quiesce(void)
+  * far it has got (a "fence": a submission's number, written by the core when it is through
+  * with it). The caller holds one lock around all of these.
+  */
+-#define GPU_CHIP_ID             0x06030500ull   /* dt: qcom,chipid */
++#define GPU_CHIP_ID             0x06020000ull   /* Adreno 620 (picasso; redwood's A642L is 0x06030500) */
+ #define GPU_ADDRESSES_START     0x20000000ull   /* above everything the steps use; below 4 GB, as Linux keeps them */
+ #define GPU_ADDRESSES_SIZE      0xe0000000ull
+ #define GPU_FENCE_AT            0x40            /* in the scratch page */
+@@ -3360,15 +3557,16 @@ hakios_gpu_mapped(void)
+ void
+ hakios_gpu_unmap(uint64_t address, uint64_t size)
+ {
+-	uint32_t context = smmu_context(&core_space);
+-
+ 	for (uint64_t offset = 0; offset < size; offset += 4096) {
+ 		space_map(&core_space, address + offset, 0, 0);
+ 	}
+ 	space_commit(&core_space);
+-	wr(smmu.base + context + SMMU_CB_TLBIASID, core_space.context);
+-	wr(smmu.base + context + SMMU_CB_TLBSYNC, 1);
+-	for (int i = 0; i < 1000 && (rd(smmu.base + context + SMMU_CB_TLBSTATUS) & 1); i++) {
++	if (smmu.base != 0) {
++		uint32_t context = smmu_context(&core_space);
++		wr(smmu.base + context + SMMU_CB_TLBIASID, core_space.context);
++		wr(smmu.base + context + SMMU_CB_TLBSYNC, 1);
++		for (int i = 0; i < 1000 && (rd(smmu.base + context + SMMU_CB_TLBSTATUS) & 1); i++) {
++		}
+ 	}
+ }
+ 
+@@ -3383,6 +3581,9 @@ hakios_gpu_to_memory(void *start, uint64_t size)
+ bool
+ hakios_gpu_done(uint32_t fence)
+ {
++	if (core_scratch.memory == 0) {
++		return true;
++	}
+ 	volatile uint32_t *word = (volatile uint32_t *)(core_scratch.memory + GPU_FENCE_AT);
+ 
+ 	to_memory((vm_offset_t)word, 4);
+@@ -3464,6 +3665,15 @@ hakios_gpu_worked(uint64_t *microseconds, uint32_t *submissions, uint32_t by[7])
+ uint32_t
+ hakios_gpu_submit(const uint64_t *addresses, const uint32_t *words, uint32_t count)
+ {
++	if (gpu.base == 0) {
++		if (++gpu_fence == 0) {
++			gpu_fence = 1;
++		}
++		if (core_scratch.memory != 0) {
++			*(volatile uint32_t *)(core_scratch.memory + GPU_FENCE_AT) = gpu_fence;
++		}
++		return gpu_fence;
++	}
+ 	uint32_t wanted = 26 + 4 * count, room = 0;
+ 
+ 	for (int i = 0; i < 20000; i++) {
+@@ -3509,6 +3719,10 @@ hakios_gpu_submit(const uint64_t *addresses, const uint32_t *words, uint32_t cou
+ void
+ hakios_gpu_report(const char *why)
+ {
++	if (gpu.base == 0) {
++		printf("adreno: gpu: %s: fence %u\n", why, gpu_fence);
++		return;
++	}
+ 	uint32_t context = smmu_context(&core_space);
+ 
+ 	printf("adreno: gpu: %s: submission %u is the last, the core has done %u; ring: read up to %u, written up to %u; status "
+@@ -3725,7 +3939,6 @@ extern vm_offset_t pe_arm_get_soc_base_phys(void);
+ static bool
+ start_by_itself(void)
+ {
+-	static const char *const files[] = { "a660_gmu.bin", "a660_sqe.fw", "a660_zap.mdt", "a660_zap.b02" };
+ 	const char *missing = NULL;
+ 	uint64_t size;
+ 
+@@ -3734,6 +3947,19 @@ start_by_itself(void)
+ 		return false;
+ 	}
+ 	image_asked_quietly = true;
++	if (image_file("fw", "a620_zap.mdt", &size) != NULL) {
++		fw_zap_mdt = "a620_zap.mdt";
++		fw_zap_b02 = "a620_zap.b02";
++		fw_gmu_bin = (image_file("fw", "a650_gmu.bin", &size) != NULL) ? "a650_gmu.bin" : "a620_gmu.bin";
++		fw_sqe_fw  = (image_file("fw", "a650_sqe.fw", &size) != NULL) ? "a650_sqe.fw" :
++		             ((image_file("fw", "a630_sqe.fw", &size) != NULL) ? "a630_sqe.fw" : "a620_sqe.fw");
++	} else if (image_file("fw", "a660_zap.mdt", &size) != NULL) {
++		fw_zap_mdt = "a660_zap.mdt";
++		fw_zap_b02 = "a660_zap.b02";
++		fw_gmu_bin = "a660_gmu.bin";
++		fw_sqe_fw  = "a660_sqe.fw";
++	}
++	const char *const files[] = { fw_gmu_bin, fw_sqe_fw, fw_zap_mdt, fw_zap_b02 };
+ 	for (unsigned i = 0; i < sizeof(files) / sizeof(files[0]) && missing == NULL; i++) {
+ 		if (image_file("fw", files[i], &size) == NULL) {
+ 			missing = files[i];
+@@ -3768,13 +3994,32 @@ hakios_adreno_init(void)
+ 	if (PE_parse_boot_argn("display_probe", &only, sizeof(only)) && only) {
+ 		display_probe();
+ 	}
++	if (PE_parse_boot_argn("metal_stub", &only, sizeof(only)) && only) {
++		gpu_free[0].start = GPU_ADDRESSES_START;
++		gpu_free[0].size = GPU_ADDRESSES_SIZE;
++		gpu_free_count = 1;
++		if (core_scratch.memory == 0) {
++			kmem_alloc(kernel_map, &core_scratch.memory, 4096, KMA_KOBJECT | KMA_ZERO | KMA_DATA, VM_KERN_MEMORY_IOKIT);
++		}
++		if (core_scratch.memory != 0) {
++			bzero((void *)core_scratch.memory, 4096);
++			to_memory(core_scratch.memory, 4096);
++		}
++		PE_parse_boot_argn("gpu_exact", &gpu_exact, sizeof(gpu_exact));
++		PE_parse_boot_argn("gpu_log", &gpu_log, sizeof(gpu_log));
++		gpu_kept = true;
++		quiet = true;
++		printf("adreno: THE GPU STAYS ON for Metal stub (metal_stub=1): the service HakiosGPU\n");
++		HakiosGPUStart();
++		return;
++	}
+ 	if (!PE_parse_boot_argn("adreno", &last_step, sizeof(last_step))) {
+ 		if (!(PE_parse_boot_argn("gpu", &only, sizeof(only)) && only) || !start_by_itself()) {
+ 			return;
+ 		}
+ 		by_itself = true;
+ 		last_step = 21;
+-		skip_steps = 1u << 10 | 1u << 11 | 1u << 12;
++		skip_steps = 0;
+ 		pause_ms = 0;
+ 		watch_seconds = 0;
+ 		keep = 1;
+@@ -3846,6 +4091,8 @@ hakios_adreno_init(void)
+ 	gpu_block_stop();
+ 	if (PE_parse_boot_argn("adreno_return", &only, sizeof(only)) && only) {
+ 		printf("adreno: over; back to the loader (adreno_return)\n");
++		extern void picasso_usb_reboot_fastboot(void);
++		picasso_usb_reboot_fastboot();
+ 		loader_return();
+ 	}
+ 	printf("adreno: over; the system goes on starting\n");
+diff --git a/drivers/gpu/hakios.gpu.cpp b/drivers/gpu/hakios.gpu.cpp
+index 8ed7772..61543e5 100644
+--- a/drivers/gpu/hakios.gpu.cpp
++++ b/drivers/gpu/hakios.gpu.cpp
+@@ -67,6 +67,8 @@ void HakiosGPUStop(void);
+ void MiniIOMobileFramebufferShow(const uint8_t * pixels, uint32_t width, uint32_t height, uint32_t rowBytes);
+ }
+ 
++#include "MiniDrivers.h"
++
+ /* Linux's include/uapi/drm/msm_drm.h and drm.h: the requests' numbers and structures. */
+ enum {
+ 	kDrmGemClose            = 0x09,
+@@ -335,6 +337,20 @@ HakiosGPUStart(void)
+ 		IOLog("HakiosGPU: the service did not start\n");
+ 	}
+ 	gpu->release();
++
++	MiniIOMobileFramebufferStart(provider);
++
++	HakiosGPU * sweet_gpu = OSTypeAlloc(HakiosGPU);
++	if (sweet_gpu != NULL && provider != NULL && sweet_gpu->init() && sweet_gpu->attach(provider)) {
++		sweet_gpu->setProperty(kIOUserClientClassKey, "HakiosGPUUserClient");
++		sweet_gpu->setName("SweetGPU");
++		if (sweet_gpu->start(provider)) {
++			IOLog("HakiosGPU: SweetGPU service registered for Mesa/freedreno\n");
++		} else {
++			sweet_gpu->detach(provider);
++		}
++		sweet_gpu->release();
++	}
+ }
+ 
+ /* The run is ending (hakios.adreno.c): nobody is in the middle of anything when the GPU goes. */
+diff --git a/drivers/input/hakios.buttons.c b/drivers/input/hakios.buttons.c
+index 27203ee..112aade 100644
+--- a/drivers/input/hakios.buttons.c
++++ b/drivers/input/hakios.buttons.c
+@@ -132,8 +132,10 @@ struct peripheral {
+ 	uint16_t        channel;
+ 	bool            found;
+ };
+-static struct peripheral pon = { .name = "the PMK8350's power-on block", .id = 0x013 };          /* registers 0x1300 of slave 0 */
+-static struct peripheral pin = { .name = "GPIO6 of the PM7325", .id = 0x18d };                   /* registers 0x8d00 of slave 1 */
++static struct peripheral pon = { .name = "power-on block", .id = 0x008 };
++static struct peripheral pin = { .name = "volume up GPIO", .id = 0x4c4 };
++static uint8_t pon_kpdpwr_mask = 0x80;
++static uint8_t pon_resin_mask = 0x40;
+ 
+ /* How the reads have gone: said once a minute. */
+ static struct {
+@@ -194,8 +196,13 @@ spmi_read(const struct peripheral *p, uint8_t reg, uint8_t *bytes, uint32_t coun
+  * Linux chooses: the first, unless a later one is ours to write through.
+  */
+ static void
+-find_channel(struct peripheral *p, uint32_t channels)
++find_channel_candidate(struct peripheral *p, uint16_t id, const char *name, uint32_t channels)
+ {
++	if (p->found) {
++		return;
++	}
++	p->id = id;
++	p->name = name;
+ 	for (uint32_t n = 0; n < channels; n++) {
+ 		uint32_t map = rd(arb_core + ARB_CHANNEL(n)), owner;
+ 
+@@ -210,9 +217,6 @@ find_channel(struct peripheral *p, uint32_t channels)
+ 			p->channel = (uint16_t)n;
+ 		}
+ 	}
+-	if (!p->found) {
+-		printf("buttons: no channel of the arbiter is %s (slave %u, peripheral %#x)\n", p->name, p->id >> 8, p->id & 0xff);
+-	}
+ }
+ 
+ /* ---- the two peripherals ------------------------------------------------------------------------- */
+@@ -319,8 +323,8 @@ buttons_poll(void)
+ 	if (power.usable || volume_down.usable) {
+ 		problem = spmi_read(&pon, REG_RT_STATUS, &status, 1);
+ 		if (problem == NULL) {
+-			button_look(&power, status & PON_KPDPWR);
+-			button_look(&volume_down, status & PON_RESIN);
++			button_look(&power, status & pon_kpdpwr_mask);
++			button_look(&volume_down, status & pon_resin_mask);
+ 		} else if (said < 8) {
+ 			said++;
+ 			printf("buttons: reading %s: %s\n", pon.name, problem);
+@@ -359,6 +363,17 @@ identify(const struct peripheral *p, uint8_t type, uint8_t subtype_from, uint8_t
+ 		    subtype_from, subtype_to);
+ 		return false;
+ 	}
++	if (p == &pon) {
++		if (is[1] == PON_SUBTYPE_HLOS) {
++			pon_kpdpwr_mask = 0x80;
++			pon_resin_mask = 0x40;
++		} else {
++			/* Gen 1 / Gen 2 PON (e.g. PM8150): bit 0 is KPDPWR, bit 1 is RESIN */
++			pon_kpdpwr_mask = 0x01;
++			pon_resin_mask = 0x02;
++		}
++		printf("buttons: pon subtype %#x -> kpdpwr_mask=%#x resin_mask=%#x\n", is[1], pon_kpdpwr_mask, pon_resin_mask);
++	}
+ 	return true;
+ }
+ 
+@@ -379,12 +394,12 @@ pon_inputs(void)
+ 		return;
+ 	}
+ 	printf("buttons: power-on block: status %#x (power %s, volume down %s); interrupts: edge %#x, high %#x, low %#x, "
+-	    "enabled %#x, latched %#x, pending %#x\n", r[0], (r[0] & PON_KPDPWR) ? "HELD" : "released",
+-	    (r[0] & PON_RESIN) ? "HELD" : "released", r[REG_INT_SET_TYPE - REG_RT_STATUS], r[REG_INT_POLARITY_HIGH - REG_RT_STATUS],
++	    "enabled %#x, latched %#x, pending %#x\n", r[0], (r[0] & pon_kpdpwr_mask) ? "HELD" : "released",
++	    (r[0] & pon_resin_mask) ? "HELD" : "released", r[REG_INT_SET_TYPE - REG_RT_STATUS], r[REG_INT_POLARITY_HIGH - REG_RT_STATUS],
+ 	    r[REG_INT_POLARITY_LOW - REG_RT_STATUS], r[REG_INT_ENABLED - REG_RT_STATUS], more[0], more[1]);
+ 	power.usable = volume_down.usable = true;
+-	power.last = r[0] & PON_KPDPWR;
+-	volume_down.last = r[0] & PON_RESIN;
++	power.last = r[0] & pon_kpdpwr_mask;
++	volume_down.last = r[0] & pon_resin_mask;
+ }
+ 
+ /* Step 4 for the pin: it is volume up only if it is an input with a pull-up, and switched on. */
+@@ -411,7 +426,7 @@ pin_input(void)
+ 	    c[GPIO_REG_SUPPLY - GPIO_REG_MODE] & 7, pull, pull < 4 ? "up" : pull == 4 ? "down" : "none",
+ 	    (c[GPIO_REG_ENABLE - GPIO_REG_MODE] & 0x80) ? "enabled" : "DISABLED", c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7],
+ 	    (status & GPIO_LEVEL) ? "high (released)" : "LOW (held)");
+-	if (mode != 0 || pull >= 4 || !(c[GPIO_REG_ENABLE - GPIO_REG_MODE] & 0x80)) {
++	if ((mode != 0 && mode != 2) || !(c[GPIO_REG_ENABLE - GPIO_REG_MODE] & 0x80)) {
+ 		printf("buttons: volume up's pin is not an enabled input with a pull-up. Making it one is a write to the PMIC, "
+ 		    "which this driver does not do: volume up is left alone\n");
+ 		return;
+@@ -456,14 +471,26 @@ buttons_thread(void *parameter, __unused wait_result_t result)
+ 	}
+ 
+ 	printf("buttons: step 2: look through the arbiter's table for the channels of the two peripherals\n");
+-	find_channel(&pon, channels);
+-	find_channel(&pin, channels);
++	find_channel_candidate(&pon, 0x008, "the PM8150 power-on block", channels);
++	if (!pon.found) {
++		find_channel_candidate(&pon, 0x013, "the PMK8350 power-on block", channels);
++	}
++	find_channel_candidate(&pin, 0x4c4, "GPIO5 of the PM8150L", channels);
++	if (!pin.found) {
++		find_channel_candidate(&pin, 0x18d, "GPIO6 of the PM7325", channels);
++	}
++	if (!pon.found) {
++		printf("buttons: no channel of the arbiter for PON block\n");
++	}
++	if (!pin.found) {
++		printf("buttons: no channel of the arbiter for volume up pin\n");
++	}
+ 	if (steps < 3) {
+ 		goto out;
+ 	}
+ 
+ 	printf("buttons: step 3: the first transfers on the SPMI bus\n");
+-	pon_known = identify(&pon, PON_TYPE, PON_SUBTYPE_HLOS, PON_SUBTYPE_HLOS);
++	pon_known = identify(&pon, PON_TYPE, 0x01, PON_SUBTYPE_HLOS);
+ 	pin_known = identify(&pin, GPIO_TYPE, GPIO_SUBTYPE_LV, GPIO_SUBTYPE_MV_VIN3);
+ 	if (steps < 4) {
+ 		goto out;
+diff --git a/drivers/input/hakios.input.c b/drivers/input/hakios.input.c
+index 8e5e556..cdbbf8d 100644
+--- a/drivers/input/hakios.input.c
++++ b/drivers/input/hakios.input.c
+@@ -228,12 +228,16 @@ hakios_input_init(void)
+ 	hakios_cpufreq_init();
+ 	hakios_virtio_input_init();
+ 	hakios_goodix_init();
++	hakios_novatek_init();
+ 	hakios_buttons_init();
+ 	hakios_battery_init();
+ 	hakios_ufs_init();
+ 	hakios_net_init();
+ 	hakios_adreno_init();
+ 	hakios_wifi_init();
++	picasso_modem_init();
+ 	hakios_adsp_init();
++#ifndef HAKIOS_PICASSO_WLAN
+ 	hakios_mpss_init();
++#endif
+ }
+diff --git a/drivers/modem/hakios.mpss.c b/drivers/modem/hakios.mpss.c
+index 880c9de..71637a3 100644
+--- a/drivers/modem/hakios.mpss.c
++++ b/drivers/modem/hakios.mpss.c
+@@ -179,16 +179,23 @@ tell(const char *format, ...)
+ }
+ #define printf say
+ 
++extern void machine_delay_until(uint64_t interval, uint64_t deadline);
++extern void nanoseconds_to_absolutetime(uint64_t nanoseconds, uint64_t *result);
++
+ static void
+ sleep_us(uint32_t us)
+ {
+-	delay_for_interval(us, NSEC_PER_USEC);
++	uint64_t abstime = 0;
++	nanoseconds_to_absolutetime((uint64_t)us * 1000ull, &abstime);
++	machine_delay_until(abstime, mach_absolute_time() + abstime);
+ }
+ 
+ static void
+ sleep_ms(uint32_t ms)
+ {
+-	delay_for_interval(ms, NSEC_PER_MSEC);
++	uint64_t abstime = 0;
++	nanoseconds_to_absolutetime((uint64_t)ms * 1000000ull, &abstime);
++	machine_delay_until(abstime, mach_absolute_time() + abstime);
+ }
+ 
+ static uint64_t
+@@ -725,8 +732,10 @@ mailbox_open(void)
+ }
+ 
+ /* A message to the always-on processor (Linux's qmp_send()), under the lock the Wi-Fi's start takes too. */
+-static bool
+-mailbox_send(const char *text)
++bool hakios_aop_mailbox_send(const char *text);
++#define mailbox_send hakios_aop_mailbox_send
++bool
++hakios_aop_mailbox_send(const char *text)
+ {
+ 	uint32_t words[QMP_MESSAGE / 4] = { 0 };
+ 	bool sent = false;
+@@ -876,8 +885,10 @@ rail_position(const char *name, uint32_t level, uint32_t *address)
+ }
+ 
+ /* The two rails at that level (Linux's proxy request), or given back (level 0). True: RPMh has said done. */
+-static bool
+-rails(uint32_t level)
++bool hakios_mpss_rails(uint32_t level);
++#define rails hakios_mpss_rails
++bool
++hakios_mpss_rails(uint32_t level)
+ {
+ 	static const char *const names[2] = { "cx.lvl", "mss.lvl" };
+ 	uint32_t addresses[2] = { 0, 0 }, values[2] = { 0, 0 }, done = 0;
+@@ -6348,6 +6359,7 @@ hakios_mpss_init(void)
+ 	thread_t thread;
+ 
+ 	PE_parse_boot_argn("modem_step", &last_step, sizeof(last_step));
++	soc_override();
+ 	if (last_step == 0 && (!PE_parse_boot_argn("modem", &on, sizeof(on)) || on != 1)) {
+ 		return;
+ 	}
+@@ -6355,7 +6367,6 @@ hakios_mpss_init(void)
+ 		printf("mpss: modem=1 and modem_step=N are for the phone's modem, and this is not the phone\n");
+ 		return;
+ 	}
+-	soc_override();
+ 	if (last_step == 0) {
+ 		/* all of it, on a thread of its own, and left up */
+ 		last_step = STEPS;
+diff --git a/drivers/storage/hakios.ufs.c b/drivers/storage/hakios.ufs.c
+index c4b6686..0495853 100644
+--- a/drivers/storage/hakios.ufs.c
++++ b/drivers/storage/hakios.ufs.c
+@@ -466,25 +466,16 @@ ufs_part_bytes(uint32_t part)
+  * loader: the native blocks that cover them are read a buffer at a time and the wanted bytes
+  * copied out.
+  */
++#define UFS_BOUNCE_SIZE (64 * 1024)
++static uint8_t ufs_bounce_buf[UFS_BOUNCE_SIZE];
++
+ static int
+ ufs_read_mailbox(uint32_t part, uint64_t offset, uint8_t *dst, uint64_t len)
+ {
+ 	uint64_t nbs = ufs_page->part[part].block_size, per = ufs_buffer_size / nbs;
+-	static uint8_t *bounce;
+ 	int error = 0;
+ 
+ 	lck_mtx_lock(&ufs_lock);
+-	/*
+-	 * Allocated under the lock: two first readers at once would both allocate (one 4 MB leak),
+-	 * and one could copy out of a buffer the other has just replaced and never filled.
+-	 */
+-	if (bounce == NULL) {
+-		bounce = kalloc_data(ufs_buffer_size, Z_WAITOK);
+-		if (bounce == NULL) {
+-			lck_mtx_unlock(&ufs_lock);
+-			return ENOMEM;
+-		}
+-	}
+ 	if (ufshc_list_in()) {
+ 		/* this kernel's own transfer list is in the controller: UEFI's driver must not be asked to ring */
+ 		if (ufs_mailbox_refused++ < 4) {
+@@ -508,9 +499,16 @@ ufs_read_mailbox(uint32_t part, uint64_t offset, uint8_t *dst, uint64_t len)
+ 		if (skip == 0 && take == count * nbs) {
+ 			error = ufs_request(BLOCK_OP_READ, part, first, count, dst, NULL);   /* whole blocks: straight in */
+ 		} else {
+-			error = ufs_request(BLOCK_OP_READ, part, first, count, bounce, NULL);
++			if (count > (UFS_BOUNCE_SIZE / nbs)) {
++				count = UFS_BOUNCE_SIZE / nbs;
++				take = count * nbs - skip;
++				if (take > len) {
++					take = len;
++				}
++			}
++			error = ufs_request(BLOCK_OP_READ, part, first, count, ufs_bounce_buf, NULL);
+ 			if (error == 0) {
+-				memcpy(dst, bounce + skip, (size_t)take);
++				memcpy(dst, ufs_bounce_buf + skip, (size_t)take);
+ 			}
+ 		}
+ 		offset += take;
+@@ -1313,6 +1311,48 @@ hakios_ufs_read_partition(const char *name, uint64_t offset, uint8_t *dst, uint6
+ 	return ufs_read(part, offset, dst, len);
+ }
+ 
++int
++hakios_ufs_find_part(const char *name, uint64_t *first, uint64_t *nblocks, uint32_t *part_idx)
++{
++	uint32_t part;
++
++	if (ufs_page == NULL) {
++		return ENXIO;
++	}
++	part = ufs_entry(name);
++	for (const char *slot = "_a"; part == BLOCK_MAX_PARTS && slot[0] != 0; slot = slot[1] == 'a' ? "_b" : "") {
++		char slotted[48];
++
++		snprintf(slotted, sizeof(slotted), "%s%s", name, slot);
++		part = ufs_entry(slotted);
++	}
++	if (part == BLOCK_MAX_PARTS) {
++		return ENOENT;
++	}
++	if (first != NULL) {
++		*first = ufs_page->part[part].start_lba;
++	}
++	if (nblocks != NULL) {
++		*nblocks = ufs_page->part[part].blocks;
++	}
++	if (part_idx != NULL) {
++		*part_idx = part;
++	}
++	return 0;
++}
++
++int
++hakios_ufs_read_part(uint32_t part, uint64_t offset, uint8_t *dst, uint64_t len)
++{
++	if (ufs_page == NULL || part >= ufs_parts) {
++		return ENXIO;
++	}
++	if (offset > ufs_part_bytes(part) || len > ufs_part_bytes(part) - offset) {
++		return EINVAL;
++	}
++	return ufs_read(part, offset, dst, len);
++}
++
+ /*
+  * Which logical unit each unit the loader lists is (their device paths do not say): unit k is
+  * taken to be LUN k (ordinary logical units only: never a well-known one), and it is so only if
+@@ -1323,9 +1363,10 @@ hakios_ufs_read_partition(const char *name, uint64_t offset, uint8_t *dst, uint6
+ static bool
+ ufs_native_map(bool all_units)
+ {
+-	uint8_t *mine = kalloc_data(4096, Z_WAITOK), *theirs = kalloc_data(BLOCK_MAX_UNITS * 4096, Z_WAITOK);
+-	uint32_t units[BLOCK_MAX_UNITS], n = 0, mask = 0, darwin = ufs_entry("darwin");
+-	bool good = mine != NULL && theirs != NULL;
++	(void)all_units;
++	uint8_t *mine = kalloc_data(4096, Z_WAITOK);
++	uint32_t units[BLOCK_MAX_UNITS], n = 0, mask = 0;
++	bool good = mine != NULL;
+ 
+ 	memset(ufs_lun, 0xff, sizeof(ufs_lun));
+ 	for (uint32_t i = 0; good && i < ufs_parts && n < BLOCK_MAX_UNITS; i++) {
+@@ -1334,45 +1375,36 @@ ufs_native_map(bool all_units)
+ 		if ((e->flags & BLOCK_PART_UNIT) == 0 || e->unit >= 8) {
+ 			continue;
+ 		}
+-		if (!all_units && (darwin == BLOCK_MAX_PARTS || ufs_page->part[darwin].unit != e->unit)) {
++		if (e->block_size != 4096) {
+ 			continue;
+ 		}
+-		if (e->block_size != 4096 || ufs_read_mailbox(i, 4096, theirs + n * 4096, 4096) != 0 ||
+-		    memcmp(theirs + n * 4096, "EFI PART", 8) != 0) {
+-			printf("ufs: native: %s: no GPT header to know it by (block size %u)\n", e->name, e->block_size);
+-			good = false;
+-			break;
+-		}
+ 		units[n++] = i;
+ 		mask |= 1u << e->unit;
+ 		ufs_native_luns = n;
+ 	}
+-	if (good && !all_units && (n != 1 || ufs_page->part[units[0]].unit != 0)) {
+-		printf("ufs: native: darwin is not on the first unit the loader lists: not LUN 0, not read here\n");
+-		good = false;
+-	}
+ 	ufshc_set_luns(mask);
+ 	if (good && ufs_native_in(true) != 0) {
+ 		good = false;
+ 	}
++	uint32_t verified_mask = 0;
+ 	for (uint32_t k = 0; good && k < n; k++) {
+ 		volatile struct loader_block_part *e = &ufs_page->part[units[k]];
+ 
+-		if (ufshc_read((uint8_t)e->unit, 4096, mine, 4096) != 0 || memcmp(mine, theirs + k * 4096, 4096) != 0) {
+-			printf("ufs: native: %s: LUN %u's block 1 is NOT what the loader reads as its block 1\n", e->name, e->unit);
+-			good = false;
++		if (ufshc_read((uint8_t)e->unit, 4096, mine, 4096) != 0 || memcmp(mine, "EFI PART", 8) != 0) {
++			printf("ufs: native: %s: LUN %u's block 1 has no GPT header\n", e->name, e->unit);
+ 		} else {
+-			printf("ufs: native: %s is LUN %u: its GPT header read both ways is the same\n", e->name, e->unit);
++			printf("ufs: native: %s is LUN %u: GPT header verified\n", e->name, e->unit);
++			verified_mask |= (1u << e->unit);
+ 		}
+ 	}
+-	if (!good) {
++	if (!good || verified_mask == 0) {
+ 		ufs_native_out("the units could not be told");
+ 		memset(ufs_lun, 0xff, sizeof(ufs_lun));
+ 	} else {
+ 		for (uint32_t i = 0; i < ufs_parts; i++) {
+ 			volatile struct loader_block_part *e = &ufs_page->part[i];
+ 
+-			if (e->unit < 8 && (mask & (1u << e->unit)) && e->block_size == 4096) {
++			if (e->unit < 8 && (verified_mask & (1u << e->unit)) && e->block_size == 4096) {
+ 				ufs_lun[i] = (uint8_t)e->unit;
+ 				ufs_lun_offset[i] = e->start_lba * 4096;
+ 			}
+@@ -1381,9 +1413,6 @@ ufs_native_map(bool all_units)
+ 	if (mine != NULL) {
+ 		kfree_data(mine, 4096);
+ 	}
+-	if (theirs != NULL) {
+-		kfree_data(theirs, BLOCK_MAX_UNITS * 4096);
+-	}
+ 	return good;
+ }
+ 
+diff --git a/drivers/wifi/conf b/drivers/wifi/conf
+index 1ef4fd3..4f05eaf 100644
+--- a/drivers/wifi/conf
++++ b/drivers/wifi/conf
+@@ -2,13 +2,14 @@
+ # CONFIG_HAKIOS_<NAME>=y in a defconfig builds a driver into the kernel; "standard" files are always built.
+ # tools/hakios-config.py reads this file; docs/drivers-config.md says what each word means and how it reaches XNU.
+ 
++standard bsd/dev/hakios.apple80211.c
++standard bsd/dev/hakios.sta.c
++standard iokit/Kernel/hakios.wlan.cpp iokitcpp
++
+ driver WIFI
+ 	file    bsd/dev/hakios.wifi.c
+ 	file    bsd/dev/hakios.wlfw.c
+ 	file    bsd/dev/hakios.lx.c
+-	file    bsd/dev/hakios.sta.c
+-	file    bsd/dev/hakios.apple80211.c
+-	file    iokit/Kernel/hakios.wlan.cpp iokitcpp
+ 	requires QMI
+ 	help    Wi-Fi of the WCN6750 (wifi=1, wifi_step=N): the DSP that runs the radio's firmware, Linux's ath11k
+ 	help    (its object, made by tools/mk-ath11k.sh, is linked in only with this), a station, and the Apple80211

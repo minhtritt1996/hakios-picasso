@@ -1,35 +1,18 @@
 #!/bin/bash
-# Lay firmware vendor cua chinh may (GPU/audio) vao fw-* cho HakiOS.
-# Chay khi dien thoai o Android hoac recovery co /vendor mount.
-#
-#   devices/picasso/pull-firmware.sh [adb-serial]
-#
-# Driver GPU cua HakiOS doc fw-gpu/ voi ten a660_* (ban redwood); Adreno 620 cua picasso
-# dung bo a620_* -- script nay chep a620_* sang ca hai ten de thu.
-set -u
-SER=${1:-}
-ADB="adb"
-[ -n "$SER" ] && ADB="adb -s $SER"
-OUT=$(cd "$(dirname "$0")" && pwd)
-$ADB get-state >/dev/null 2>&1 || { echo "pull-firmware: khong thay adb"; exit 1; }
-
-mkdir -p "$OUT/fw-gpu"
-copy() { # copy <src> <dst-name>
-	if $ADB shell "test -f $1" 2>/dev/null; then
-		$ADB exec-out "cat $1 2>/dev/null" > "$OUT/fw-gpu/$2"
-		echo "  fw-gpu/$2  $(stat -c %s "$OUT/fw-gpu/$2") B  (tu $1)"
-	else
-		echo "  thieu $1"
-	fi
+# Pull the phone's own firmware out of its Android into the fw-*/ directories at the top of the
+# repository (never committed: it is the vendor's). The phone is on adb, in Android.
+set -e
+cd "$(dirname "$0")/../.."
+pull() { # DIR SOURCE...  (missing files are told, not fatal)
+	local dir=$1; shift
+	mkdir -p "$dir"
+	for f in "$@"; do adb pull "$f" "$dir/" >/dev/null 2>&1 || echo "pull-firmware.sh: $f: not on the phone"; done
+	echo "pull-firmware.sh: $dir: $(ls -1 "$dir" | wc -l | tr -d ' ') files"
 }
-
-echo "== GPU (Adreno 620)"
-copy /vendor/firmware/a620_zap.mdt       a620_zap.mdt
-copy /vendor/firmware/a620_zap.mbn       a620_zap.mbn
-copy /vendor/firmware/a620_gmu.bin       a620_gmu.bin
-copy /vendor/firmware/a620_sqe.fw        a620_sqe.fw
-# driver doi ten a660_*: chep y nguyen
-for f in a620_zap.mdt a620_zap.mbn a620_gmu.bin a620_sqe.fw; do
-	[ -s "$OUT/fw-gpu/$f" ] && cp "$OUT/fw-gpu/$f" "$OUT/fw-gpu/${f/a620_/a660_}"
-done
-ls -l "$OUT/fw-gpu" | tail -8
+adb get-state >/dev/null
+pull fw-gpu /vendor/firmware/a650_gmu.bin /vendor/firmware/a630_sqe.fw /vendor/firmware/a620_zap.mdt /vendor/firmware/a620_zap.b00 /vendor/firmware/a620_zap.b01 /vendor/firmware/a620_zap.b02 /vendor/firmware/a620_zap.elf
+pull fw-wifi /vendor/firmware_mnt/image/wlanmdsp.mbn /vendor/firmware_mnt/image/bdwlan.bin /vendor/firmware_mnt/image/bdwlan.b0a
+pull fw-audio /vendor/firmware_mnt/image/adsp.mdt $(for i in $(seq -w 0 32); do echo /vendor/firmware_mnt/image/adsp.b$i; done)
+pull fw-modem /vendor/firmware_mnt/image/modem.mdt $(for i in $(seq -w 0 28); do echo /vendor/firmware_mnt/image/modem.b$i; done)
+mkdir -p fw-modem/image && adb pull /vendor/firmware_mnt/image fw-modem/ >/dev/null 2>&1 && echo "pull-firmware.sh: fw-modem/image: the modem's own files (TFTP)"
+echo "pull-firmware.sh: done; Wi-Fi also wants fw-wifi/mac (the radio's address) and fw-wifi/network (the network's name and passphrase)"
