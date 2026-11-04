@@ -1337,7 +1337,7 @@ index 6801ce2..8506a5f 100644
  	reboot(RB_HALT);
  	return failures != 0;
 diff --git a/userland/src/inject.c b/userland/src/inject.c
-index 217e8fa..b893125 100644
+index 217e8fa..4d9a0fb 100644
 --- a/userland/src/inject.c
 +++ b/userland/src/inject.c
 @@ -42,6 +42,7 @@
@@ -1348,7 +1348,7 @@ index 217e8fa..b893125 100644
  #include <sys/sysctl.h>
  #include <signal.h>
  #include <sys/ucontext.h>
-@@ -545,27 +546,21 @@ window_server_fixes(void)
+@@ -545,29 +546,67 @@ window_server_fixes(void)
  /* ---- backboardd: no ambient light sensor ------------------------------------------------------------ */
  
  /*
@@ -1380,11 +1380,57 @@ index 217e8fa..b893125 100644
  }
  
 -__attribute__((unused)) static void
++/*
++ * backboardd sets the backlight factor to 0 once SpringBoard checks in (the screen "sleeps"), which
++ * also cancels the touch events. There is no power button wake path yet, so keep the factor at 1.
++ */
++static BOOL (*orig_bs_set_property)(id self, SEL selector, id value, id key);
++
++static BOOL
++my_bs_set_property(id self, SEL selector, id value, id key)
++{
++	CFTypeRef k = (CFTypeRef)key, v = (CFTypeRef)value;
++	double factor = 1.0;
++
++	if (k != NULL && CFGetTypeID(k) == CFStringGetTypeID() &&
++	    CFStringCompare((CFStringRef)k, CFSTR("DisplayBrightnessFactor"), 0) == kCFCompareEqualTo &&
++	    v != NULL && CFGetTypeID(v) == CFNumberGetTypeID() &&
++	    CFNumberGetValue((CFNumberRef)v, kCFNumberDoubleType, &factor) && factor < 0.01) {
++		static const double one = 1.0;
++
++		say("hakios: BrightnessSystem DisplayBrightnessFactor 0 -> 1.0\n");
++		value = (id)CFNumberCreate(NULL, kCFNumberDoubleType, &one);	/* leaked: rare, tiny */
++	}
++	return orig_bs_set_property ? orig_bs_set_property(self, selector, value, key) : NO;
++}
++
++static void
++brightness_property_fix(void)
++{
++	static const char *const names[] = { "BrightnessSystemClient", "BrightnessSystem" };
++
++	for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
++		Class cls = objc_getClass(names[i]);
++		Method method = cls ? class_getInstanceMethod(cls, sel_registerName("setProperty:forKey:")) : NULL;
++
++		if (method == NULL) {
++			continue;
++		}
++		if (orig_bs_set_property == NULL) {
++			orig_bs_set_property = (BOOL (*)(id, SEL, id, id))method_setImplementation(method, (IMP)my_bs_set_property);
++			say("hakios: %s setProperty:forKey: hook installed\n", names[i]);
++		}
++	}
++}
++
 +static void
  brightness_fixes(void)
  {
++	brightness_property_fix();
  	Class cls = objc_getClass("BLControl");
-@@ -943,7 +938,6 @@ input_thread(__unused void *arg)
+ 	Method method = cls ? class_getInstanceMethod(cls, sel_registerName("waitForALSArrival")) : NULL;
+ 	IMP original = method ? method_getImplementation(method) : NULL;
+@@ -943,7 +982,6 @@ input_thread(__unused void *arg)
  		buttons = make_service(client, "HakiOS buttons", HID_PAGE_CONSUMER, HID_USAGE_CONSUMER_CONTROL, false);
  	}
  	say("hakios: input: touch screen service %p, buttons %p\n", (void *)screen, (void *)buttons);
@@ -1392,7 +1438,7 @@ index 217e8fa..b893125 100644
  	if (screen == NULL) {
  		return NULL;
  	}
-@@ -990,7 +984,6 @@ input_start(void)
+@@ -990,7 +1028,6 @@ input_start(void)
  {
  	pthread_t thread;
  
@@ -1400,7 +1446,7 @@ index 217e8fa..b893125 100644
  	if (pthread_create(&thread, NULL, input_thread, NULL) == 0) {
  		pthread_detach(thread);
  	}
-@@ -1075,7 +1068,15 @@ opengl_es(void)
+@@ -1075,7 +1112,15 @@ opengl_es(void)
  	gl_loaded = 1;
  	gl_function_values = (void (*)(void *, unsigned, unsigned, size_t, size_t, const float *))dlsym(library,
  	    "hakios_gl_function_values");
@@ -1416,7 +1462,7 @@ index 217e8fa..b893125 100644
  }
  
  /*
-@@ -1161,6 +1162,364 @@ watch_metallib_lookups(const char *arguments)
+@@ -1161,6 +1206,364 @@ watch_metallib_lookups(const char *arguments)
  	    ca_metallib ? ca_metallib : "");
  }
  
@@ -1781,7 +1827,7 @@ index 217e8fa..b893125 100644
  __attribute__((constructor))
  static void
  hakios_init(void)
-@@ -1218,15 +1577,13 @@ hakios_init(void)
+@@ -1218,15 +1621,13 @@ hakios_init(void)
  		if (strstr(arguments, "metal_watch=1") != NULL || strstr(arguments, "ca_metallib=") != NULL) {
  			watch_metallib_lookups(arguments);
  		}

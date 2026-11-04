@@ -1,0 +1,7 @@
+# Job list of the Redmi K30 5G (picasso): run by the launchd job com.hakios.demo (src/init.c, run_rc).
+# Everything here is started in the background so that init reaches its root console
+# ("root@hakios-picasso#", on the USB CDC serial port) as soon as the list has been read.
+# Deliberately no button press: a "lock" would sleep the screen.
+# SpringBoard checks in about 70 s after boot on this phone: unlock after it, not before.
+/redwood/bin/rwtouch wait 90 notify com.hakios.unlock &
+/redwood/bin/rwtouch wait 93 swipe 0.5 0.985 0.5 0.3 250 &

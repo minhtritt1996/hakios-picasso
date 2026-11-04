@@ -56,13 +56,17 @@ run(f'fastboot stage {sys_apfs}', timeout=300)
 print(f'Upload complete in {time.time() - t0:.1f}s!', flush=True)
 
 print('=== Step 3: Create Boot Payload from build/out/ ===', flush=True)
+soc_args = ' '.join(l.strip() for l in open(os.path.join(REPO_DIR, 'soc.args')) if l.strip() and not l.startswith('#'))
+extra = os.environ.get('HAKIOS_EXTRA_ARGS', 'press_power=120 thermal=1 pmic=1')
 cmdline = (
     '-v debug=0x14e rd=md0 nointr_consio=1 buttons=1 touchscreen=1 hv_wdt_pet=1 cpus=8 small_cores_after=0 '
     'mfb=1 wifi=0 modem=0 adsp=0 sound=0 mic=0 bt=0 adreno=22 gpu=1 adreno_keep=1 ca_vbl=1 '
     'ufs=2 ufs_native=1 serial=3 picasso_usb=2 sweettick=1 sheng-lite=1 '
-    'soc_ipa_base=0x1e00000 soc_gsi_base=0x1e04000 soc_ipcc=0x408000 soc_aoss=0xc300000 soc_rsc=0x18220000 '
-    'soc_apps_smmu=0x15000000 soc_smem=0x80900000 soc_imem=0x146ab000 soc_cmd_db=0x80860000'
 )
+# The kernel keeps only ~600 bytes of boot-args: what the test needs goes before the soc_* addresses.
+_all = [a for a in soc_args.split() if not a.startswith('soc_')] + [a for a in soc_args.split() if a.startswith('soc_')]
+cmdline += extra + ' ' + ' '.join(_all)
+print('cmdline length', len(cmdline), flush=True)
 
 payload_path = os.path.join(OUT_DIR, 'payload.bin')
 mkpayload_cmd = (
@@ -106,7 +110,7 @@ try:
     os.makedirs(os.path.join(REPO_DIR, 'build'), exist_ok=True)
     log_file = open(os.path.join(REPO_DIR, 'build', 'gui_springboard.log'), 'wb')
     stream_start = time.time()
-    while time.time() - stream_start < 150:
+    while time.time() - stream_start < int(os.environ.get('HAKIOS_CAPTURE_SECS', '300')):
         r, _, _ = select.select([fd], [], [], 0.3)
         if r:
             data = os.read(fd, 4096)

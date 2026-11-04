@@ -140,3 +140,17 @@ Kết quả dịch ngược `IOMobileFramebuffer` (`dyld_shared_cache_arm64.13`)
    - **Giải pháp ở phiên tới (thực hiện trong `build/hakios-xnu-kernel/userland/src/inject.c` và `inject_sb.c`, sau đó xuất patch bằng `./build.sh export-patches`):**
      1. Trong `inject.c` (`backboardd`): Hook phương thức đặt `DisplayBrightnessFactor` / `setProperty:forKey:` của `BrightnessSystem` (hoặc `BKDisplayController`) để ép `DisplayBrightnessFactor` luôn bằng `1.0` (không bao giờ về `0`) và chặn `BKSDisplayServicesSetScreenBlanked(1)`.
      2. Trong `inject_sb.c` (`SpringBoard`): Đảm bảo gọi đánh thức màn hình (`-[SBBacklightController turnOnScreenFullyWithBacklightSource:]` / gửi sự kiện nút Home/Power giả lập) ngay sau khi `SpringBoard` hoàn tất `applicationDidFinishLaunching:`.
+
+## Session: drivers on, root shell, brightness hook (hardware test of ./build.sh output)
+
+- `configs/picasso.config`: BUTTONS, BATTERY, PMIC, NOVATEK, PICASSO_WLAN on. `soc.args`: `thermal_tm0=0xc222000 thermal_tm1=0xc223000`.
+- Verified on the phone: buttons driver reaches step 5 (PM8150 pon + PM8150L GPIO5), `pmic` lists 277 peripherals + RTC,
+  `thermal` sees 27 sensors in the two TSENS blocks. NOVATEK touch still fails: SPI error rc=-5 in all 4 modes
+  (suspect: the driver votes the wrap1 clocks 0x18004/0x18008, bits 20/21 of 0x52008, while SE 0x984000 is wrapper 0).
+- The kernel keeps only ~600 bytes of boot-args: `tools/boot_gui_full.py` puts what the test needs before the `soc_*` addresses.
+- Root shell: the default `rc.jobs` (svc_test, surf_test, ...) stalls and init never reaches `interactive_shell()`.
+  `userland/rc.jobs.picasso` (no tests, no lock-button press) is built in via `RC_JOBS`; use `tools/console.py "id" "ls /redwood/bin"`.
+  One `ps -A` / `id` sequence once ended with the phone resetting to xnuloader: not understood yet.
+- inject.c: hook on `-[BrightnessSystemClient setProperty:forKey:]` turns DisplayBrightnessFactor 0 into 1.0. It never logged a hit:
+  backboardd sets the factor through another path (BKDisplayBrightnessController). Screen state after check-in is NOT confirmed yet.
+- TODO: confirm screen state, press_power effect, NOVATEK clocks, thermal temperatures (thermal_log=N).

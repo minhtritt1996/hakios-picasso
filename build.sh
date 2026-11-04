@@ -171,7 +171,8 @@ build_userland() {
 	echo "========================================================================"
 	cd "$BUILD_DIR/hakios-xnu-kernel"
 
-	HAKIOS_METAL="$BUILD_DIR/hakios-metal" GL=1 ./userland/build.sh
+	cp -f "$PICASSO_DIR/userland/rc.jobs.picasso" userland/rc.jobs.picasso
+	RC_JOBS=rc.jobs.picasso HAKIOS_METAL="$BUILD_DIR/hakios-metal" GL=1 ./userland/build.sh
 	cp -f userland/root.apfs "$OUT_DIR/root.apfs"
 	[ -f userland/system.apfs ] && cp -al -f userland/system.apfs "$OUT_DIR/system.apfs"
 }

@@ -14,3 +14,5 @@ soc_ipa_fw=ipa_fws
 soc_cmd_db=0x80860000
 soc_mpss_mem=0x8c000000
 modem_ipa_fw_at=0x8bc00000
+thermal_tm0=0xc222000
+thermal_tm1=0xc223000
