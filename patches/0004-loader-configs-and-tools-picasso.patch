@@ -573,7 +573,7 @@ index 31ed41b..8b4d3b7 100644
  WIFI_ASK	arg	wifi_ask	Wi-Fi	k	hakios.wifi.c	step 14 also asks that service a question (its capabilities) and writes down the beginning of an answer
  WIFI_BA	arg	wifi_ba	Wi-Fi	k	lx_80211.c	
 diff --git a/devices/manifest.conf b/devices/manifest.conf
-index 60616fe..7b56f00 100644
+index 60616fe..fbd2668 100644
 --- a/devices/manifest.conf
 +++ b/devices/manifest.conf
 @@ -16,6 +16,10 @@ device redwood
@@ -582,7 +582,7 @@ index 60616fe..7b56f00 100644
  
 +device picasso
 +	repository  https://github.com/minhtritt1996/hakios-picasso.git
-+	revision    6f1422147b7d447488666f309a9848d324c4f6bc
++	revision    37d0e21ca32044d19e50d94bc5532d962d08b6dd
 +
  uefi hakios-uefi
  	repository  https://github.com/oosexgang/hakios-uefi.git
