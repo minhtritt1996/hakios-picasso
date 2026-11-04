@@ -10,7 +10,7 @@
 # INVARIANT: ./upstream/ is strictly read-only and NEVER modified by this script.
 #
 # Usage:
-#   ./build.sh [all|kernel|userland|uefi] [--clean]
+#   ./build.sh [all|kernel|userland|uefi|export-patches|check] [--clean]
 
 set -euo pipefail
 
@@ -26,9 +26,9 @@ TARGET="all"
 CLEAN=0
 for arg in "$@"; do
 	case "$arg" in
-		all|kernel|userland|uefi) TARGET="$arg" ;;
+		all|kernel|userland|uefi|export-patches|check) TARGET="$arg" ;;
 		--clean) CLEAN=1 ;;
-		*) echo "Usage: $0 [all|kernel|userland|uefi] [--clean]" >&2; exit 1 ;;
+		*) echo "Usage: $0 [all|kernel|userland|uefi|export-patches|check] [--clean]" >&2; exit 1 ;;
 	esac
 done
 
@@ -86,6 +86,7 @@ prepare_workspaces() {
 			echo "    + applying $p"
 			git -C "$BUILD_DIR/hakios-xnu-kernel" apply --whitespace=nowarn "$PICASSO_DIR/patches/$p"
 		done
+		git -C "$BUILD_DIR/hakios-xnu-kernel" add -N xnu/files/bsd/dev/picasso_usb.c userland/com.apple.ZhuGeService.plist 2>/dev/null || true
 
 		ln -sfn "$PICASSO_DIR" "$BUILD_DIR/hakios-xnu-kernel/devices/picasso"
 
@@ -218,6 +219,71 @@ build_uefi() {
 	fi
 }
 
+export_patches() {
+	echo "========================================================================"
+	echo "==> Exporting changes from $BUILD_DIR into $PICASSO_DIR/patches/..."
+	echo "========================================================================"
+	local KWS="$BUILD_DIR/hakios-xnu-kernel"
+	local MWS="$BUILD_DIR/hakios-metal"
+	local BASE_SHA="96ffbc532e970f3540885755d457e401e04d4707"
+	local METAL_SHA="7025778b8c0bbb1a99793f1be06474782d50cdaf"
+
+	git -C "$KWS" add -N xnu/files/bsd/dev/picasso_usb.c userland/com.apple.ZhuGeService.plist 2>/dev/null || true
+
+	if [ -d "$KWS/xnu-src/xnu-8796.121.2" ]; then
+		echo "==> Running xnu/export.sh and updating boot-args tables in $KWS..."
+		(
+			cd "$KWS"
+			HFS_SRC="$UPSTREAM_DIR/hfs-627.100.6" ./xnu/export.sh
+			git add -N xnu/files/bsd/dev/picasso_usb.c userland/com.apple.ZhuGeService.plist 2>/dev/null || true
+			python3 tools/boot-args.py --markdown > docs/boot-args.md
+			python3 tools/boot-args.py --lst > configs/boot-args.lst
+			python3 tools/boot-args.py --symbols > configs/symbols.tsv
+		)
+	fi
+
+	echo "==> Regenerating 0001..0006 patch files..."
+
+	git -C "$KWS" diff "$BASE_SHA" -- xnu/ ':!xnu/files/bsd/dev/picasso_usb.c' \
+		> "$PICASSO_DIR/patches/0001-xnu-picasso-smp-timer-iomap-display.patch"
+	git -C "$KWS" diff "$BASE_SHA" -- xnu/files/bsd/dev/picasso_usb.c \
+		> "$PICASSO_DIR/patches/0002-xnu-picasso-usb-cdc-console-driver.patch"
+	git -C "$KWS" diff "$BASE_SHA" -- drivers/ \
+		> "$PICASSO_DIR/patches/0003-drivers-picasso-adreno620-audio-ufs-mpss-buttons.patch"
+	git -C "$KWS" diff "$BASE_SHA" -- userland/ \
+		> "$PICASSO_DIR/patches/0004-userland-picasso-init-inject-springboard.patch"
+	git -C "$KWS" diff "$BASE_SHA" -- Makefile configs/ devices/manifest.conf docs/ tools/ xnuloader/ \
+		> "$PICASSO_DIR/patches/0005-loader-configs-and-tools-picasso.patch"
+	git -C "$MWS" diff "$METAL_SHA" \
+		> "$PICASSO_DIR/patches/0006-hakios-metal-clang15-constexpr-signbit.patch"
+
+	echo "==> Verifying generated patches apply cleanly against read-only $UPSTREAM_DIR..."
+	for p in \
+		0001-xnu-picasso-smp-timer-iomap-display.patch \
+		0002-xnu-picasso-usb-cdc-console-driver.patch \
+		0003-drivers-picasso-adreno620-audio-ufs-mpss-buttons.patch \
+		0004-userland-picasso-init-inject-springboard.patch \
+		0005-loader-configs-and-tools-picasso.patch; do
+		git -C "$UPSTREAM_DIR/hakios-xnu-kernel" apply --check --whitespace=nowarn "$PICASSO_DIR/patches/$p"
+		echo "    [OK] $p"
+	done
+	git -C "$UPSTREAM_DIR/hakios-metal" apply --check --whitespace=nowarn "$PICASSO_DIR/patches/0006-hakios-metal-clang15-constexpr-signbit.patch"
+	echo "    [OK] 0006-hakios-metal-clang15-constexpr-signbit.patch"
+}
+
+run_checks() {
+	echo "========================================================================"
+	echo "==> Running HakiOS CI & Provenance Checks in $BUILD_DIR/hakios-xnu-kernel..."
+	echo "========================================================================"
+	cd "$BUILD_DIR/hakios-xnu-kernel"
+	make picasso_defconfig
+	python3 tools/hakios-device.py check picasso
+	python3 tools/hakios-config.py check
+	python3 tools/drivers-check.py
+	python3 tools/boot-args.py --check
+	python3 tools/provenance-check.py
+}
+
 verify_upstream_clean
 prepare_workspaces
 
@@ -231,6 +297,12 @@ case "$TARGET" in
 	uefi)
 		build_uefi
 		;;
+	export-patches)
+		export_patches
+		;;
+	check)
+		run_checks
+		;;
 	all)
 		build_kernel_and_loader
 		build_userland
@@ -240,7 +312,9 @@ esac
 
 verify_upstream_clean
 
-echo "========================================================================"
-echo "==> BUILD COMPLETE! Output artifacts in $OUT_DIR:"
-ls -lh "$OUT_DIR"
-echo "========================================================================"
+if [ "$TARGET" != "export-patches" ] && [ "$TARGET" != "check" ]; then
+	echo "========================================================================"
+	echo "==> BUILD COMPLETE! Output artifacts in $OUT_DIR:"
+	ls -lh "$OUT_DIR"
+	echo "========================================================================"
+fi

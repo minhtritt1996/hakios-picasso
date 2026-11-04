@@ -44,35 +44,6 @@ index d972869..c7e0ffd 100755
  python3 ../tools/apfs/mkapfs.py -z --plain fw -o root.apfs redwood=root | tail -1
  [ -z "$CHECK" ] || ../tools/apfs/check-image.sh root.apfs redwood=root
  
-diff --git a/userland/com.apple.ZhuGeService.plist b/userland/com.apple.ZhuGeService.plist
-new file mode 100644
-index 0000000..2aa9e59
---- /dev/null
-+++ b/userland/com.apple.ZhuGeService.plist
-@@ -0,0 +1,23 @@
-+<?xml version=1.0 encoding=UTF-8?>
-+<!DOCTYPE plist PUBLIC -//Apple//DTD PLIST 1.0//EN http://www.apple.com/DTDs/PropertyList-1.0.dtd>
-+<plist version=1.0>
-+<dict>
-+	<key>Label</key>
-+	<string>com.apple.ZhuGeService</string>
-+	<key>MachServices</key>
-+	<dict>
-+		<key>com.apple.ZhuGeService</key>
-+		<true/>
-+		<key>com.apple.ZhuGeInternalService</key>
-+		<true/>
-+	</dict>
-+	<key>POSIXSpawnType</key>
-+	<string>Adaptive</string>
-+	<key>Program</key>
-+	<string>/System/Library/PrivateFrameworks/ZhuGeSupport.framework/XPCServices/ZhuGeService.xpc/ZhuGeService</string>
-+	<key>StandardErrorPath</key>
-+	<string>/dev/console</string>
-+	<key>UserName</key>
-+	<string>root</string>
-+</dict>
-+</plist>
 diff --git a/userland/libmini/mini.c b/userland/libmini/mini.c
 index 56c316b..74e49db 100644
 --- a/userland/libmini/mini.c

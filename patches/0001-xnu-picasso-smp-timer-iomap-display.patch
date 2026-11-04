@@ -1,29 +1,3 @@
-diff --git a/xnu-deps/host/bin/xnu-clang b/xnu-deps/host/bin/xnu-clang
-index 6ea04a7..a6c2f13 100755
---- a/xnu-deps/host/bin/xnu-clang
-+++ b/xnu-deps/host/bin/xnu-clang
-@@ -4,15 +4,18 @@
- #  - drops flags only Apple's clang understands
- #  - links with the cctools ld64
- HB="$(cd "$(dirname "$0")" && pwd)"
--case "$(basename "$0")" in *++) drv=clang++; extra=(-fno-use-cxa-atexit);; *) drv=clang; extra=();; esac
-+CLANG_BIN=/usr/bin/clang
-+[ -x /usr/bin/clang-15 ] && CLANG_BIN=/usr/bin/clang-15
-+[ -x /usr/bin/clang-18 ] && CLANG_BIN=/usr/bin/clang-18
-+case "$(basename "$0")" in *++) CLANG_BIN="${CLANG_BIN/clang/clang++}"; extra=(-fno-use-cxa-atexit);; *) extra=();; esac
- args=()
- for a in "$@"; do
-   case "$a" in
--    -enable-trivial-auto-var-init-zero-knowing-it-will-be-removed-from-clang) ;;
-+    -enable-trivial-auto-var-init-zero-knowing-it-will-be-removed-from-clang|-ftrivial-auto-var-init=zero) ;;
-     -fapple-kext-vtable-verify|-Wno-vla-cxx-extension) ;;
-     -Werror|-Werror=*|-Weverything|-pedantic-errors) ;;
-     *) args+=("$a");;
-   esac
- done
--exec /usr/bin/$drv -include "$HB/../../hostinc/xnu_clang_compat.h" -target arm64-apple-ios${XNU_SDK_VERSION:-16.5} --ld-path="$HB/ld64" \
-+exec "$CLANG_BIN" -include "$HB/../../hostinc/xnu_clang_compat.h" -target arm64-apple-ios${XNU_SDK_VERSION:-16.5} --ld-path="$HB/ld64" \
-   -w "${extra[@]}" "${args[@]}"
 diff --git a/xnu/files/bsd/kern/kern_minimac.c b/xnu/files/bsd/kern/kern_minimac.c
 index dd6e082..19e7b2d 100644
 --- a/xnu/files/bsd/kern/kern_minimac.c
@@ -965,7 +939,7 @@ index 221defa..c5cbdb0 100644
  
  	os_atomic_store(&psci_smp_cpu_stage[cpu], PSCI_SMP_CPU_ASKED, release);
 diff --git a/xnu/hakios.patch b/xnu/hakios.patch
-index 3bade39..aadc156 100644
+index 3bade39..454f4c9 100644
 --- a/xnu/hakios.patch
 +++ b/xnu/hakios.patch
 @@ -70,6 +70,37 @@ index 222158a93918..030e55b82ac1 100755
@@ -1011,11 +985,11 @@ index 3bade39..aadc156 100644
   include $(MakeInc_dir)
  diff --git a/bsd/conf/files b/bsd/conf/files
 -index 44274016a4cf..27cccab98c8e 100644
-+index 44274016a4cf..e03763baec11 100644
++index 44274016a4cf..0ff9c5b5fd8a 100644
  --- a/bsd/conf/files
  +++ b/bsd/conf/files
 -@@ -109,6 +109,51 @@ bsd/dev/munge.c 			optional config_requires_u32_munging
-+@@ -105,10 +105,56 @@ bsd/dev/random/randomdev.c		standard
++@@ -105,10 +105,58 @@ bsd/dev/random/randomdev.c		standard
 + 
 + bsd/dev/memdev.c			standard
 + bsd/dev/mem.c				standard
@@ -1033,40 +1007,42 @@ index 3bade39..aadc156 100644
  +bsd/dev/hakios.adsp.c                    optional hakios_adsp
  +bsd/dev/hakios.speaker.c                 optional hakios_speaker
  +bsd/dev/hakios.sound.c                   optional hakios_sound
-@@ -168,13 +206,11 @@ index 44274016a4cf..27cccab98c8e 100644
+@@ -168,13 +206,13 @@ index 44274016a4cf..27cccab98c8e 100644
  +bsd/dev/hakios.wifi.c                    optional hakios_wifi
  +bsd/dev/hakios.wlfw.c                    optional hakios_wifi
  +bsd/dev/hakios.lx.c                      optional hakios_wifi
 -+bsd/dev/hakios.sta.c                     optional hakios_wifi
 -+bsd/dev/hakios.apple80211.c              optional hakios_wifi
+++bsd/dev/hakios.picasso_bt.c              optional hakios_picasso_bt
+++bsd/dev/hakios.novatek.c                 optional hakios_novatek
  +# end of the HakiOS drivers
   bsd/dev/dev_perfmon.c optional config_perfmon
   
   bsd/libkern/crc32.c			standard
 -@@ -155,6 +200,52 @@ bsd/miscfs/devfs/devfs_vfsops.c		optional devfs
-+@@ -155,6 +201,52 @@ bsd/miscfs/devfs/devfs_vfsops.c		optional devfs
++@@ -155,6 +203,52 @@ bsd/miscfs/devfs/devfs_vfsops.c		optional devfs
   bsd/miscfs/mockfs/mockfs_fsnode.c	optional mockfs
   bsd/miscfs/mockfs/mockfs_vfsops.c	optional mockfs
   bsd/miscfs/mockfs/mockfs_vnops.c	optional mockfs
-@@ -227,7 +263,7 @@ index 44274016a4cf..27cccab98c8e 100644
+@@ -227,7 +265,7 @@ index 44274016a4cf..27cccab98c8e 100644
   
   bsd/miscfs/routefs/routefs_ops.c	optional routefs
   
 -@@ -361,6 +452,7 @@ bsd/security/audit/audit_syscalls.c		standard
-+@@ -361,6 +453,7 @@ bsd/security/audit/audit_syscalls.c		standard
++@@ -361,6 +455,7 @@ bsd/security/audit/audit_syscalls.c		standard
   bsd/security/audit/audit_worker.c		optional config_audit
   
   bsd/pthread/pthread_shims.c		standard
-@@ -235,7 +271,7 @@ index 44274016a4cf..27cccab98c8e 100644
+@@ -235,7 +273,7 @@ index 44274016a4cf..27cccab98c8e 100644
   bsd/pthread/pthread_priority.c		standard
   bsd/pthread/pthread_workqueue.c		standard
   
 -@@ -383,6 +475,7 @@ bsd/kern/kern_debug.c			standard
-+@@ -383,6 +476,7 @@ bsd/kern/kern_debug.c			standard
++@@ -383,6 +478,7 @@ bsd/kern/kern_debug.c			standard
   bsd/kern/kern_symfile.c			standard
   bsd/kern/kern_descrip.c			standard
   bsd/kern/kern_guarded.c			standard
-@@ -283,7 +319,7 @@ index fd7a94b20794..69eaceedd248 100644
+@@ -283,7 +321,7 @@ index fd7a94b20794..69eaceedd248 100644
   		if (cc > 1) {
   			console_write((char *)buf, cc);
  diff --git a/bsd/dev/arm/systemcalls.c b/bsd/dev/arm/systemcalls.c
@@ -1075,7 +1051,7 @@ index 3bade39..aadc156 100644
  --- a/bsd/dev/arm/systemcalls.c
  +++ b/bsd/dev/arm/systemcalls.c
  @@ -36,6 +36,92 @@
-@@ -379,7 +415,25 @@ index 7fd9be1a5f38..0d035255b030 100644
+@@ -379,7 +417,25 @@ index 7fd9be1a5f38..0d035255b030 100644
   #if CONFIG_DTRACE
   extern int32_t dtrace_systrace_syscall(struct proc *, void *, int *);
   extern void dtrace_systrace_syscall_return(unsigned short, int, int *);
@@ -1102,7 +1078,7 @@ index 3bade39..aadc156 100644
   	error = (*(callp->sy_call))(proc, &uthread->uu_arg[0], &(uthread->uu_rval[0]));
   	AUDIT_SYSCALL_EXIT(code, proc, uthread, error);
   
-@@ -390,6 +444,20 @@ index 7fd9be1a5f38..0d035255b030 100644
+@@ -390,6 +446,20 @@ index 7fd9be1a5f38..0d035255b030 100644
   #if CONFIG_MACF
   skip_syscall:
   #endif /* CONFIG_MACF */
@@ -1123,7 +1099,7 @@ index 3bade39..aadc156 100644
  diff --git a/bsd/dev/memdev.c b/bsd/dev/memdev.c
  index 3e6bffa8c48e..43cffb98bdcc 100644
  --- a/bsd/dev/memdev.c
-@@ -462,7 +530,7 @@ index 3e6bffa8c48e..43cffb98bdcc 100644
+@@ -462,7 +532,7 @@ index 3e6bffa8c48e..43cffb98bdcc 100644
   mdevremoveall(void)
   {
  diff --git a/bsd/kern/bsd_init.c b/bsd/kern/bsd_init.c
@@ -1132,7 +1108,7 @@ index 3bade39..aadc156 100644
  --- a/bsd/kern/bsd_init.c
  +++ b/bsd/kern/bsd_init.c
  @@ -147,6 +147,14 @@
-@@ -489,7 +557,24 @@ index 4df41ba1f61b..b5a79a02a3f5 100644
+@@ -489,7 +559,24 @@ index 4df41ba1f61b..b5a79a02a3f5 100644
   
   #if DEBUG_BSDINIT
   #define bsd_init_kprintf(x, ...) kprintf("bsd_init: " x, ## __VA_ARGS__)
@@ -1158,7 +1134,7 @@ index 3bade39..aadc156 100644
   
   		bsd_init_kprintf("calling devfs_kernel_mount\n");
   		devfs_kernel_mount(mounthere);
-@@ -1848,10 +1933,10 @@ index 2b14eda8f68f..09337bad5b01 100644
+@@ -1848,10 +1935,10 @@ index 2b14eda8f68f..09337bad5b01 100644
  +#endif
       ")";
  diff --git a/iokit/bsddev/IOKitBSDInit.cpp b/iokit/bsddev/IOKitBSDInit.cpp
@@ -1171,7 +1147,7 @@ index 3bade39..aadc156 100644
   	assert(matching);
   	matching->setObject(gIOResourceMatchedKey, gIOBSDKey);
   
-@@ -1863,11 +1948,13 @@ index 5219fb0d9ed6..29978e9cff43 100644
+@@ -1863,11 +1950,13 @@ index 5219fb0d9ed6..29978e9cff43 100644
  +		bsdWait = kSecondScale / 10;
  +	}
  +
@@ -1187,16 +1163,20 @@ index 3bade39..aadc156 100644
   #endif /* __LP64__ */
   				(void)mdevadd(-1, ml_static_ptovirt(ramdParms[0]) >> 12, (unsigned int) (ramdParms[1] >> 12), 0);        /* Initialize it and pass back the device number */
   			}
-@@ -1900,7 +1987,7 @@ index 83259ebf9835..8864e5c7cc41 100644
+@@ -1900,10 +1989,10 @@ index 83259ebf9835..8864e5c7cc41 100644
   DOCONFDEPS += $(MASTERCONFDIR)/MASTER.$(DOCONF_ARCH_CONFIG_LC).$(CURRENT_MACHINE_CONFIG_LC)
   endif
  diff --git a/iokit/conf/files b/iokit/conf/files
 -index 5fb0a52062e0..7cfee3142b5b 100644
-+index 5fb0a52062e0..46afe4e93ede 100644
++index 5fb0a52062e0..65ed4e8233f4 100644
  --- a/iokit/conf/files
  +++ b/iokit/conf/files
- @@ -79,6 +79,17 @@ iokit/Kernel/IOSubMemoryDescriptor.cpp			optional iokitcpp
-@@ -1912,9 +1999,9 @@ index 5fb0a52062e0..7cfee3142b5b 100644
+-@@ -79,6 +79,17 @@ iokit/Kernel/IOSubMemoryDescriptor.cpp			optional iokitcpp
++@@ -79,6 +79,18 @@ iokit/Kernel/IOSubMemoryDescriptor.cpp			optional iokitcpp
+  iokit/Kernel/IOGuardPageMemoryDescriptor.cpp		optional iokitcpp
+  
+  iokit/Kernel/IOPlatformExpert.cpp			optional iokitcpp
+@@ -1912,9 +2001,10 @@ index 5fb0a52062e0..7cfee3142b5b 100644
  +iokit/Kernel/MiniIOMobileFramebuffer.cpp		optional iokitcpp
  +# HakiOS drivers: made by tools/hakios-config.py kernel from drivers/*/conf. Edit those, not these lines.
  +iokit/Kernel/hakios.stubs.cpp            optional iokitcpp
@@ -1204,10 +1184,11 @@ index 3bade39..aadc156 100644
  +iokit/Kernel/hakios.gpu.cpp              optional hakios_adreno iokitcpp
  +iokit/Kernel/hakios.battery.cpp          optional hakios_battery iokitcpp
 -+iokit/Kernel/hakios.wlan.cpp             optional hakios_wifi iokitcpp
+++iokit/Kernel/hakios.picasso_wlan.cpp     optional hakios_picasso_wlan iokitcpp
  +# end of the HakiOS drivers
  +iokit/Kernel/MiniAppleKeyStore.cpp			optional iokitcpp
  +iokit/Kernel/MiniIONetworkStack.cpp			optional iokitcpp
-@@ -2250,6 +2337,19 @@ index e26a1d70f470..f91095c98d26 100644
+@@ -2250,6 +2340,19 @@ index e26a1d70f470..f91095c98d26 100644
   
   #if APPLE_ARM64_ARCH_FAMILY
   	configure_late_apple_regs();
@@ -1227,7 +1208,7 @@ index 3bade39..aadc156 100644
  diff --git a/osfmk/arm/model_dep.c b/osfmk/arm/model_dep.c
  index 39daaf8db949..64ceb1a5f201 100644
  --- a/osfmk/arm/model_dep.c
-@@ -2374,10 +2474,24 @@ index b9549da357b4..cca31ea32502 100644
+@@ -2374,10 +2477,24 @@ index b9549da357b4..cca31ea32502 100644
   #else
   #define __USES_V_CRYPTO_INTRINSICS 0
  diff --git a/osfmk/arm64/cpu.c b/osfmk/arm64/cpu.c
@@ -1254,7 +1235,7 @@ index 3bade39..aadc156 100644
   #endif /* MONOTONIC */
   
   	if (wfi) {
-@@ -2392,10 +2506,24 @@ index 94e91306b143..0ec1323086b7 100644
+@@ -2392,10 +2509,24 @@ index 94e91306b143..0ec1323086b7 100644
   #endif
   
  diff --git a/osfmk/arm64/machine_routines.c b/osfmk/arm64/machine_routines.c
@@ -1281,7 +1262,7 @@ index 3bade39..aadc156 100644
   	return machine_info.memory_size;
   }
   
-@@ -2405,7 +2533,7 @@ index e76e7e70ab9c..828a51171c7e 100644
+@@ -2405,7 +2536,7 @@ index e76e7e70ab9c..828a51171c7e 100644
   __attribute__((noreturn))
   void
   halt_all_cpus(boolean_t reboot)
@@ -1290,7 +1271,7 @@ index 3bade39..aadc156 100644
   		printf("CPU halted\n");
   		PEHaltRestart(kPEHaltCPU);
   	}
-@@ -2415,7 +2543,7 @@ index e76e7e70ab9c..828a51171c7e 100644
+@@ -2415,7 +2546,7 @@ index e76e7e70ab9c..828a51171c7e 100644
   	while (1) {
   		;
   	}
@@ -1299,7 +1280,7 @@ index 3bade39..aadc156 100644
   #endif
   }
   
-@@ -2515,7 +2643,7 @@ index e76e7e70ab9c..828a51171c7e 100644
+@@ -2515,7 +2646,7 @@ index e76e7e70ab9c..828a51171c7e 100644
   void
   ml_parse_cpu_topology(void)
   {
@@ -1308,7 +1289,7 @@ index 3bade39..aadc156 100644
   	int64_t cluster_max_cpu_phys_id[MAX_CPU_CLUSTER_PHY_ID + 1];
   	const boolean_t cpus_boot_arg_present = PE_parse_boot_argn("cpus", &cpu_boot_arg, sizeof(cpu_boot_arg));
   	const boolean_t cpumask_boot_arg_present = PE_parse_boot_argn("cpumask", &cpumask_boot_arg, sizeof(cpumask_boot_arg));
-@@ -2523,7 +2651,7 @@ index e76e7e70ab9c..828a51171c7e 100644
+@@ -2523,7 +2654,7 @@ index e76e7e70ab9c..828a51171c7e 100644
   
   	// The cpus=N and cpumask=N boot args cannot be used simultaneously. Flag this
   	// so that we trigger a panic later in the boot process, once serial is enabled.
@@ -1317,7 +1298,7 @@ index 3bade39..aadc156 100644
   		cpu->phys_id = (uint32_t)ml_readprop(child, "reg", ML_READPROP_MANDATORY);
   
   		cpu->l2_access_penalty = (uint32_t)ml_readprop(child, "l2-access-penalty", 0);
-@@ -2544,7 +2672,7 @@ index e76e7e70ab9c..828a51171c7e 100644
+@@ -2544,7 +2675,7 @@ index e76e7e70ab9c..828a51171c7e 100644
   		cpu->l2_cache_size = (uint32_t)ml_readprop(child, "l2-cache-size", 0);
   		cpu->l2_cache_id = (uint32_t)ml_readprop(child, "l2-cache-id", 0);
   		cpu->l3_cache_size = (uint32_t)ml_readprop(child, "l3-cache-size", 0);
@@ -1326,7 +1307,7 @@ index 3bade39..aadc156 100644
   	cluster_offsets[0] = 0;
   #endif
   	assert(topology_info.boot_cpu != NULL);
-@@ -2552,7 +2680,7 @@ index e76e7e70ab9c..828a51171c7e 100644
+@@ -2552,7 +2683,7 @@ index e76e7e70ab9c..828a51171c7e 100644
   	ml_read_chip_revision(&topology_info.chip_revision);
   
   	/*
@@ -1335,7 +1316,7 @@ index 3bade39..aadc156 100644
   	processor_t processor = PERCPU_GET_RELATIVE(processor, cpu_data, this_cpu_datap);
   	if (!is_boot_cpu) {
   		processor_init(processor, this_cpu_datap->cpu_number, pset);
-@@ -2578,7 +2706,111 @@ index e76e7e70ab9c..828a51171c7e 100644
+@@ -2578,7 +2709,111 @@ index e76e7e70ab9c..828a51171c7e 100644
   
   	*processor_out = processor;
   	*ipi_handler_out = cpu_signal_handler;
@@ -1448,7 +1429,7 @@ index 3bade39..aadc156 100644
   	uint64_t cntvctl = CNTV_CTL_EL0_ENABLE; /* One wants to use 32 bits, but "mrs" prefers it this way */
   
   	__builtin_arm_wsr64("CNTV_CTL_EL0", cntvctl);
-@@ -2980,11 +3212,369 @@ index c40d57bcc677..1b7a1fcdfcdf 100644
+@@ -2980,11 +3215,369 @@ index c40d57bcc677..1b7a1fcdfcdf 100644
  +osfmk/arm64/user_exception_trace.c	standard
  +osfmk/arm64/gic_v3_irq.c	optional nos_arm_asm
  +osfmk/arm64/psci_smp.c	optional nos_arm_asm
@@ -1820,7 +1801,7 @@ index 3bade39..aadc156 100644
   			gc_acquired = TRUE;
   		} else {
   			if (makeMapping) {
-@@ -2999,10 +3589,36 @@ index 384118e8d7a9..2573d2ebd4e6 100644
+@@ -2999,10 +3592,36 @@ index 384118e8d7a9..2573d2ebd4e6 100644
   				 * io_map doesn't support.  However this buffer is set up
   				 * by the bootloader and doesn't require D$ cleaning, so
  diff --git a/osfmk/kern/debug.c b/osfmk/kern/debug.c
@@ -1859,7 +1840,7 @@ index 3bade39..aadc156 100644
   	__builtin_unreachable();
   }
   
-@@ -3011,11 +3627,12 @@ index 0a00656a0fdd..bfad3cbca5bc 100644
+@@ -3011,11 +3630,12 @@ index 0a00656a0fdd..bfad3cbca5bc 100644
   void
   panic_spin_forever(void)
   {
@@ -1873,7 +1854,7 @@ index 3bade39..aadc156 100644
   static void
   kdp_machine_reboot_type(unsigned int type, uint64_t debugger_flags)
   {
-@@ -3104,6 +3721,23 @@ index 4fb223ee9788..df563bc04910 100644
+@@ -3104,6 +3724,23 @@ index 4fb223ee9788..df563bc04910 100644
   
   #pragma mark - implementation details
   
@@ -1897,7 +1878,7 @@ index 3bade39..aadc156 100644
  diff --git a/osfmk/kern/sched.h b/osfmk/kern/sched.h
  index a5f68ade084b..9741eb1b3ecd 100644
  --- a/osfmk/kern/sched.h
-@@ -3136,10 +3770,22 @@ index 3657d83c5b6f..ded2ff427d68 100644
+@@ -3136,10 +3773,22 @@ index 3657d83c5b6f..ded2ff427d68 100644
   		 * This is a secondary SMT processor.  If the primary is running
   		 * a realtime thread, only allow realtime threads on the secondary.
  diff --git a/osfmk/kern/sched_prim.c b/osfmk/kern/sched_prim.c
@@ -1922,7 +1903,7 @@ index 3bade39..aadc156 100644
   #endif
   
   int sched_allow_rt_smt = 1;
-@@ -3147,7 +3793,7 @@ index 8e29586464de..0a7de6fc4be7 100644
+@@ -3147,7 +3796,7 @@ index 8e29586464de..0a7de6fc4be7 100644
   int sched_avoid_cpu0 = SCHED_AVOID_CPU0;
   int sched_allow_rt_steal = 1;
   int sched_backup_cpu_timeout_count = 5; /* The maximum number of 10us delays to wait before using a backup cpu */
@@ -1931,7 +1912,7 @@ index 3bade39..aadc156 100644
   sched_SMT_balance(processor_t cprocessor, processor_set_t cpset)
   {
   	processor_t ast_processor = NULL;
-@@ -3155,7 +3801,7 @@ index 8e29586464de..0a7de6fc4be7 100644
+@@ -3155,7 +3804,7 @@ index 8e29586464de..0a7de6fc4be7 100644
   
   #if (DEVELOPMENT || DEBUG)
   	if (__improbable(sched_smt_balance == 0)) {
@@ -1940,7 +1921,7 @@ index 3bade39..aadc156 100644
   #endif
   
   	assert(cprocessor == current_processor());
-@@ -3196,7 +3842,7 @@ index 8e29586464de..0a7de6fc4be7 100644
+@@ -3196,7 +3845,7 @@ index 8e29586464de..0a7de6fc4be7 100644
   		goto smt_balance_exit;
   	}
   
@@ -1949,7 +1930,7 @@ index 3bade39..aadc156 100644
   
   	processor_t sprocessor;
   
-@@ -3204,7 +3850,7 @@ index 8e29586464de..0a7de6fc4be7 100644
+@@ -3204,7 +3853,7 @@ index 8e29586464de..0a7de6fc4be7 100644
   	uint64_t running_secondary_map = (cpset->cpu_state_map[PROCESSOR_RUNNING] &
   	    ~cpset->primary_map);
   	for (int cpuid = lsb_first(running_secondary_map); cpuid >= 0; cpuid = lsb_next(running_secondary_map, cpuid)) {
@@ -1958,7 +1939,7 @@ index 3bade39..aadc156 100644
   		bool is_yielding         = (*reason & AST_YIELD) == AST_YIELD;
   
   		bool needs_smt_rebalance = !is_yielding && thread->sched_pri < BASEPRI_RTQUEUES && processor->processor_primary != processor;
-@@ -3215,7 +3861,7 @@ index 8e29586464de..0a7de6fc4be7 100644
+@@ -3215,7 +3864,7 @@ index 8e29586464de..0a7de6fc4be7 100644
   
   		bool affinity_mismatch   = thread->affinity_set != AFFINITY_SET_NULL && thread->affinity_set->aset_pset != pset;
   
@@ -1967,7 +1948,7 @@ index 3bade39..aadc156 100644
   
   				clear_pending_AST_bits(pset, processor, 3);
   
-@@ -3224,7 +3870,7 @@ index 8e29586464de..0a7de6fc4be7 100644
+@@ -3224,7 +3873,7 @@ index 8e29586464de..0a7de6fc4be7 100644
   					processor_t sprocessor = processor->processor_secondary;
   					if ((sprocessor->state == PROCESSOR_RUNNING) || (sprocessor->state == PROCESSOR_DISPATCHING)) {
   						ipi_type = sched_ipi_action(sprocessor, NULL, SCHED_IPI_EVENT_SMT_REBAL);
@@ -1976,7 +1957,7 @@ index 3bade39..aadc156 100644
   				goto restart;
   			}
   
-@@ -3323,6 +3969,19 @@ index 8b46efb05c86..e161ca426b1a 100644
+@@ -3323,6 +3972,19 @@ index 8b46efb05c86..e161ca426b1a 100644
   extern kern_return_t
   kern_work_interval_set_workload_id(mach_port_name_t port_name,
       struct kern_work_interval_workload_id_args *workload_id_args);

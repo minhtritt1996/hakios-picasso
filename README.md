@@ -116,6 +116,12 @@ Use `./build.sh` to clone `./upstream/` into `./build/`, apply all patches from 
 ./build.sh kernel
 ./build.sh userland
 ./build.sh uefi
+
+# Export any experimental changes in ./build/ back into ./patches/0001..0006 and verify against ./upstream/:
+./build.sh export-patches
+
+# Run all HakiOS CI & provenance checks:
+./build.sh check
 ```
 All build outputs are placed in `./build/out/`:
 * `build/out/hakios-kernel` — Darwin 22.5.0 ARM64 kernel

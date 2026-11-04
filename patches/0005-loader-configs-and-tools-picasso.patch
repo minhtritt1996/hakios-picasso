@@ -1,5 +1,5 @@
 diff --git a/configs/boot-args.lst b/configs/boot-args.lst
-index 7af859d..4b85fb4 100644
+index 7af859d..1d9cafc 100644
 --- a/configs/boot-args.lst
 +++ b/configs/boot-args.lst
 @@ -8,16 +8,20 @@ adreno_pause	k
@@ -24,15 +24,7 @@ index 7af859d..4b85fb4 100644
  adsp_step	k
  adsp_wait	k
  apfs_cheap	k
-@@ -103,6 +107,7 @@ fbscale	k
- fbtrace	k
- fbwidth	k
- gamut	l
-+gicprobe	k
- gl	u
- glblit	u
- glcensus	u
-@@ -159,6 +164,7 @@ metal_gmem	u
+@@ -159,6 +163,7 @@ metal_gmem	u
  metal_gmem_draws	u
  metal_gmem_off	u
  metal_skip	u
@@ -40,7 +32,7 @@ index 7af859d..4b85fb4 100644
  metal_trace	u
  metal_watch	u
  mic	k
-@@ -212,6 +218,17 @@ modem_wait	k
+@@ -212,6 +217,17 @@ modem_wait	k
  modem_wda_off	k
  net_names	k
  net_trace	k
@@ -58,7 +50,7 @@ index 7af859d..4b85fb4 100644
  pmic	k
  pmic_list	k
  press_power	k
-@@ -258,6 +275,7 @@ surf_clear	k
+@@ -258,6 +274,7 @@ surf_clear	k
  surf_wrap	k
  surftrace	k
  surftrace_of	k
@@ -66,7 +58,7 @@ index 7af859d..4b85fb4 100644
  switcher_wallpaper	u
  syssleep	k
  systrace	k
-@@ -305,6 +323,7 @@ virtio_blk	k
+@@ -305,6 +322,7 @@ virtio_blk	k
  virtio_input	k
  virtio_net	k
  virtio_sound	k
@@ -304,7 +296,7 @@ index 08ae448..1a2c019 100644
  # Extra arguments (1)
  #
 diff --git a/configs/symbols.tsv b/configs/symbols.tsv
-index 31ed41b..8b4d3b7 100644
+index 31ed41b..3137ed1 100644
 --- a/configs/symbols.tsv
 +++ b/configs/symbols.tsv
 @@ -8,15 +8,19 @@ ADRENO_PAUSE	arg	adreno_pause	GPU and display	k	hakios.adreno.c	how long the new
@@ -328,15 +320,7 @@ index 31ed41b..8b4d3b7 100644
  ADSP_STEP	arg	adsp_step	Audio and battery	k	hakios.adsp.c	
  ADSP_WAIT	arg	adsp_wait	Audio and battery	k	hakios.adsp.c	
  APFS_CHEAP	arg	apfs_cheap	Storage and APFS	k	apfs_vfsops.c	
-@@ -94,6 +98,7 @@ FBSCALE	arg	fbscale	GPU and display	k	MiniIOMobileFramebuffer.cpp	the same 375 x
- FBTRACE	arg	fbtrace	GPU and display	k	MiniIOMobileFramebuffer.cpp	log the first N calls of every selector (default 3)
- FBWIDTH	arg	fbwidth	GPU and display	k	MiniIOMobileFramebuffer.cpp	
- GAMUT	arg	gamut	Loader	l	loader.c	
-+GICPROBE	arg	gicprobe	CPU, memory and boot	k	(patch)	
- GL	arg	gl	User space	u	inject.c,inject_sb.c	not even with a GPU; gl=1: also without one, by Mesa's software driver (slow; for working on eagl.c in QEMU)
- GLBLIT	arg	glblit	GPU and display	u	eagl.c	the surface's memory, as before
- GLCENSUS	arg	glcensus	GPU and display	u	eagl.c	
-@@ -145,6 +150,7 @@ METAL_GMEM	arg	metal_gmem	User space	u	HakiosMetalCA.m
+@@ -145,6 +149,7 @@ METAL_GMEM	arg	metal_gmem	User space	u	HakiosMetalCA.m
  METAL_GMEM_DRAWS	arg	metal_gmem_draws	User space	u	HakiosMetalCA.m	GMEM for a pass whose like had at least N draws in the frame before (hakios_metal_cb_set_gmem_min_draws), sysmem for the rest; 56 when not given, 0
  METAL_GMEM_OFF	arg	metal_gmem_off	User space	u	HakiosMetalCA.m	
  METAL_SKIP	arg	metal_skip	User space	u	HakiosMetalCA.m	
@@ -344,7 +328,7 @@ index 31ed41b..8b4d3b7 100644
  METAL_TRACE	arg	metal_trace	User space	u	HakiosMetalCA.m	
  METAL_WATCH	arg	metal_watch	User space	u	inject.c	
  MIC_ADC	arg	mic_adc	Audio and battery	k	hakios.mic.c	
-@@ -192,6 +198,17 @@ MODEM_SIM_SWITCH_OFF	arg	modem_sim_switch_off	Cellular	k	hakios.mpss.c
+@@ -192,6 +197,17 @@ MODEM_SIM_SWITCH_OFF	arg	modem_sim_switch_off	Cellular	k	hakios.mpss.c
  MODEM_STEP	arg	modem_step	Cellular	k	hakios.mpss.c	the steps once the root is there, then back to the loader if modem_return=1 says so
  MODEM_WAIT	arg	modem_wait	Cellular	k	hakios.mpss.c	
  MODEM_WDA_OFF	arg	modem_wda_off	Cellular	k	hakios.mpss.c	
@@ -362,7 +346,7 @@ index 31ed41b..8b4d3b7 100644
  PMIC_LIST	arg	pmic_list	Chip, thermal and PMIC	k	hakios.pmic.c	only the clock, not the inventory of every block
  PRESS_POWER	arg	press_power	Touch and buttons	k	hakios.buttons.c	a short press of the power key that many seconds after boot, and another ten seconds later, given to Darwin as the key's own are (hakios_touch_post):
  PRESS_POWER_MS	arg	press_power_ms	Touch and buttons	k	hakios.buttons.c	
-@@ -234,6 +251,7 @@ SURF_CLEAR	arg	surf_clear	GPU and display	k	MiniIOSurface.cpp	kept memory is giv
+@@ -234,6 +250,7 @@ SURF_CLEAR	arg	surf_clear	GPU and display	k	MiniIOSurface.cpp	kept memory is giv
  SURF_WRAP	arg	surf_wrap	GPU and display	k	MiniIOSurface.cpp	surfaces around the client's pictures refused, as before methodWrapClientImage (for comparing)
  SURFTRACE	arg	surftrace	GPU and display	k	MiniIOSurface.cpp	log the first N surfaces created (default 24)
  SURFTRACE_OF	arg	surftrace_of	GPU and display	k	MiniIOSurface.cpp	
@@ -370,7 +354,7 @@ index 31ed41b..8b4d3b7 100644
  SWITCHER_WALLPAPER	arg	switcher_wallpaper	User space	u	inject_sb.c	
  SYSSLEEP	arg	syssleep	CPU, memory and boot	k	(patch)	
  SYSTRACE	arg	systrace	CPU, memory and boot	k	(patch),user_exception_trace.c	
-@@ -272,6 +290,7 @@ VBLUR	arg	vblur	GPU and display	u	eagl.c
+@@ -272,6 +289,7 @@ VBLUR	arg	vblur	GPU and display	u	eagl.c
  VIRTIO_BLK	arg	virtio_blk	Storage and APFS	k	hakios.virtio_blk.c	
  VIRTIO_INPUT	arg	virtio_input	Touch and buttons	k	hakios.virtio_input.c	
  VIRTIO_SOUND	arg	virtio_sound	Audio and battery	k	hakios.virtio_sound.c	
@@ -394,7 +378,7 @@ index 60616fe..e9dfe94 100644
  	repository  https://github.com/oosexgang/hakios-uefi.git
  	revision    1c6522893266157506c767e2ca427053ed3634a8
 diff --git a/docs/boot-args.md b/docs/boot-args.md
-index 16bc0fd..51c9d15 100644
+index 16bc0fd..a3bd44c 100644
 --- a/docs/boot-args.md
 +++ b/docs/boot-args.md
 @@ -2,13 +2,13 @@
@@ -402,7 +386,7 @@ index 16bc0fd..51c9d15 100644
  Made by `tools/boot-args.py --markdown`; CI fails if it is out of date with the source (`tools/boot-args.py --check`).
  
 -Every argument that the kernel, the loader or user space of this port reads, and which file reads it. **339 arguments**: 276 read by the kernel, 14 by the loader, 59 by user space (one is read in more than one place).
-+Every argument that the kernel, the loader or user space of this port reads, and which file reads it. **358 arguments**: 295 read by the kernel, 14 by the loader, 59 by user space (one is read in more than one place).
++Every argument that the kernel, the loader or user space of this port reads, and which file reads it. **357 arguments**: 294 read by the kernel, 14 by the loader, 59 by user space (one is read in more than one place).
  
  This is a catalogue of what exists and who reads it, not a manual. What an argument means is in the head of the file that reads it. The stable switches have a symbol in the configuration (`tools/hakios-config.py help SYMBOL`, `docs/configs.md`); the rest are the knobs of bring-up (a driver's steps, pauses, traces, test modes) and can change with the driver. Any of them can be given in a configuration with `CONFIG_BOOTARGS="name=value ..."`, which checks that each name is in this list.
  
@@ -467,16 +451,11 @@ index 16bc0fd..51c9d15 100644
  | `hakios_kver` | K | `hakios.version.c` |  | the loader (from the payload's kernel.ver) |
  
 -## CPU, memory and boot (23)
-+## CPU, memory and boot (26)
++## CPU, memory and boot (25)
  
  | Argument | Layer | Read by | Configuration | Set by |
  |---|---|---|---|---|
-@@ -358,16 +364,19 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
- | `ddr_rest` | K | `hakios.cpufreq.c` | `CONFIG_DDR_REST` |  |
- | `ddr_vote` | K | `hakios.cpufreq.c` | `CONFIG_DDR_VOTE` |  |
- | `epoch` | K | `GenericARMPE.cpp` |  | xl (the host's clock) |
-+| `gicprobe` | K | `(patch)` | `CONFIG_GICPROBE` |  |
- | `hv_wdt_pet` | K | `loader_return.c` |  | the loader, when it has armed the watchdog (the runner also passes it) |
+@@ -362,12 +368,14 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
  | `loader_return_after` | KL | `loader.c`, `loader_return.c` |  | xl (XL_SECS) |
  | `machine_name` | K | `GenericARMPE.cpp` | `CONFIG_MACHINE_NAME` |  |
  | `membench` | K | `hakios.cpufreq.c` | `CONFIG_MEMBENCH` |  |
@@ -491,7 +470,7 @@ index 16bc0fd..51c9d15 100644
  | `syssleep` | K | `(patch)` | `CONFIG_SYSSLEEP` |  |
  | `systrace` | K | `(patch)`, `user_exception_trace.c` | `CONFIG_SYSTRACE` |  |
  | `systrace_name` | K | `(patch)` | `CONFIG_SYSTRACE_NAME` |  |
-@@ -395,7 +404,7 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
+@@ -395,7 +403,7 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
  | `ufs` | L | `loader.c` | `CONFIG_UFS` |  |
  | `ufs_probe` | L | `loader.c` | `CONFIG_UFS_PROBE` |  |
  
@@ -500,7 +479,7 @@ index 16bc0fd..51c9d15 100644
  
  | Argument | Layer | Read by | Configuration | Set by |
  |---|---|---|---|---|
-@@ -421,8 +430,18 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
+@@ -421,8 +429,18 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
  | `metal_skip` | U | `HakiosMetalCA.m` | `CONFIG_METAL_SKIP` |  |
  | `metal_trace` | U | `HakiosMetalCA.m` | `CONFIG_METAL_TRACE` |  |
  | `metal_watch` | U | `inject.c` | `CONFIG_METAL_WATCH` |  |
@@ -544,46 +523,6 @@ index 81f4830..9df777b 100644
  |---|---|---|
 -| `sc7280` | Qualcomm SC7280 family (SM7325 "Snapdragon 778G", QCM6490; "yupik", "kodiak") | carried by redwood (`devices/redwood/soc/`) |
 +| `sm7250` | Qualcomm SM7250 family (Snapdragon 765G / 768G; "lito") | carried by picasso (`devices/picasso/soc/`) |
-diff --git a/docs/devices/picasso.md b/docs/devices/picasso.md
-new file mode 100644
-index 0000000..0efaeb9
---- /dev/null
-+++ b/docs/devices/picasso.md
-@@ -0,0 +1,34 @@
-+<!-- Made by tools/docs-gen.py from devices/picasso/device.conf. Do not edit: change that, then run tools/docs-gen.py. -->
-+
-+
-+# Redmi K30 5G (`picasso`)
-+
-+| | |
-+|---|---|
-+| Vendor | Xiaomi |
-+| SoC | `sm7250` |
-+| Configuration | `make picasso_defconfig` |
-+| Maintainer | minhtritt1996 (README.md) |
-+| Repository | [hakios-picasso](https://github.com/minhtritt1996/hakios-picasso) |
-+| Firmware | `devices/picasso/pull-firmware.sh` pulls it from your own phone |
-+
-+## What works
-+
-+| Part | State | |
-+|---|---|---|
-+| display | partly | UEFI framebuffer; kernel attaches MiniIOMobileFramebuffer (1125x2436 on 1080x2400 panel, stride 4320); backboardd connected |
-+| touch | partly | driver hakios-touch (/dev/hakios-touch) connects to backboardd IOHIDEventSystem; Novatek NT36672C on GENI SE7 SPI |
-+| buttons | no |  |
-+| cpu | works | SMP 4 cores; passed all 36 userland checks; launchd, backboardd, wifid, and SpringBoard running stable |
-+| gpu | partly | Adreno 620: firmware a620_zap/a630_sqe/a650_gmu; UniXNU TZ zap authentication & hardware acceleration in progress |
-+| storage | partly | loader surveys UFS (109 partitions, 6 units); kernel root on RAM disk; kernel panic log preserved in UFS logdump partition |
-+| usb | works | loader fastboot (product xnuloader), oem paniclog (512 KB pram staging), CDC serial console |
-+| network | works | dlil, lo0, and en0 (WCN3990 802.11) with live IPv4 data plane |
-+| audio | works | TFA9874 amplifier on I2C @ 0x34 & SEC MI2S (GPIO 70-74); WCD938x codec over SoundWire master 2 & Bolero 1.2 TX macro (/dev/hakios-audio, /dev/hakios-mic) |
-+| battery | no |  |
-+| camera | no |  |
-+| wifi | works | WCN3990 via MPSS PAS 4; OTA beacon scanning, 4-way WPA2 association, TX/RX Data Plane, BPF DHCP client leases IP on en0 |
-+| cellular | partly | PAS mpss=0x4 booted in lineage; not integrated in HakiOS yet |
-+| thermal | no |  |
-+
-+The state is what has been seen on this device, written down in `devices/picasso/device.conf`; a part the table does not name has not been looked at.
 diff --git a/docs/reference/drivers.md b/docs/reference/drivers.md
 index 6241a20..df7490d 100644
 --- a/docs/reference/drivers.md

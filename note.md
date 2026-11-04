@@ -113,6 +113,30 @@ Kết quả dịch ngược `IOMobileFramebuffer` (`dyld_shared_cache_arm64.13`)
 2. **Đã thiết lập `upstream/` (Read-Only) và kiểm chứng bằng `./build.sh all --clean`:**
    - Toàn bộ 6 patch apply sạch 100% lên bản clone mới từ `upstream/`.
    - Biên dịch thành công toàn bộ tạo tác tại `build/out/`: `hakios-kernel` (15 MB), `loader.efi` (70 KB), `root.apfs` (5.8 MB), `system.apfs` (2.4 GB), `SILICIUM_UEFI.fd` (2.0 MB), `payload.bin` (21 MB) và `boot-picasso.img` (12 MB).
-3. **Bước tiếp theo trên thiết bị thực tế:**
-   - Nạp `build/out/system.apfs` và `build/out/payload.bin` qua RAM boot với cmdline cô lập GUI (`wifi=0 modem=0 adsp=0 sound=0 mic=0 adreno=22 gpu=1 adreno_keep=1 ca_vbl=1 buttons=1`).
-   - Kiểm tra log console xác nhận `backboardd` vượt qua `[Backlight] instantiating BrightnessSystem`, khởi chạy `SpringBoard`, và thực hiện chu kỳ `SwapBegin` / `SwapEnd` (`MiniIOMobileFramebuffer: swap #1`).
+3. **Kết quả kiểm thử thực tế bộ tạo tác `build/out/` trên thiết bị (2026-11-04 21:11):**
+   - Nạp `build/out/system.apfs` và `build/out/payload.bin` qua `tools/boot_gui_full.py` (cmdline cô lập GUI).
+   - **Đã khắc phục hoàn toàn 3 vấn đề cũ:**
+     1. Không còn bão log `lsd` (`denied attempt to escape CPU monitor` = 0 lần).
+     2. Không còn spam ký tự `.`, `T%u `, `W0 `/`W1 ` từ `sweettick` lên màn hình console.
+     3. Các selector `15, 22, 29, 33, 57, 74, 79` của `MiniIOMobileFramebuffer` đều trả thành công.
+   - **`backboardd[11]` đã vượt qua điểm treo `[Backlight] instantiating BrightnessSystem`** và hoàn tất toàn bộ chuỗi khởi tạo (`HID event processing ready`, `ALS sync ready`, `display MiG server ready`, `HID server ready`, `system shell servers ready`, `Data Migration`).
+   - **`SpringBoard[6]` đã kết nối và check-in thành công với `backboardd[11]`:**
+     ```text
+     backboardd[11:309] [SystemShell] checkInAndWaitForDataMigration: Telling "com.apple.springboard" that it can start immediately
+     backboardd[11:309] [SystemShell] START WATCHDOG for com.apple.SpringBoard
+     backboardd[11:309] [SystemShell] Updating primary system app to: <BKSystemShellClient: 0x1009bb280; bundleIdentifier: com.apple.springboard; ... pid: 6; ... checkedIn: YES>
+     ```
+4. **Điểm cần xử lý tiếp theo để hiển thị Homescreen (Next Step):**
+   - Ngay sau khi `SpringBoard[6]` check-in (`10:35:23`), log ghi nhận:
+     ```text
+     backboardd[11:309] [Display] Set Blanked: YES
+     backboardd[11:371] [Backlight] Setting CoreBrightness backlight factor:0.000000 with fade duration:0.000000
+     hakios: -[CAWindowServerDisplay setBlanked:1] on 0x10097dc10 -> FORCING 0 (unblank)
+     backboardd[11:371] [Backlight] Set BrightnessSystem property:DisplayBrightnessFactor to:0
+     backboardd[11:371] [Backlight] Update last requested backlight factor: 0 permanently:YES
+     backboardd[11:371] [TouchEvents] canceling events for suppression reason: backlight dim/off
+     ```
+   - Mặc dù `-[CAWindowServerDisplay setBlanked:]` đã được ép về `0` ở tầng `QuartzCore`, tầng quản lý đèn nền của `backboardd` / `SpringBoard` (`BKSDisplayServicesSetScreenBlanked` / `DisplayBrightnessFactor = 0` / `SBBacklightController`) vẫn chuyển trạng thái logic của hệ thống sang `backlight dim/off` (tắt màn hình chờ sự kiện nút nguồn đánh thức và hủy sự kiện cảm ứng).
+   - **Giải pháp ở phiên tới (thực hiện trong `build/hakios-xnu-kernel/userland/src/inject.c` và `inject_sb.c`, sau đó xuất patch bằng `./build.sh export-patches`):**
+     1. Trong `inject.c` (`backboardd`): Hook phương thức đặt `DisplayBrightnessFactor` / `setProperty:forKey:` của `BrightnessSystem` (hoặc `BKDisplayController`) để ép `DisplayBrightnessFactor` luôn bằng `1.0` (không bao giờ về `0`) và chặn `BKSDisplayServicesSetScreenBlanked(1)`.
+     2. Trong `inject_sb.c` (`SpringBoard`): Đảm bảo gọi đánh thức màn hình (`-[SBBacklightController turnOnScreenFullyWithBacklightSource:]` / gửi sự kiện nút Home/Power giả lập) ngay sau khi `SpringBoard` hoàn tất `applicationDidFinishLaunching:`.
