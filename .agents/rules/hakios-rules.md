@@ -1,0 +1,1 @@
+/home/tritm/hakios-picasso/AGENT.md

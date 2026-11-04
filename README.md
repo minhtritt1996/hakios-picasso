@@ -37,6 +37,7 @@ All statuses reflect verified, reproducible runs on physical hardware:
 | **GPU** | **Partial** | Firmware (`a620_zap.mdt`, `a630_sqe.fw`, `a650_gmu.bin`) extracted; TrustZone SCM PAS authentication and CP secure mode unlock (`RBBM_SECVID_TRUST_CNTL 0x1 -> 0x3`) in progress. |
 | **Wi-Fi / Network** | **Works** | Qualcomm WCN3990 via MPSS PAS 4 (`hakios.picasso_wlan.cpp`); physical over-the-air 802.11 beacon scanning, WPA2-PSK 4-way handshake, TX/RX Data Plane (`picasso_wlan_transmit`), and userland BPF DHCP client lease (`10.14.42.115` on `en0`). |
 | **Audio / ADSP** | **Works** | Qualcomm ADSP PAS / Secondary MI2S / APR audio stream; NXP TFA9874 amplifier on I2C @ 0x34 (reset GPIO58); Qualcomm WCD938x codec over SoundWire Master Port 2 / Bolero 1.2 TX macro / APR capture stream; `/dev/hakios-audio` and `/dev/hakios-mic` active in Darwin userland. Verified audible playback and room sound recording on hardware. |
+| **Bluetooth** | **Works** | Qualcomm WCN3990 via QUPV3 SE5 UART @ 0x894000 (`hakios.picasso_bt.c`); in-band 2400/115200 baud power sequence, standard 4-byte packing, devfs character device `/dev/hakios-bt` (0666), userland `bt` tool (`bt status`, `bt reset`, `bt addr`). Verified live on hardware. |
 | **Buttons** | **Missing** | Power & Volume keys via PMIC SPMI arbiter pending bringup. |
 | **Battery / PMIC** | **Missing** | Battery gauge reading via ADSP pending. |
 
@@ -56,6 +57,9 @@ hakios-picasso/
 │   ├── soc.conf                # Snapdragon 765G (SM7250) SoC family declaration
 │   └── configs/sm7250.config   # SM7250 SoC configuration (cores, clocks, socinfo)
 ├── drivers/
+│   ├── bluetooth/
+│   │   ├── conf                # driver PICASSO_BT declaration
+│   │   └── hakios.picasso_bt.c # Picasso WCN3990 Bluetooth UART driver (/dev/hakios-bt)
 │   ├── input/
 │   │   ├── conf                # driver NOVATEK declaration
 │   │   ├── hakios.novatek.c    # Novatek NT36672C SPI touch driver

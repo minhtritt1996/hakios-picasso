@@ -1,0 +1,3 @@
+driver PICASSO_BT
+	file    bsd/dev/hakios.picasso_bt.c
+	help    Picasso Qualcomm WCN3990 Bluetooth via QUPV3 SE5 UART (/dev/hakios-bt)
