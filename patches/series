@@ -32,3 +32,4 @@
 0033-storage-input-picasso-adjustments.patch
 0034-tools-automation-gui-and-provenance.patch
 0035-bluetooth-picasso-wcn3990-userland-support.patch
+0036-adreno-zap-aligned-page-picasso.patch
