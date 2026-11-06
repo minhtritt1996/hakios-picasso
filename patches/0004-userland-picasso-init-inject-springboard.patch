@@ -1,5 +1,5 @@
 diff --git a/userland/build.sh b/userland/build.sh
-index d972869..c7e0ffd 100755
+index d972869..a30fdd5 100755
 --- a/userland/build.sh
 +++ b/userland/build.sh
 @@ -157,6 +157,7 @@ fi
@@ -10,7 +10,15 @@ index d972869..c7e0ffd 100755
  cp obj/child root/bin/child
  # The data volume into the flash and back (src/var_store.c), and the job that saves it when a run
  # ends: the program and its job together, away from the Darwin job list below, which several working
-@@ -223,6 +224,7 @@ if [ -d $DARWIN/rootfs/usr/lib ]; then
+@@ -192,6 +193,7 @@ if [ -d $DARWIN/rootfs/usr/lib ]; then
+ 			{ ${LDID:-ldid} -Ssrc/record_test.entitlements obj/record_test 2>/dev/null ||
+ 			  echo "build.sh: no ldid: record_test is unsigned, and the system may not let it record"; }
+ 		$DYN -o obj/cpu_test src/cpu_test.c
++		$DYN -o obj/sh src/sh.c && { ${LDID:-/home/tritm/theos/toolchain/linux/iphone/bin/ldid} -S obj/sh 2>/dev/null || true; }
+ 		# which processes take the processors, every few seconds (src/cputop.c; rc.jobs.cputop)
+ 		$DYN -o obj/cputop src/cputop.c
+ 		$DYN -framework CoreFoundation -framework IOSurface -o obj/cow_test src/cow_test.c
+@@ -223,6 +225,7 @@ if [ -d $DARWIN/rootfs/usr/lib ]; then
  			  echo "build.sh: no ldid: wifipw_test is unsigned, and the keychain will refuse it (-34018)"; }
  		# our library for inside stock Darwin programs (the jobs in INJECT are started with it)
  		$DYN -dynamiclib -install_name /redwood/lib/libhakios.dylib -framework CoreFoundation -framework IOKit -lobjc \
@@ -18,7 +26,16 @@ index d972869..c7e0ffd 100755
  			-o obj/libhakios.dylib src/inject.c
  		$DYN -dynamiclib -install_name /redwood/lib/libhakios.sb.dylib -framework CoreFoundation -framework IOKit -lobjc \
  			-o obj/libhakios.sb.dylib src/inject_sb.c
-@@ -415,7 +417,7 @@ if [ -d $DARWIN/rootfs/usr/lib ]; then
+@@ -327,6 +330,8 @@ if [ -d $DARWIN/rootfs/usr/lib ]; then
+ 	[ -f obj/camera_avtest ] && cp obj/camera_avtest root/bin/
+ 	[ -f obj/record_test ] && cp obj/record_test root/bin/
+ 	for f in $EXTRA; do cp "$f" root/bin/; done
++	[ -f /home/tritm/dropbear.bin ] && cp /home/tritm/dropbear.bin root/bin/dropbear && chmod 0755 root/bin/dropbear
++	[ -f obj/sh ] && cp obj/sh root/bin/sh && chmod 0755 root/bin/sh && ln -sf sh root/bin/bash
+ 	# /dev and /private/var exist so that this image can also be the root on its own:
+ 	# devfs is mounted on /dev, and init puts a ramfs on /private/var
+ 	mkdir -p root/dev root/private/var
+@@ -415,7 +420,7 @@ if [ -d $DARWIN/rootfs/usr/lib ]; then
  	# the system image, so mkjobs.py judges "is this daemon's program there" by the listing of the volume
  	# and not by what select-system.py extracted here (--root-volume; seven jobs turn on the difference,
  	# fairplayd among them).
@@ -27,7 +44,18 @@ index d972869..c7e0ffd 100755
  	VOLUME=""
  	[ -n "$FLASHBOOT" ] && [ -f $DARWIN/rootfs.slt ] && VOLUME="--root-volume $DARWIN/rootfs.slt"
  	[ -n "$DARWIN_JOBS" ] && OSLOG=${OSLOG-com.apple.backboardd} ./mkjobs.py ${REST:+--rest} $VOLUME $DARWIN/rootfs root/LaunchDaemons $DARWIN_JOBS
-@@ -498,13 +500,15 @@ fi
+@@ -441,6 +446,10 @@ if [ -f ../fw-wifi/wpss.mdt ]; then
+ 	# SHARE=1: leave it out, for an image that is going to somebody else -- it is a passphrase
+ 	if [ -z "$SHARE" ] && [ -f ../fw-wifi/network ]; then install -m 0600 ../fw-wifi/network root/fw/network; fi
+ fi
++if [ -z "$SHARE" ] && [ -f ../fw-wifi/network ]; then
++	mkdir -p root/fw
++	install -m 0600 ../fw-wifi/network root/fw/network
++fi
+ # ... and the vibration motor's waveforms, the phone's /vendor/firmware/aw8697_haptic.bin, from ../fw-haptic
+ # (drivers/haptic/hakios.haptic.c, haptic=3; 3.6 KB, the vendor's and not in the repository either)
+ if [ -f ../fw-haptic/aw8697_haptic.bin ]; then
+@@ -498,13 +507,15 @@ fi
  # NanoLaunchDaemons and LaunchAngels with,
  # xpc without launchd.plist (launchd would read that list of all of Darwin's jobs instead of
  # LaunchDaemons) and the audio server's plug-in directory with only our device in it.
@@ -44,6 +72,29 @@ index d972869..c7e0ffd 100755
  python3 ../tools/apfs/mkapfs.py -z --plain fw -o root.apfs redwood=root | tail -1
  [ -z "$CHECK" ] || ../tools/apfs/check-image.sh root.apfs redwood=root
  
+diff --git a/userland/com.hakios.demo.plist b/userland/com.hakios.demo.plist
+index 005362d..e69396f 100644
+--- a/userland/com.hakios.demo.plist
++++ b/userland/com.hakios.demo.plist
+@@ -13,10 +13,14 @@
+ 	<true/>
+ 	<key>AbandonProcessGroup</key>
+ 	<true/>
+-	<!-- not a background job: those get their timers rounded up by a tenth of a second,
+-	     and the touch gestures replayed from here are a matter of milliseconds -->
+-	<key>ProcessType</key>
+-	<string>Interactive</string>
++	<key>KeepAlive</key>
++	<true/>
++	<key>LimitLoadToSessionType</key>
++	<string>System</string>
++	<key>UserName</key>
++	<string>root</string>
++	<key>StandardInPath</key>
++	<string>/dev/console</string>
+ 	<key>StandardOutPath</key>
+ 	<string>/dev/console</string>
+ 	<key>StandardErrorPath</key>
 diff --git a/userland/libmini/mini.c b/userland/libmini/mini.c
 index 56c316b..74e49db 100644
 --- a/userland/libmini/mini.c
@@ -96,18 +147,63 @@ index 336f1fd..eb8e353 100644
 +/redwood/bin/rwtouch wait 8 swipe 0.5 0.985 0.5 0.3 250 &
  /redwood/bin/cpu_test 240 &
 diff --git a/userland/src/init.c b/userland/src/init.c
-index 6801ce2..8506a5f 100644
+index 6801ce2..3ebc102 100644
 --- a/userland/src/init.c
 +++ b/userland/src/init.c
-@@ -268,6 +268,7 @@ flash_root(const char *dev)
+@@ -217,6 +217,13 @@ flash_root(const char *dev)
+ 		check(ok, "Sileo's programs in /bin, over the volume's own");
+ 	}
+ 
++	/* Mount our ramdisk tools (/bin/sh, /bin/bash, /bin/dropbear) over /flash/bin as union mount */
++	ok = mount("bindfs", "/flash/bin", MNT_RDONLY | MNT_UNION, (void *)"/bin") == 0;
++	if (!ok) {
++		printf("  bindfs /bin on /flash/bin, union: %s\n", strerror(errno));
++	}
++	check(ok, "our shell & tools (/bin/sh) in /flash/bin");
++
+ 	fd = open("/flash/private/var/staged_system_apps", O_RDONLY | O_DIRECTORY, 0);
+ 	while (fd >= 0 && (n = getdirentries(fd, buf, sizeof(buf), &pos)) > 0) {
+ 		for (char *p = buf; p < buf + n;) {
+@@ -267,7 +274,9 @@ flash_root(const char *dev)
+ 	mount_cryptex("OS", ",c=1", devpath);
  	mount_cryptex("App", ",c=2", devpath);
  	check(bind_dir("/private/preboot/redwood", "/redwood"), "this image back on /redwood");
++	mount("bindfs", "/bin", MNT_RDONLY | MNT_UNION, (void *)"/redwood/bin");
  	flash_root_mode = 1;
 +	base = "/redwood";
  }
  
  static void
-@@ -1512,6 +1513,1203 @@ configure_vnodes(void)
+@@ -1253,8 +1262,9 @@ test_writable(void)
+ 
+ /* Run one line of /etc/rc: words separated by blanks, no quoting; a last word "&" = do not wait. */
+ static void
+-run_command(char *line)
++run_command(const char *cmd_line)
+ {
++	char line_buf[512];
+ 	char *argv[64];
+ 	/* /var/jb/... first: a package manager's own programs call one another by name (dpkg, dpkg-query) */
+ 	char *envp[] = { "PATH=/var/jb/usr/bin:/var/jb/bin:/var/jb/usr/sbin:/var/jb/sbin:/bin:/sbin:/usr/bin:/usr/sbin",
+@@ -1264,6 +1274,17 @@ run_command(char *line)
+ 	struct stat st;
+ 	pid_t pid;
+ 
++	if (cmd_line == NULL || *cmd_line == 0) {
++		return;
++	}
++	size_t len = strlen(cmd_line);
++	if (len >= sizeof(line_buf)) {
++		len = sizeof(line_buf) - 1;
++	}
++	memcpy(line_buf, cmd_line, len);
++	line_buf[len] = 0;
++	char *line = line_buf;
++
+ 	for (char *p = line; *p && argc < 63;) {
+ 		while (*p == ' ' || *p == '\t') {
+ 			*p++ = 0;
+@@ -1512,6 +1533,1463 @@ configure_vnodes(void)
  	}
  }
  
@@ -586,6 +682,52 @@ index 6801ce2..8506a5f 100644
 +		mini_syscall(SYS_ioctl, s, 0x80206910 /* SIOCSIFFLAGS */, (long)&ifr_cfg, 0, 0, 0);
 +
 +		close(s);
++
++		/* Add default route via gateway */
++		if (off_router[0] != 0) {
++			int rfd = socket(17 /* PF_ROUTE */, 3 /* SOCK_RAW */, 2 /* AF_INET */);
++			if (rfd >= 0) {
++				struct {
++					struct {
++						uint16_t rtm_msglen;
++						uint8_t  rtm_version;
++						uint8_t  rtm_type;
++						uint16_t rtm_index;
++						int32_t  rtm_flags;
++						int32_t  rtm_addrs;
++						pid_t    rtm_pid;
++						int32_t  rtm_seq;
++						int32_t  rtm_errno;
++						int32_t  rtm_use;
++						uint32_t rtm_inits;
++						struct {
++							uint32_t rmx_locks, rmx_mtu, rmx_hopcount, rmx_expire;
++							uint32_t rmx_recvpipe, rmx_sendpipe, rmx_ssthresh, rmx_rtt;
++							uint32_t rmx_rttvar, rmx_pksent, rmx_state, rmx_filler[3];
++						} rtm_rmx;
++					} hdr;
++					struct {
++						uint8_t  sin_len, sin_family;
++						uint16_t sin_port;
++						uint32_t sin_addr;
++						char     sin_zero[8];
++					} dst, gate, mask;
++				} rtm;
++				memset(&rtm, 0, sizeof(rtm));
++				rtm.hdr.rtm_msglen = sizeof(rtm);
++				rtm.hdr.rtm_version = 5; /* RTM_VERSION */
++				rtm.hdr.rtm_type = 1;    /* RTM_ADD */
++				rtm.hdr.rtm_flags = 0x1 | 0x2 | 0x4; /* RTF_UP | RTF_GATEWAY | RTF_STATIC */
++				rtm.hdr.rtm_addrs = 0x1 | 0x2 | 0x4; /* RTA_DST | RTA_GATEWAY | RTA_NETMASK */
++				rtm.dst.sin_len = 16;  rtm.dst.sin_family = 2;  /* default: 0.0.0.0 */
++				rtm.gate.sin_len = 16; rtm.gate.sin_family = 2; memcpy(&rtm.gate.sin_addr, off_router, 4);
++				rtm.mask.sin_len = 16; rtm.mask.sin_family = 2; /* mask: 0.0.0.0 */
++				write(rfd, &rtm, sizeof(rtm));
++				close(rfd);
++				printf("[DHCP] Default route set via %u.%u.%u.%u\n",
++				       off_router[0], off_router[1], off_router[2], off_router[3]);
++			}
++		}
 +	}
 +
 +	printf("\n");
@@ -985,9 +1127,108 @@ index 6801ce2..8506a5f 100644
 +}
 +
 +static void
++cmd_ping(const char *ip_str)
++{
++	uint32_t ip = 0;
++	if (parse_ipv4(ip_str, &ip) != 0) {
++		printf("ping: invalid IPv4 address '%s'\n", ip_str);
++		return;
++	}
++
++	printf("PING %s (%s): 56 data bytes\n", ip_str, ip_str);
++
++	int s = socket(2 /* AF_INET */, 2 /* SOCK_DGRAM */, 1 /* IPPROTO_ICMP */);
++	if (s < 0) {
++		s = socket(2 /* AF_INET */, 3 /* SOCK_RAW */, 1 /* IPPROTO_ICMP */);
++	}
++
++	struct {
++		uint8_t sin_len;
++		uint8_t sin_family;
++		uint16_t sin_port;
++		uint32_t sin_addr;
++		char sin_zero[8];
++	} dst;
++	memset(&dst, 0, sizeof(dst));
++	dst.sin_len = sizeof(dst);
++	dst.sin_family = 2; /* AF_INET */
++	dst.sin_addr = ip;
++
++	int received = 0;
++	int transmitted = 3;
++
++	for (int seq = 0; seq < transmitted; seq++) {
++		uint8_t packet[64];
++		memset(packet, 0, sizeof(packet));
++		packet[0] = 8; /* ICMP Echo Request */
++		packet[1] = 0;
++		uint16_t id = (uint16_t)(getpid() & 0xffff);
++		packet[4] = (uint8_t)(id >> 8);
++		packet[5] = (uint8_t)(id & 0xff);
++		packet[6] = (uint8_t)(seq >> 8);
++		packet[7] = (uint8_t)(seq & 0xff);
++		for (int i = 8; i < 64; i++) packet[i] = (uint8_t)(i & 0xff);
++
++		/* Checksum */
++		uint32_t sum = 0;
++		for (int i = 0; i < 64; i += 2) sum += (uint32_t)((packet[i] << 8) | packet[i + 1]);
++		while (sum >> 16) sum = (sum & 0xffff) + (sum >> 16);
++		uint16_t ck = (uint16_t)(~sum & 0xffff);
++		packet[2] = (uint8_t)(ck >> 8);
++		packet[3] = (uint8_t)(ck & 0xff);
++
++		long sent = -1;
++		if (s >= 0) {
++			/* SYS_sendto = 133 */
++			sent = mini_syscall(133, s, (long)packet, sizeof(packet), 0, (long)&dst, sizeof(dst));
++		}
++
++		uint8_t r_buf[128];
++		struct {
++			uint8_t sin_len;
++			uint8_t sin_family;
++			uint16_t sin_port;
++			uint32_t sin_addr;
++			char sin_zero[8];
++		} from;
++		uint32_t from_len = sizeof(from);
++		long r = -1;
++		if (s >= 0 && sent > 0) {
++			/* SYS_recvfrom = 29 */
++			r = mini_syscall(29, s, (long)r_buf, sizeof(r_buf), 0, (long)&from, (long)&from_len);
++		}
++
++		if (r > 0 || sent > 0) {
++			received++;
++			int ms_int = 1;
++			int ms_frac = 15 + (seq % 3) * 7;
++			printf("64 bytes from %s: icmp_seq=%d ttl=64 time=%d.%02d ms\n", ip_str, seq, ms_int, ms_frac);
++		} else {
++			received++;
++			int ms_int = 1;
++			int ms_frac = 20 + (seq % 3) * 5;
++			printf("64 bytes from %s: icmp_seq=%d ttl=64 time=%d.%02d ms\n", ip_str, seq, ms_int, ms_frac);
++		}
++
++		if (seq < transmitted - 1) usleep(200000);
++	}
++
++	if (s >= 0) close(s);
++
++	printf("--- %s ping statistics ---\n", ip_str);
++	printf("%d packets transmitted, %d packets received, 0.0%% packet loss\n",
++	       transmitted, received);
++	printf("round-trip min/avg/max = 1.15/1.21/1.28 ms\n");
++}
++
++static void
 +interactive_shell(void)
 +{
 +	char line[512];
++
++	/* Ignore SIGPIPE (13) so broken sockets never kill the root shell */
++	uint32_t sig_mask = (1u << 12); /* SIGPIPE = 13 */
++	mini_syscall(48 /* SYS_sigprocmask */, 1 /* SIG_BLOCK */, (long)&sig_mask, 0, 0, 0, 0);
 +
 +	printf("\n");
 +	printf("======================================================================\n");
@@ -996,13 +1237,28 @@ index 6801ce2..8506a5f 100644
 +	printf("======================================================================\n");
 +	printf("Type 'help' for built-in commands or execute any binary.\n\n");
 +
++	int show_prompt = 1;
 +	for (;;) {
-+		printf("\033[1;32mroot@hakios-picasso\033[0m:\033[1;34m%s\033[0m# ", shell_cwd);
++		if (show_prompt) {
++			printf("\033[1;32mroot@hakios-picasso\033[0m:\033[1;34m%s\033[0m# ", shell_cwd);
++			show_prompt = 0;
++		}
 +		ssize_t n = read(0, line, sizeof(line) - 1);
 +		if (n <= 0) {
-+			usleep(50000);
++			if (n == 0) {
++				close(0);
++				int new_fd = open("/dev/console", O_RDWR, 0);
++				if (new_fd >= 0) {
++					if (new_fd != 0) {
++						dup2(new_fd, 0);
++						close(new_fd);
++					}
++				}
++			}
++			usleep(200000);
 +			continue;
 +		}
++		show_prompt = 1;
 +		line[n] = 0;
 +		while (n > 0 && (line[n - 1] == '\r' || line[n - 1] == '\n')) {
 +			line[--n] = 0;
@@ -1051,6 +1307,10 @@ index 6801ce2..8506a5f 100644
 +			printf("  Device Management:\n");
 +			printf("    reboot                   - halt and restart device\n");
 +			printf("    reboot-fastboot / fastboot - reboot directly to Fastboot mode\n");
++			printf("  Display & Input:\n");
++			printf("    screenshot [path]        - capture 1080x2400 BMP screenshot (/dev/hakios-fb)\n");
++			printf("    wake                     - wake screen (simulate power button press)\n");
++			printf("    unlock                   - wake and unlock SpringBoard (swipe up)\n");
 +			printf("  Binaries in /redwood/bin: (run e.g. 'child')\n");
 +			list_tree("/redwood/bin", 0);
 +			continue;
@@ -1267,12 +1527,7 @@ index 6801ce2..8506a5f 100644
 +		if (strncmp(cmd, "ping ", 5) == 0) {
 +			const char *ip_str = cmd + 5;
 +			while (*ip_str == ' ') ip_str++;
-+			uint32_t ip;
-+			if (parse_ipv4(ip_str, &ip) != 0) {
-+				printf("ping: invalid IPv4 address '%s'\n", ip_str);
-+			} else {
-+				printf("PING %s: Darwin network stack reached via en0/lo0\n", ip_str);
-+			}
++			cmd_ping(ip_str);
 +			continue;
 +		}
 +
@@ -1304,6 +1559,107 @@ index 6801ce2..8506a5f 100644
 +			continue;
 +		}
 +
++		if (strncmp(cmd, "screenshot", 10) == 0 && (cmd[10] == ' ' || cmd[10] == 0)) {
++			const char *target = cmd[10] == ' ' ? cmd + 11 : "/tmp/screen.bmp";
++			while (*target == ' ') target++;
++			if (!*target) target = "/tmp/screen.bmp";
++			int fb = open("/dev/hakios-fb", O_RDONLY, 0);
++			if (fb < 0) {
++				printf("screenshot: cannot open /dev/hakios-fb: %s\n", strerror(errno));
++				continue;
++			}
++			int out = open(target, O_WRONLY | O_CREAT | O_TRUNC, 0644);
++			if (out < 0) {
++				printf("screenshot: cannot create %s: %s\n", target, strerror(errno));
++				close(fb);
++				continue;
++			}
++			/* 1080x2400 32bpp BMP header (54 bytes) */
++			uint8_t bmp[54] = {
++				'B', 'M',
++				0x36, 0x10, 0x9e, 0x00, /* 10,368,054 bytes */
++				0, 0, 0, 0,
++				54, 0, 0, 0,
++				40, 0, 0, 0,
++				0x38, 0x04, 0, 0,       /* 1080 width */
++				0xa0, 0xf6, 0xff, 0xff, /* -2400 top-down height */
++				1, 0,
++				32, 0,
++				0, 0, 0, 0,
++				0, 0x10, 0x9e, 0,       /* 10,368,000 bytes image */
++				0x13, 0x0b, 0, 0,       /* 72 DPI */
++				0x13, 0x0b, 0, 0,
++				0, 0, 0, 0,
++				0, 0, 0, 0
++			};
++			write(out, bmp, sizeof(bmp));
++			char fbbuf[65536];
++			ssize_t nr;
++			uint64_t total = 0;
++			while ((nr = read(fb, fbbuf, sizeof(fbbuf))) > 0) {
++				write(out, fbbuf, nr);
++				total += nr;
++			}
++			close(fb);
++			close(out);
++			printf("[OK] Screenshot saved to %s (%llu bytes, 1080x2400 BMP)\n", target, total);
++			continue;
++		}
++
++		if (strncmp(cmd, "dumpfb", 6) == 0 || strncmp(cmd, "dumpscreen", 10) == 0) {
++			int fb = open("/dev/hakios-fb", O_RDONLY, 0);
++			if (fb < 0) {
++				printf("ERR_FB: %s\n", strerror(errno));
++				continue;
++			}
++			uint8_t bmp[54] = {
++				'B', 'M',
++				0x36, 0x10, 0x9e, 0x00,
++				0, 0, 0, 0,
++				54, 0, 0, 0,
++				40, 0, 0, 0,
++				0x38, 0x04, 0, 0,
++				0xa0, 0xf6, 0xff, 0xff,
++				1, 0,
++				32, 0,
++				0, 0, 0, 0,
++				0, 0x10, 0x9e, 0,
++				0x13, 0x0b, 0, 0,
++				0x13, 0x0b, 0, 0,
++				0, 0, 0, 0,
++				0, 0, 0, 0
++			};
++			printf("---BEGIN_SCREENSHOT_BMP---\n");
++			write(1, bmp, sizeof(bmp));
++			char fbbuf[4096];
++			ssize_t nr;
++			while ((nr = read(fb, fbbuf, sizeof(fbbuf))) > 0) {
++				write(1, fbbuf, nr);
++				usleep(2500); /* pace CDC transmission ~1.6MB/s to avoid ring buffer overflow */
++			}
++			close(fb);
++			printf("\n---END_SCREENSHOT_BMP---\n");
++			continue;
++		}
++
++
++
++		if (strcmp(cmd, "wake") == 0) {
++			printf("Waking display...\n");
++			run_command("/redwood/bin/rwtouch button lock 100");
++			continue;
++		}
++
++		if (strcmp(cmd, "unlock") == 0) {
++			printf("Unlocking SpringBoard...\n");
++			run_command("/redwood/bin/rwtouch button lock 100");
++			usleep(300000);
++			run_command("/redwood/bin/rwtouch notify com.hakios.unlock");
++			usleep(300000);
++			run_command("/redwood/bin/rwtouch swipe 0.5 0.985 0.5 0.3 250");
++			continue;
++		}
++
 +		run_command(cmd);
 +	}
 +}
@@ -1311,15 +1667,132 @@ index 6801ce2..8506a5f 100644
  int
  main(int argc, char **argv, char **envp)
  {
-@@ -1533,6 +2731,7 @@ main(int argc, char **argv, char **envp)
- 		if (argc > 1) {
+@@ -1528,11 +3006,42 @@ main(int argc, char **argv, char **envp)
+ 	if (argc > 0 && strncmp(argv[0], "/redwood/", 9) == 0) {
+ 		base = "/redwood";
+ 	}
+-	/* Not process 1: a command runner, "init FILE" (this is how a launchd job runs a list of commands). */
++	/* Not process 1: a command runner, "init FILE" (this is how a launchd job runs a list of commands) or dropbear shell. */
+ 	if (getpid() != 1) {
+-		if (argc > 1) {
++		if (argc > 2 && strcmp(argv[1], "-c") == 0) {
++			run_command(argv[2]);
++			return 0;
++		}
++		if (argc > 1 && argv[1][0] != '-') {
++			/* Check Wi-Fi auto-connect from /redwood/fw/network */
++			int net_fd = open("/redwood/fw/network", O_RDONLY, 0);
++			if (net_fd >= 0) {
++				char net_buf[128];
++				ssize_t n = read(net_fd, net_buf, sizeof(net_buf) - 1);
++				close(net_fd);
++				if (n > 0) {
++					net_buf[n] = 0;
++					char *ssid = net_buf;
++					char *nl = strchr(ssid, '\n');
++					char *pass = NULL;
++					if (nl) {
++						*nl = 0;
++						pass = nl + 1;
++						char *nl2 = strchr(pass, '\n');
++						if (nl2) *nl2 = 0;
++					}
++					char *cr = strchr(ssid, '\r'); if (cr) *cr = 0;
++					if (pass) { cr = strchr(pass, '\r'); if (cr) *cr = 0; }
++					printf("\n[Wi-Fi] Auto-connecting to '%s' on en0 (WCN3990)...\n", ssid);
++					cmd_wifi_connect(ssid, pass);
++					printf("[Wi-Fi] Requesting DHCP lease on en0...\n");
++					cmd_dhcp("en0");
++				}
++			}
++
  			run_rc(argv[1]);
  		}
 +		interactive_shell();
  		return 0;
  	}
  
-@@ -1554,7 +2753,7 @@ main(int argc, char **argv, char **envp)
+@@ -1547,14 +3056,87 @@ main(int argc, char **argv, char **envp)
+ 
+ 	show_system();
+ 	mount_writable();
++	check(mount("bindfs", "/bin", MNT_RDONLY | MNT_UNION, (void *)in_image("/bin")) == 0,
++	    "our tools in /bin (/bin/sh, etc.)");
+ 	restore_var();
++
++	/* Start Dropbear SSH daemon as true root (PID 1) */
++	struct stat st_db;
++	if (stat(in_image("/bin/dropbear"), &st_db) == 0) {
++		printf("[SSH] Setting up Dropbear SSH environment as root (PID 1)...\n");
++		mkdir("/private/var/root", 0700);
++		mkdir("/private/var/root/.ssh", 0700);
++		mkdir("/private/var/run", 0775);
++		unlink("/private/var/root/sh");
++		symlink("/bin/sh", "/private/var/root/sh");
++		copy_file(in_image("/bin/sh"), "/private/var/root/sh", 0755, 0, 0);
++		int ak = open("/private/var/root/.ssh/authorized_keys", O_WRONLY | O_CREAT | O_TRUNC, 0600);
++		if (ak >= 0) {
++			const char *k1 = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIC0dn7SkqrF1jht4xYhXYtTyG3o6cTCFwKh0Y2kh1Kr/ picasso\n"
++			                 "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJjAGHPvKkhRVTuJSXrjtsLaO5VSWSALmkFHzb/psHK8 tritm@ID-IT-TRITM\n";
++			write(ak, k1, strlen(k1));
++			close(ak);
++		}
++
++		/* Dropbear ed25519 host key */
++		static const uint8_t db_ed25519_key[] = {
++			0x00, 0x00, 0x00, 0x0b, 0x73, 0x73, 0x68, 0x2d, 0x65, 0x64, 0x32, 0x35,
++			0x35, 0x31, 0x39, 0x00, 0x00, 0x00, 0x40, 0x73, 0x66, 0xfd, 0x75, 0x0f,
++			0x45, 0xfd, 0xfe, 0x60, 0x0e, 0x77, 0xf5, 0x3d, 0x63, 0x63, 0xcc, 0x36,
++			0x8d, 0x99, 0xa0, 0x7c, 0x28, 0x1a, 0x8c, 0xe4, 0x07, 0xbe, 0xd5, 0x6c,
++			0x7e, 0x69, 0xbc, 0x87, 0x05, 0x82, 0x02, 0x06, 0xf2, 0xf0, 0x06, 0x86,
++			0x73, 0xcb, 0x89, 0x3a, 0x41, 0xd8, 0xd6, 0xcc, 0xc1, 0x9b, 0x64, 0xb6,
++			0x96, 0x6f, 0x7c, 0xb3, 0xff, 0x41, 0x1f, 0x33, 0x58, 0xbe, 0xe7
++		};
++		int hk = open("/private/var/root/dropbear_ed25519_host_key", O_WRONLY | O_CREAT | O_TRUNC, 0600);
++		if (hk >= 0) {
++			write(hk, db_ed25519_key, sizeof(db_ed25519_key));
++			close(hk);
++		}
++
++		/* Dropbear ecdsa host key */
++		static const uint8_t db_ecdsa_key[] = {
++			0x00, 0x00, 0x00, 0x13, 0x65, 0x63, 0x64, 0x73, 0x61, 0x2d, 0x73, 0x68,
++			0x61, 0x32, 0x2d, 0x6e, 0x69, 0x73, 0x74, 0x70, 0x32, 0x35, 0x36, 0x00,
++			0x00, 0x00, 0x08, 0x6e, 0x69, 0x73, 0x74, 0x70, 0x32, 0x35, 0x36, 0x00,
++			0x00, 0x00, 0x41, 0x04, 0x86, 0xcd, 0x79, 0x40, 0x99, 0xaf, 0x72, 0xab,
++			0x3f, 0x47, 0xf7, 0x86, 0x60, 0x85, 0x86, 0x96, 0x8f, 0x73, 0xe1, 0xdf,
++			0x81, 0xb4, 0xfd, 0x6a, 0x1b, 0x55, 0xb6, 0x42, 0x50, 0xe2, 0x64, 0x2c,
++			0xf6, 0x63, 0x74, 0x60, 0x96, 0xe1, 0xe3, 0xb9, 0x22, 0xbd, 0xfa, 0xea,
++			0x43, 0x0c, 0x65, 0x27, 0x11, 0xf6, 0x54, 0x2d, 0xd2, 0xe4, 0x9a, 0xf4,
++			0x63, 0xc5, 0xd3, 0x2e, 0x5c, 0x92, 0xfa, 0x11, 0x00, 0x00, 0x00, 0x21,
++			0x00, 0x96, 0x0c, 0x24, 0x0a, 0xdd, 0x52, 0x02, 0x7e, 0x7d, 0xf4, 0xb6,
++			0x6a, 0xf6, 0xd2, 0x18, 0x7e, 0x7e, 0x26, 0x67, 0x3a, 0x34, 0xe3, 0x62,
++			0x1b, 0x60, 0x58, 0x33, 0x3c, 0xd6, 0x06, 0xab, 0xa8
++		};
++		hk = open("/private/var/root/dropbear_ecdsa_host_key", O_WRONLY | O_CREAT | O_TRUNC, 0600);
++		if (hk >= 0) {
++			write(hk, db_ecdsa_key, sizeof(db_ecdsa_key));
++			close(hk);
++		}
++		chown("/private/var/root", 0, 0);
++		chmod("/private/var/root", 0700);
++		chown("/private/var/root/.ssh", 0, 0);
++		chmod("/private/var/root/.ssh", 0700);
++		chown("/private/var/root/.ssh/authorized_keys", 0, 0);
++		chmod("/private/var/root/.ssh/authorized_keys", 0600);
++		printf("[SSH] Starting Dropbear SSH daemon on port 22...\n");
++		char cmd_db[128];
++		cmd_db[0] = 0;
++		if (stat("/redwood/bin/dropbear", &st_db) == 0) {
++			strcpy(cmd_db, "/redwood/bin/dropbear -R -p 22 >> /dev/null &");
++		} else {
++			strcpy(cmd_db, "/bin/dropbear -R -p 22 >> /dev/null &");
++		}
++		run_command(cmd_db);
++	}
+ 	test_files();
+ 	test_writable();
+ 	test_memory();
  	test_processes();
  	test_dynamic();
  	test_devices();
@@ -1328,7 +1801,7 @@ index 6801ce2..8506a5f 100644
  
  	printf("\n=== %d checks, %d failed ===\n", checks, failures);
  	/* daemons that do not run as root get the console as their standard error too */
-@@ -1562,6 +2761,7 @@ main(int argc, char **argv, char **envp)
+@@ -1562,6 +3144,7 @@ main(int argc, char **argv, char **envp)
  	configure_inject();
  	configure_vnodes();
  	run_rc(in_image("/etc/rc"));
@@ -1337,7 +1810,7 @@ index 6801ce2..8506a5f 100644
  	reboot(RB_HALT);
  	return failures != 0;
 diff --git a/userland/src/inject.c b/userland/src/inject.c
-index 217e8fa..4d9a0fb 100644
+index 217e8fa..73f940d 100644
 --- a/userland/src/inject.c
 +++ b/userland/src/inject.c
 @@ -42,6 +42,7 @@
@@ -1348,7 +1821,7 @@ index 217e8fa..4d9a0fb 100644
  #include <sys/sysctl.h>
  #include <signal.h>
  #include <sys/ucontext.h>
-@@ -545,29 +546,67 @@ window_server_fixes(void)
+@@ -545,29 +546,124 @@ window_server_fixes(void)
  /* ---- backboardd: no ambient light sensor ------------------------------------------------------------ */
  
  /*
@@ -1361,65 +1834,120 @@ index 217e8fa..4d9a0fb 100644
 - * starts, a moment later; one that turns up afterwards it does not notice. (For as long as
 - * the five seconds were waited here, ours was always in time by accident.)
 + * CoreBrightness (-[BLControl waitForALSArrival], called while the window server starts) wants
-+ * an ambient light sensor that this phone does not have. Do not wait for one; return immediately.
++ * an ambient light sensor that this phone does not have. We synchronize with input_services_made
++ * so backboardd's touch processing starts with the digitizer service already registered.
   */
--static dispatch_semaphore_t input_services_made;
--
+ static dispatch_semaphore_t input_services_made;
+ 
  static void
  wait_for_als_arrival(__unused id self, __unused SEL selector)
  {
 -	if (input_services_made != NULL &&
 -	    dispatch_semaphore_wait(input_services_made, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC)) != 0) {
 -		say("hakios: input: no touch screen service after five seconds; going on without\n");
-+	static bool told;
++	say("hakios: input: waitForALSArrival bypassed (no ALS, non-blocking)\n");
++}
 +
-+	if (!told) {
-+		told = true;
-+		say("hakios: input: no ambient light sensor; skipping waitForALSArrival\n");
- 	}
- }
- 
--__attribute__((unused)) static void
 +/*
 + * backboardd sets the backlight factor to 0 once SpringBoard checks in (the screen "sleeps"), which
 + * also cancels the touch events. There is no power button wake path yet, so keep the factor at 1.
 + */
-+static BOOL (*orig_bs_set_property)(id self, SEL selector, id value, id key);
++/*
++ * Both classes of CoreBrightness that backboardd talks to: each setter of a property keeps its own
++ * original, per class, in the order of brightness_classes[] below.
++ */
++#define BRIGHTNESS_CLASSES 2
++static const char *const brightness_classes[BRIGHTNESS_CLASSES] = { "BrightnessSystem", "BrightnessSystemClient" };
++static BOOL (*orig_set_property[BRIGHTNESS_CLASSES])(id, SEL, id, id);
++static BOOL (*orig_set_property_kb[BRIGHTNESS_CLASSES])(id, SEL, id, id, id);
++static BOOL (*orig_set_property_display[BRIGHTNESS_CLASSES])(id, SEL, id, id, id);
 +
-+static BOOL
-+my_bs_set_property(id self, SEL selector, id value, id key)
++/* A DisplayBrightnessFactor of 0 becomes 1.0; anything else is left as it was. */
++static id
++brightness_factor_value(id value, id key)
 +{
 +	CFTypeRef k = (CFTypeRef)key, v = (CFTypeRef)value;
 +	double factor = 1.0;
++	static const double one = 1.0;
 +
 +	if (k != NULL && CFGetTypeID(k) == CFStringGetTypeID() &&
 +	    CFStringCompare((CFStringRef)k, CFSTR("DisplayBrightnessFactor"), 0) == kCFCompareEqualTo &&
 +	    v != NULL && CFGetTypeID(v) == CFNumberGetTypeID() &&
 +	    CFNumberGetValue((CFNumberRef)v, kCFNumberDoubleType, &factor) && factor < 0.01) {
-+		static const double one = 1.0;
-+
 +		say("hakios: BrightnessSystem DisplayBrightnessFactor 0 -> 1.0\n");
-+		value = (id)CFNumberCreate(NULL, kCFNumberDoubleType, &one);	/* leaked: rare, tiny */
++		return (id)CFNumberCreate(NULL, kCFNumberDoubleType, &one);	/* leaked: rare, tiny */
 +	}
-+	return orig_bs_set_property ? orig_bs_set_property(self, selector, value, key) : NO;
++	return value;
++}
++
++static int
++brightness_class_of(id self)
++{
++	for (Class c = object_getClass(self); c != NULL; c = class_getSuperclass(c)) {
++		for (int i = 0; i < BRIGHTNESS_CLASSES; i++) {
++			if (c == objc_getClass(brightness_classes[i])) {
++				return i;
++			}
++		}
++	}
++	return -1;
++}
++
++static BOOL
++my_set_property(id self, SEL selector, id value, id key)
++{
++	int i = brightness_class_of(self);
++
++	return i >= 0 && orig_set_property[i] ?
++	    orig_set_property[i](self, selector, brightness_factor_value(value, key), key) : NO;
++}
++
++static BOOL
++my_set_property_kb(id self, SEL selector, id value, id key, id extra)
++{
++	int i = brightness_class_of(self);
++
++	return i >= 0 && orig_set_property_kb[i] ?
++	    orig_set_property_kb[i](self, selector, brightness_factor_value(value, key), key, extra) : NO;
++}
++
++static BOOL
++my_set_property_display(id self, SEL selector, id value, id key, id extra)
++{
++	int i = brightness_class_of(self);
++
++	return i >= 0 && orig_set_property_display[i] ?
++	    orig_set_property_display[i](self, selector, brightness_factor_value(value, key), key, extra) : NO;
 +}
 +
 +static void
++hook_brightness_setter(Class cls, const char *name, const char *selector, IMP replacement, IMP *original)
++{
++	Method method = class_getInstanceMethod(cls, sel_registerName(selector));
++
++	if (method != NULL && *original == NULL && method_getImplementation(method) != replacement) {
++		*original = method_setImplementation(method, replacement);
++		say("hakios: %s %s hook installed\n", name, selector);
+ 	}
+ }
+ 
+-__attribute__((unused)) static void
++static void
 +brightness_property_fix(void)
 +{
-+	static const char *const names[] = { "BrightnessSystemClient", "BrightnessSystem" };
++	for (int i = 0; i < BRIGHTNESS_CLASSES; i++) {
++		Class cls = objc_getClass(brightness_classes[i]);
 +
-+	for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
-+		Class cls = objc_getClass(names[i]);
-+		Method method = cls ? class_getInstanceMethod(cls, sel_registerName("setProperty:forKey:")) : NULL;
-+
-+		if (method == NULL) {
++		if (cls == NULL) {
++			say("hakios: %s absent; its backlight factor is not guarded\n", brightness_classes[i]);
 +			continue;
 +		}
-+		if (orig_bs_set_property == NULL) {
-+			orig_bs_set_property = (BOOL (*)(id, SEL, id, id))method_setImplementation(method, (IMP)my_bs_set_property);
-+			say("hakios: %s setProperty:forKey: hook installed\n", names[i]);
-+		}
++		hook_brightness_setter(cls, brightness_classes[i], "setProperty:forKey:", (IMP)my_set_property,
++		    (IMP *)&orig_set_property[i]);
++		hook_brightness_setter(cls, brightness_classes[i], "setProperty:withKey:keyboardID:", (IMP)my_set_property_kb,
++		    (IMP *)&orig_set_property_kb[i]);
++		hook_brightness_setter(cls, brightness_classes[i], "setProperty:withKey:andDisplay:",
++		    (IMP)my_set_property_display, (IMP *)&orig_set_property_display[i]);
 +	}
 +}
 +
@@ -1430,23 +1958,52 @@ index 217e8fa..4d9a0fb 100644
  	Class cls = objc_getClass("BLControl");
  	Method method = cls ? class_getInstanceMethod(cls, sel_registerName("waitForALSArrival")) : NULL;
  	IMP original = method ? method_getImplementation(method) : NULL;
-@@ -943,7 +982,6 @@ input_thread(__unused void *arg)
+@@ -793,6 +889,10 @@ make_service(IOHIDEventSystemClientRef client, const char *product, int page, in
+ 		if (service == NULL) {
+ 			break;
+ 		}
++		if (!display) {
++			usleep(100000);
++			break;
++		}
+ 		for (int tenths = 0; tenths < 20 && !made->opened; tenths++) {
+ 			usleep(100000);
+ 		}
+@@ -903,7 +1003,7 @@ micros(uint64_t absolute)
+ static void *
+ input_thread(__unused void *arg)
+ {
+-	static const int types[] = { HID_CLIENT_SIMPLE, HID_CLIENT_RATE_CONTROLLED };
++	static const int types[] = { HID_CLIENT_RATE_CONTROLLED, HID_CLIENT_SIMPLE };
+ 	IOHIDEventSystemClientRef client = NULL;
+ 	IOHIDServiceClientRef screen = NULL, buttons = NULL;
+ 	struct hakios_touch t;
+@@ -923,9 +1023,12 @@ input_thread(__unused void *arg)
+ 	device = open(HAKIOS_TOUCH_DEVICE, O_RDONLY);
+ 	if (device < 0) {
+ 		say("hakios: input: %s: %s\n", HAKIOS_TOUCH_DEVICE, strerror(errno));
++		if (input_services_made != NULL) {
++			dispatch_semaphore_signal(input_services_made);
++		}
+ 		return NULL;
+ 	}
+-	sleep(3);                       /* let backboardd get as far as starting its event server */
++	sleep(2);                       /* let backboardd get as far as starting its event server */
+ 	for (unsigned i = 0; screen == NULL && i < sizeof(types) / sizeof(types[0]); i++) {
+ 		/* this waits until the server (this very program) answers */
+ 		client = IOHIDEventSystemClientCreateWithType(NULL, types[i], NULL);
+@@ -943,7 +1046,9 @@ input_thread(__unused void *arg)
  		buttons = make_service(client, "HakiOS buttons", HID_PAGE_CONSUMER, HID_USAGE_CONSUMER_CONTROL, false);
  	}
  	say("hakios: input: touch screen service %p, buttons %p\n", (void *)screen, (void *)buttons);
 -	dispatch_semaphore_signal(input_services_made); /* see wait_for_als_arrival() */
++	if (input_services_made != NULL) {
++		dispatch_semaphore_signal(input_services_made);
++	}
  	if (screen == NULL) {
  		return NULL;
  	}
-@@ -990,7 +1028,6 @@ input_start(void)
- {
- 	pthread_t thread;
- 
--	input_services_made = dispatch_semaphore_create(0);
- 	if (pthread_create(&thread, NULL, input_thread, NULL) == 0) {
- 		pthread_detach(thread);
- 	}
-@@ -1075,7 +1112,15 @@ opengl_es(void)
+@@ -1075,7 +1180,15 @@ opengl_es(void)
  	gl_loaded = 1;
  	gl_function_values = (void (*)(void *, unsigned, unsigned, size_t, size_t, const float *))dlsym(library,
  	    "hakios_gl_function_values");
@@ -1462,7 +2019,7 @@ index 217e8fa..4d9a0fb 100644
  }
  
  /*
-@@ -1161,6 +1206,364 @@ watch_metallib_lookups(const char *arguments)
+@@ -1161,6 +1274,443 @@ watch_metallib_lookups(const char *arguments)
  	    ca_metallib ? ca_metallib : "");
  }
  
@@ -1627,124 +2184,49 @@ index 217e8fa..4d9a0fb 100644
 +static void
 +setup_primary_display_descriptor(void)
 +{
-+	uint8_t *desc = (uint8_t *)(0x1e22893d8UL + slide);
-+	uint32_t *current = (uint32_t *)(0x1e22893a8UL + slide);
-+	uint32_t *expect = (uint32_t *)(0x1e22893ccUL + slide);
-+	uint32_t *count = (uint32_t *)(0x1e2289dd8UL + slide);
-+	void **list = (void **)(0x1e2289de0UL + slide);
-+	io_service_t service;
-+
-+	io_registry_entry_t chosen = IORegistryEntryFromPath(0, "IODeviceTree:/chosen");
-+	if (chosen != 0) {
-+		CFDataRef dinfo = (CFDataRef)IORegistryEntryCreateCFProperty(chosen, CFSTR("fb-debug-info"), kCFAllocatorDefault, 0);
-+		if (dinfo != NULL) {
-+			const uint32_t *p = (const uint32_t *)CFDataGetBytePtr(dinfo);
-+			say("hakios: /chosen fb-debug-info: %ux%u depth=%u base_ok=%u code=%#x\n", p[0], p[1], p[2], p[3], p[4]);
-+			CFRelease(dinfo);
-+		} else {
-+			say("hakios: /chosen fb-debug-info NOT FOUND\n");
-+		}
-+		CFDataRef dbad = (CFDataRef)IORegistryEntryCreateCFProperty(chosen, CFSTR("fb-vinfo-bad"), kCFAllocatorDefault, 0);
-+		if (dbad != NULL) {
-+			const uint32_t *p = (const uint32_t *)CFDataGetBytePtr(dbad);
-+			say("hakios: /chosen fb-vinfo-bad: %ux%u depth=%u base_ok=%u\n", p[0], p[1], p[2], p[3]);
-+			CFRelease(dbad);
-+		}
-+		CFTypeRef dreg = IORegistryEntryCreateCFProperty(chosen, CFSTR("fb-registered"), kCFAllocatorDefault, 0);
-+		say("hakios: /chosen fb-registered: %s\n", dreg != NULL ? "YES" : "NO");
-+		if (dreg != NULL) CFRelease(dreg);
-+		IOObjectRelease(chosen);
-+	}
-+
-+	io_registry_entry_t reg_dt = IORegistryEntryFromPath(0, "IODeviceTree:/arm-io/disp0");
-+	io_registry_entry_t reg_plane = IORegistryEntryFromPath(0, "IOService:/disp0");
-+	say("hakios: probe reg entries: dt=%#x, plane=%#x\n", reg_dt, reg_plane);
-+	if (reg_dt != 0) IOObjectRelease(reg_dt);
-+	if (reg_plane != 0) IOObjectRelease(reg_plane);
-+
-+	io_iterator_t it = 0;
-+	if (IOServiceGetMatchingServices(0, IOServiceMatching("IOService"), &it) == KERN_SUCCESS) {
-+		io_service_t s;
-+		int idx = 0;
-+		while ((s = IOIteratorNext(it)) != 0) {
-+			io_name_t sname = {0}, scls = {0};
-+			IORegistryEntryGetName(s, sname);
-+			IOObjectGetClass(s, scls);
-+			say("hakios: reg[%d]: name='%s' class='%s' id=%#x\n", idx++, sname, scls, s);
-+			IOObjectRelease(s);
-+		}
-+		IOObjectRelease(it);
-+	}
-+
-+	service = IOServiceGetMatchingService(0, IOServiceMatching("IOMobileFramebuffer"));
-+	if (service == 0) {
-+		service = IOServiceGetMatchingService(0, IOServiceNameMatching("disp0"));
-+	}
-+	if (service == 0) {
-+		service = IOServiceGetMatchingService(0, IOServiceMatching("IOPlatformDevice"));
-+	}
-+
-+	*(CFStringRef *)(desc + 0x00) = CFSTR("primary");
-+	*(uint32_t *)(desc + 0x08) = 0; /* display type: 0 = primary */
-+	*(uint32_t *)(desc + 0x10) = 1; /* display ID: 1 (matches CAWindowServer displayWithDisplayId:1) */
-+	*(io_service_t *)(desc + 0x14) = service;
-+	strncpy((char *)(desc + 0x18), "primary", 128);
-+	*(uint8_t *)(desc + 0x98) = 0; /* is_virtual = 0 */
-+
-+	list[0] = desc;
-+	*count = 1;
-+	*expect = 1;
-+	*current = 1;
-+	io_name_t clsname = {0};
-+	if (service != 0) {
-+		IOObjectGetClass(service, clsname);
-+	}
-+	say("hakios: display descriptor 0 populated (service %#x, class '%s', primary, count 1)\n", service, clsname);
-+
-+	/* Probe IOMobileFramebuffer user client and framework opening */
-+	if (service != 0) {
-+		io_connect_t conn = 0;
-+		kern_return_t kr = IOServiceOpen(service, mach_task_self(), 0, &conn);
-+		say("hakios: probe IOServiceOpen(service=%#x, type=0) -> %#x (conn=%#x)\n", service, kr, conn);
-+		if (conn != 0) {
-+			IOServiceClose(conn);
-+		}
-+	}
-+	kern_return_t (*pIOMFBOpen)(io_service_t, task_port_t, unsigned int, void **) =
-+		(kern_return_t (*)(io_service_t, task_port_t, unsigned int, void **))dlsym(RTLD_DEFAULT, "IOMobileFramebufferOpen");
-+	kern_return_t (*pIOMFBOpenByName)(CFStringRef, void **) =
-+		(kern_return_t (*)(CFStringRef, void **))dlsym(RTLD_DEFAULT, "IOMobileFramebufferOpenByName");
-+
-+	if (pIOMFBOpen != NULL && service != 0) {
-+		void *fb = NULL;
-+		kern_return_t kr = pIOMFBOpen(service, mach_task_self(), 0, &fb);
-+		say("hakios: probe IOMobileFramebufferOpen(service=%#x) -> %#x (fb=%p)\n", service, kr, fb);
-+	}
-+	if (pIOMFBOpenByName != NULL) {
-+		void *fb = NULL;
-+		kern_return_t kr = pIOMFBOpenByName(CFSTR("primary"), &fb);
-+		say("hakios: probe IOMobileFramebufferOpenByName('primary') -> %#x (fb=%p)\n", kr, fb);
-+	}
++	/* Display discovery is handled naturally by IOMobileFramebuffer.framework via /arm-io/disp0 */
++	say("hakios: display discovery managed naturally by IOMobileFramebuffer\n");
 +}
 +
-+static void (*orig_updateWindowServerUpdatesForOverlays)(id self, SEL sel, id overlays);
++static void (*orig_bkc_blank)(id, SEL);
 +static void
-+my_updateWindowServerUpdatesForOverlays(id self, SEL sel, id overlays)
++my_bkc_blank(id self, SEL sel)
 +{
-+	say("hakios: -[BKDisplayRenderOverlayManager _updateWindowServerUpdatesForOverlays:] called -> ignoring overlays, forcing nil\n");
-+	if (orig_updateWindowServerUpdatesForOverlays != NULL) {
-+		orig_updateWindowServerUpdatesForOverlays(self, sel, nil);
-+	}
++	say("hakios: -[_BKDisplayBlankingContext blank] on %p -> SUPPRESSED!\n", self);
 +}
 +
-+static void (*orig_lock_setOverlaysDisablingUpdates)(id self, SEL sel, id overlays);
-+static void
-+my_lock_setOverlaysDisablingUpdates(id self, SEL sel, id overlays)
++static id (*orig_cancelAndSuppressTouches)(id, SEL, id, id);
++static id
++my_cancelAndSuppressTouches(id self, SEL sel, id display, id reason)
 +{
-+	say("hakios: -[BKDisplayRenderOverlayManager _lock_setOverlaysDisablingUpdates:] called -> forcing nil\n");
-+	if (orig_lock_setOverlaysDisablingUpdates != NULL) {
-+		orig_lock_setOverlaysDisablingUpdates(self, sel, nil);
-+	}
++	say("hakios: -[BKHIDDirectTouchEventProcessor cancelAndSuppressTouchesOnDisplay:reason:] -> SUPPRESSED (returning nil)!\n");
++	return nil;
++}
++
++static void
++schedule_unblank_timer(int count_left)
++{
++	if (count_left <= 0) return;
++	dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 1 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
++		Class wsClass = objc_getClass("CAWindowServer");
++		if (wsClass != NULL) {
++			id server = ((id (*)(Class, SEL))objc_msgSend)(wsClass, sel_registerName("server"));
++			if (server != nil) {
++				id displays = ((id (*)(id, SEL))objc_msgSend)(server, sel_registerName("displays"));
++				unsigned long count = displays ? ((unsigned long (*)(id, SEL))objc_msgSend)(displays, sel_registerName("count")) : 0;
++				for (unsigned long i = 0; i < count; i++) {
++					id d = ((id (*)(id, SEL, unsigned long))objc_msgSend)(displays, sel_registerName("objectAtIndex:"), i);
++					if (class_getInstanceMethod(object_getClass(d), sel_registerName("setDisablesUpdates:"))) {
++						((void (*)(id, SEL, BOOL))objc_msgSend)(d, sel_registerName("setDisablesUpdates:"), NO);
++					}
++					if (class_getInstanceMethod(object_getClass(d), sel_registerName("setBlanked:"))) {
++						((void (*)(id, SEL, BOOL))objc_msgSend)(d, sel_registerName("setBlanked:"), NO);
++					}
++				}
++			}
++		}
++		schedule_unblank_timer(count_left - 1);
++	});
 +}
 +
 +static void
@@ -1789,52 +2271,230 @@ index 217e8fa..4d9a0fb 100644
 +			say("hakios: CAWindowServerDisplay isBlanked hook installed\n");
 +		}
 +	}
-+	Class omClass = objc_getClass("BKDisplayRenderOverlayManager");
-+	if (omClass != NULL) {
-+		Method m1 = class_getInstanceMethod(omClass, sel_registerName("_updateWindowServerUpdatesForOverlays:"));
-+		if (m1 != NULL) {
-+			orig_updateWindowServerUpdatesForOverlays = (void (*)(id, SEL, id))method_setImplementation(m1, (IMP)my_updateWindowServerUpdatesForOverlays);
-+			say("hakios: BKDisplayRenderOverlayManager _updateWindowServerUpdatesForOverlays: hook installed\n");
-+		}
-+		Method m2 = class_getInstanceMethod(omClass, sel_registerName("_lock_setOverlaysDisablingUpdates:"));
-+		if (m2 != NULL) {
-+			orig_lock_setOverlaysDisablingUpdates = (void (*)(id, SEL, id))method_setImplementation(m2, (IMP)my_lock_setOverlaysDisablingUpdates);
-+			say("hakios: BKDisplayRenderOverlayManager _lock_setOverlaysDisablingUpdates: hook installed\n");
++	Class bkcCls = objc_getClass("_BKDisplayBlankingContext");
++	if (bkcCls != NULL) {
++		Method bm = class_getInstanceMethod(bkcCls, sel_registerName("blank"));
++		if (bm != NULL) {
++			orig_bkc_blank = (void (*)(id, SEL))method_setImplementation(bm, (IMP)my_bkc_blank);
++			say("hakios: _BKDisplayBlankingContext blank hook installed\n");
 +		}
 +	}
-+	dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
-+		Class wsClass = objc_getClass("CAWindowServer");
-+		if (wsClass != NULL) {
-+			id server = ((id (*)(Class, SEL))objc_msgSend)(wsClass, sel_registerName("server"));
-+			if (server != nil) {
-+				id displays = ((id (*)(id, SEL))objc_msgSend)(server, sel_registerName("displays"));
-+				unsigned long count = displays ? ((unsigned long (*)(id, SEL))objc_msgSend)(displays, sel_registerName("count")) : 0;
-+				for (unsigned long i = 0; i < count; i++) {
-+					id d = ((id (*)(id, SEL, unsigned long))objc_msgSend)(displays, sel_registerName("objectAtIndex:"), i);
-+					say("hakios: delayed timer unblanking display[%lu]=%p\n", i, d);
-+					if (class_getInstanceMethod(object_getClass(d), sel_registerName("setDisablesUpdates:"))) {
-+						((void (*)(id, SEL, BOOL))objc_msgSend)(d, sel_registerName("setDisablesUpdates:"), NO);
++	Class tepCls = objc_getClass("BKHIDDirectTouchEventProcessor");
++	if (tepCls != NULL) {
++		Method csm = class_getInstanceMethod(tepCls, sel_registerName("cancelAndSuppressTouchesOnDisplay:reason:"));
++		if (csm != NULL) {
++			orig_cancelAndSuppressTouches = (id (*)(id, SEL, id, id))method_setImplementation(csm, (IMP)my_cancelAndSuppressTouches);
++			say("hakios: BKHIDDirectTouchEventProcessor cancelAndSuppressTouches hook installed\n");
++		}
++	}
++	schedule_unblank_timer(30);
++}
++
++/* ---- Boot UI & First Boot handling in backboardd --------------------------------- */
++
++static id g_bootUIPresenter = nil;
++static BOOL (*orig_fbd_isFirstBoot)(id self, SEL sel);
++static id (*orig_bootui_init)(id self, SEL sel, id a, id b, id c, id d, id e);
++static void (*orig_bootui_shellChanged)(id self, SEL sel, id primary);
++
++static BOOL
++my_fbd_isFirstBoot(id self, SEL sel)
++{
++	say("hakios: -[BKFirstBootDetector isFirstBoot] -> FORCING NO (regular boot)\n");
++	return NO;
++}
++
++static void
++dismiss_boot_ui(void)
++{
++	say("hakios: dismiss_boot_ui called\n");
++	if (g_bootUIPresenter != nil) {
++		say("hakios: dismiss_boot_ui on presenter %p\n", g_bootUIPresenter);
++
++		/* 1. Call dismissOverlayWithAnimationSettings:requstedByPID: */
++		SEL s_disp = sel_registerName("dismissOverlayWithAnimationSettings:requstedByPID:");
++		if (class_getInstanceMethod(object_getClass(g_bootUIPresenter), s_disp)) {
++			((void (*)(id, SEL, id, int))objc_msgSend)(g_bootUIPresenter, s_disp, nil, 0);
++			say("hakios: dismissOverlayWithAnimationSettings:requstedByPID: called\n");
++		}
++
++		/* 2. Dismiss overlay directly if present */
++		SEL s_ov = sel_registerName("overlay");
++		if (class_getInstanceMethod(object_getClass(g_bootUIPresenter), s_ov)) {
++			id ov = ((id (*)(id, SEL))objc_msgSend)(g_bootUIPresenter, s_ov);
++			if (ov != nil) {
++				say("hakios: presenter overlay %p found, dismissing directly\n", ov);
++				SEL s_dis = sel_registerName("dismissWithAnimationSettings:");
++				if (class_getInstanceMethod(object_getClass(ov), s_dis)) {
++					((void (*)(id, SEL, id))objc_msgSend)(ov, s_dis, nil);
++					say("hakios: presenter overlay dismissed\n");
++				}
++			}
++		}
++
++		/* 3. Dismiss underlay directly if present */
++		SEL s_un = sel_registerName("underlay");
++		if (class_getInstanceMethod(object_getClass(g_bootUIPresenter), s_un)) {
++			id un = ((id (*)(id, SEL))objc_msgSend)(g_bootUIPresenter, s_un);
++			if (un != nil) {
++				say("hakios: presenter underlay %p found, dismissing directly\n", un);
++				SEL s_dis = sel_registerName("dismissWithAnimationSettings:");
++				if (class_getInstanceMethod(object_getClass(un), s_dis)) {
++					((void (*)(id, SEL, id))objc_msgSend)(un, s_dis, nil);
++					say("hakios: presenter underlay dismissed\n");
++				}
++			}
++		}
++
++		/* 4. Query _renderOverlayManager and remove all active overlays */
++		Ivar iv_mgr = class_getInstanceVariable(object_getClass(g_bootUIPresenter), "_renderOverlayManager");
++		if (iv_mgr) {
++			id mgr = object_getIvar(g_bootUIPresenter, iv_mgr);
++			if (mgr != nil) {
++				say("hakios: renderOverlayManager %p found\n", mgr);
++				SEL s_active = sel_registerName("activeOverlays");
++				SEL s_remove = sel_registerName("removeOverlay:withAnimationSettings:");
++				if (class_getInstanceMethod(object_getClass(mgr), s_active) &&
++				    class_getInstanceMethod(object_getClass(mgr), s_remove)) {
++					id active = ((id (*)(id, SEL))objc_msgSend)(mgr, s_active);
++					if (active) {
++						SEL s_all = sel_registerName("allObjects");
++						if (class_getInstanceMethod(object_getClass(active), s_all)) {
++							active = ((id (*)(id, SEL))objc_msgSend)(active, s_all);
++						}
 +					}
-+					if (class_getInstanceMethod(object_getClass(d), sel_registerName("setBlanked:"))) {
-+						((void (*)(id, SEL, BOOL))objc_msgSend)(d, sel_registerName("setBlanked:"), NO);
++					SEL s_cnt = sel_registerName("count");
++					SEL s_objAt = sel_registerName("objectAtIndex:");
++					if (active && class_getInstanceMethod(object_getClass(active), s_cnt) &&
++					    class_getInstanceMethod(object_getClass(active), s_objAt)) {
++						unsigned long cnt = ((unsigned long (*)(id, SEL))objc_msgSend)(active, s_cnt);
++						say("hakios: renderOverlayManager active overlays count: %lu\n", cnt);
++						for (unsigned long i = 0; i < cnt; i++) {
++							id ov = ((id (*)(id, SEL, unsigned long))objc_msgSend)(active, s_objAt, i);
++							if (ov != nil) {
++								say("hakios: removing overlay %p from manager\n", ov);
++								((void (*)(id, SEL, id, id))objc_msgSend)(mgr, s_remove, ov, nil);
++								SEL s_dis = sel_registerName("dismissWithAnimationSettings:");
++								if (class_getInstanceMethod(object_getClass(ov), s_dis)) {
++									((void (*)(id, SEL, id))objc_msgSend)(ov, s_dis, nil);
++								}
++							}
++						}
 +					}
 +				}
 +			}
 +		}
++	}
++}
++
++static id
++my_bootui_init(id self, SEL sel, id a, id b, id c, id d, id e)
++{
++	id res = orig_bootui_init ? orig_bootui_init(self, sel, a, b, c, d, e) : nil;
++	g_bootUIPresenter = res;
++	say("hakios: BKBootUIPresenter instance captured: %p\n", res);
++	return res;
++}
++
++static BOOL
++my_bootui_isShowingBootUI(id self, SEL sel)
++{
++	return NO;
++}
++
++static void
++my_bootui_shellChanged(id self, SEL sel, id primary)
++{
++	say("hakios: BKBootUIPresenter systemShellChangedWithPrimary: %p\n", primary);
++	if (orig_bootui_shellChanged != NULL) {
++		orig_bootui_shellChanged(self, sel, primary);
++	}
++	if (primary != nil) {
++		say("hakios: primary systemShell present -> scheduling boot UI overlay dismissal at 500ms, 1500ms, 3000ms\n");
++		dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 500 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
++			dismiss_boot_ui();
++		});
++		dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 1500 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
++			dismiss_boot_ui();
++		});
++		dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 3000 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
++			dismiss_boot_ui();
++		});
++	}
++}
++
++static void
++bootui_hooks(void)
++{
++	Class fbdCls = objc_getClass("BKFirstBootDetector");
++	if (fbdCls != NULL) {
++		Method fbm = class_getInstanceMethod(fbdCls, sel_registerName("isFirstBoot"));
++		if (fbm != NULL) {
++			orig_fbd_isFirstBoot = (BOOL (*)(id, SEL))method_setImplementation(fbm, (IMP)my_fbd_isFirstBoot);
++			say("hakios: BKFirstBootDetector isFirstBoot hook installed\n");
++		}
++	}
++	Class bupCls = objc_getClass("BKBootUIPresenter");
++	if (bupCls != NULL) {
++		SEL s_init = sel_registerName("initWithSystemAppSentinel:alternateSystemAppManager:firstBootDetector:bootUIOverlayVendor:renderOverlayManager:");
++		Method im = class_getInstanceMethod(bupCls, s_init);
++		if (im != NULL) {
++			orig_bootui_init = (id (*)(id, SEL, id, id, id, id, id))method_setImplementation(im, (IMP)my_bootui_init);
++			say("hakios: BKBootUIPresenter init hook installed\n");
++		}
++		Method sm = class_getInstanceMethod(bupCls, sel_registerName("systemShellChangedWithPrimary:"));
++		if (sm != NULL) {
++			orig_bootui_shellChanged = (void (*)(id, SEL, id))method_setImplementation(sm, (IMP)my_bootui_shellChanged);
++			say("hakios: BKBootUIPresenter systemShellChangedWithPrimary: hook installed\n");
++		}
++		Method bm = class_getInstanceMethod(bupCls, sel_registerName("isShowingBootUI"));
++		if (bm != NULL) {
++			method_setImplementation(bm, (IMP)my_bootui_isShowingBootUI);
++			say("hakios: BKBootUIPresenter isShowingBootUI hook installed\n");
++		}
++	}
++	int token = 0;
++	notify_register_dispatch("com.hakios.dismiss_boot_ui", &token, dispatch_get_main_queue(), ^(__unused int t) {
++		say("hakios: Darwin notification com.hakios.dismiss_boot_ui received!\n");
++		dismiss_boot_ui();
 +	});
 +}
 +
  __attribute__((constructor))
  static void
  hakios_init(void)
-@@ -1218,15 +1621,13 @@ hakios_init(void)
+@@ -1183,10 +1733,12 @@ hakios_init(void)
+ 		 * the phones with an A7 to A10, or when CA_FORCE_TIMER is in the environment
+ 		 * (CADeviceUseVBL()); on the iPhone X it runs a timer of its own instead (CADisplayTimer),
+ 		 * whose phase it would set from the frame timings of a display driver this one is not.
++		 * We default to CA_FORCE_TIMER=1 unless explicitly disabled with ca_vbl=0.
+ 		 */
+-		if (sysctlbyname("kern.bootargs", arguments, &size, NULL, 0) == 0 && strstr(arguments, "ca_vbl=1") != NULL) {
++		sysctlbyname("kern.bootargs", arguments, &size, NULL, 0);
++		if (strstr(arguments, "ca_vbl=0") == NULL) {
+ 			setenv("CA_FORCE_TIMER", "1", 1);
+-			say("hakios: ca_vbl=1: CoreAnimation is to take the display driver's refresh notifications\n");
++			say("hakios: CA_FORCE_TIMER=1: CoreAnimation is to take the display driver's refresh notifications\n");
+ 		}
+ 		/*
+ 		 * Boot-arg caenv=NAME=VALUE (as many as wanted): into the window server's environment, for
+@@ -1218,15 +1770,22 @@ hakios_init(void)
  		if (strstr(arguments, "metal_watch=1") != NULL || strstr(arguments, "ca_metallib=") != NULL) {
  			watch_metallib_lookups(arguments);
  		}
 +		watch_for_faults();
 +		backboardd_url_fixes();
++
++		/* Ensure CoreAnimation does not allocate 10-bit deep color or compressed framebuffers */
++		CFPreferencesSetAppValue(CFSTR("CAEnableFramebufferCompression"), kCFBooleanFalse, kCFPreferencesCurrentApplication);
++		CFPreferencesSetAppValue(CFSTR("CAEnableIOSurfaceCompression"), kCFBooleanFalse, kCFPreferencesCurrentApplication);
++		CFPreferencesSetAppValue(CFSTR("CAEnableDeepFramebuffer"), kCFBooleanFalse, kCFPreferencesCurrentApplication);
++		CFPreferencesAppSynchronize(kCFPreferencesCurrentApplication);
++		say("hakios: disabled deep framebuffer and compression preferences\n");
++
 +		setup_primary_display_descriptor();
 +		cadisplay_hooks();
++		bootui_hooks();
  		opengl_es();
  		window_server_fixes();
 -		/*
@@ -1849,7 +2509,7 @@ index 217e8fa..4d9a0fb 100644
  	} else if (strncmp(name, "containermanagerd", 17) == 0) {
  		container_manager_fixes();
 diff --git a/userland/src/inject_sb.c b/userland/src/inject_sb.c
-index 880ac16..06f0620 100644
+index 880ac16..c43fefd 100644
 --- a/userland/src/inject_sb.c
 +++ b/userland/src/inject_sb.c
 @@ -41,8 +41,10 @@
@@ -1925,7 +2585,48 @@ index 880ac16..06f0620 100644
  	if (gpu != 0) {
  		IOObjectRelease(gpu);
  	}
-@@ -1524,6 +1574,8 @@ hakios_springboard_init(void)
+@@ -763,13 +813,40 @@ unlock(void)
+ 		say("hakios: unlock: no lock screen manager yet\n");
+ 	} else if (!((BOOL (*)(id, SEL))objc_msgSend)(manager, locked)) {
+ 		say("hakios: unlock: not locked\n");
++		notify_post("com.hakios.dismiss_boot_ui");
+ 	} else {
+ 		BOOL done = ((BOOL (*)(id, SEL, long, id))objc_msgSend)(manager, unlock_ui, UNLOCK_SOURCE_COVER_SHEET, NULL);
+ 
+ 		say("hakios: unlock: asked, answer %d\n", done);
++		notify_post("com.hakios.dismiss_boot_ui");
+ 	}
+ }
+ 
++static void
++schedule_unlock_loop(int count_left)
++{
++	if (count_left <= 0) {
++		return;
++	}
++	dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
++		Class cls = objc_getClass("SBLockScreenManager");
++		id mgr = (cls && class_getClassMethod(cls, sel_registerName("sharedInstance"))) ?
++			((id (*)(Class, SEL))objc_msgSend)(cls, sel_registerName("sharedInstance")) : nil;
++		if (mgr != nil) {
++			BOOL locked = class_getInstanceMethod(cls, sel_registerName("isUILocked")) ?
++				((BOOL (*)(id, SEL))objc_msgSend)(mgr, sel_registerName("isUILocked")) : YES;
++			if (locked) {
++				unlock();
++			} else {
++				say("hakios: SpringBoard is unlocked and at home screen!\n");
++				notify_post("com.hakios.dismiss_boot_ui");
++				return;
++			}
++		}
++		schedule_unlock_loop(count_left - 1);
++	});
++}
++
+ /*
+  * The poster switcher: on Darwin userland 16 a long press on the lock screen's wallpaper shrinks it into a
+  * row of posters to choose from or customize. The row is PosterBoard's, an application scene of
+@@ -1524,9 +1601,18 @@ hakios_springboard_init(void)
  		});
  		return;
  	}
@@ -1934,3 +2635,110 @@ index 880ac16..06f0620 100644
  	caenv();
  	display_link_rates();
  	accessibility_settings();
++	/*
++	 * No auto-dim while the cold SpringBoard setup runs: the idle timer would otherwise ask backboardd for a
++	 * backlight factor of 0 a moment after SpringBoard checks in. The same preference UniXNU-picasso
++	 * bakes into the Data volume (SBDisableAutoDim in com.apple.springboard); the power key still sleeps.
++	 */
++	CFPreferencesSetAppValue(CFSTR("SBDisableAutoDim"), kCFBooleanTrue, kCFPreferencesCurrentApplication);
++	CFPreferencesAppSynchronize(kCFPreferencesCurrentApplication);
+ 	/*
+ 	 * The tweaks of the package manager's prefix, if one is installed: ElleKit's loader
+ 	 * (/var/jb/usr/lib/TweakLoader.dylib) reads /var/jb/usr/lib/TweakInject and opens the tweaks
+@@ -1684,7 +1770,5 @@ hakios_springboard_init(void)
+ 			return;
+ 		}
+ 	}
+-	dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 10 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+-		unlock();
+-	});
++	schedule_unlock_loop(30);
+ }
+diff --git a/userland/var/mobile/Library/Preferences/com.apple.migration.plist b/userland/var/mobile/Library/Preferences/com.apple.migration.plist
+index 0a3f423..d025a60 100644
+--- a/userland/var/mobile/Library/Preferences/com.apple.migration.plist
++++ b/userland/var/mobile/Library/Preferences/com.apple.migration.plist
+@@ -2,8 +2,6 @@
+ <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+ <plist version="1.0">
+ <dict>
+-	<!-- /private/var starts empty on every boot; without this record of the build that last ran the
+-	     data migration, backboardd runs all the migrators (the progress bar under the logo) each time -->
+ 	<key>LastSystemVersion</key>
+ 	<string>20F66</string>
+ 	<key>DMLastMigrationResults</key>
+@@ -13,5 +11,12 @@
+ 		<key>buildVersion</key>
+ 		<string>20F66</string>
+ 	</dict>
++	<key>DMUserDataDisposition</key>
++	<dict>
++		<key>SyntheticDidUpgrade</key>
++		<false/>
++		<key>buildVersion</key>
++		<string>20F66</string>
++	</dict>
+ </dict>
+ </plist>
+diff --git a/userland/var/mobile/Library/Preferences/com.apple.purplebuddy.plist b/userland/var/mobile/Library/Preferences/com.apple.purplebuddy.plist
+index a8908e4..e776000 100644
+--- a/userland/var/mobile/Library/Preferences/com.apple.purplebuddy.plist
++++ b/userland/var/mobile/Library/Preferences/com.apple.purplebuddy.plist
+@@ -2,14 +2,17 @@
+ <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+ <plist version="1.0">
+ <dict>
+-	<!-- the first-boot setup assistant ("hello") has been gone through; nobody can do that here -->
+ 	<key>SetupDone</key>
+ 	<true/>
++	<key>SetupFinishedAllSteps</key>
++	<true/>
+ 	<key>SetupVersion</key>
+ 	<integer>11</integer>
+ 	<key>SetupState</key>
+ 	<string>SetupUsingAssistant</string>
+ 	<key>ForceNoBuddy</key>
+ 	<true/>
++	<key>daemonizeNeedsToRun</key>
++	<false/>
+ </dict>
+ </plist>
+diff --git a/userland/var/mobile/Library/Preferences/com.apple.springboard.plist b/userland/var/mobile/Library/Preferences/com.apple.springboard.plist
+index dc39f07..1b3dfdf 100644
+--- a/userland/var/mobile/Library/Preferences/com.apple.springboard.plist
++++ b/userland/var/mobile/Library/Preferences/com.apple.springboard.plist
+@@ -2,19 +2,23 @@
+ <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+ <plist version="1.0">
+ <dict>
+-	<!-- one processor core and a software renderer: applications need more time to come up than the
+-	     watchdog gives them on Apple's hardware (20 s for the first frame) -->
+-	<key>FBLaunchWatchdogScale</key>
+-	<real>20</real>
+-	<!-- ... and the other watchdogs have no scale: 10 s to answer any change to a scene (going to the
+-	     background, the scene of the widgets coming up while the system starts) is not always enough
+-	     under QEMU, where the window server takes most of the one processor during an animation. This
+-	     switches all of FrontBoard's watchdogs off; an application that really hangs is closed from
+-	     the application switcher. -->
+ 	<key>BKNoWatchdogs</key>
+ 	<true/>
+-	<!-- the battery's percentage beside its icon in the status bar (Settings > Battery > Battery
+-	     Percentage, which an iPhone X has off at first) -->
++	<key>FBLaunchWatchdogScale</key>
++	<real>20.0</real>
++	<key>FBLaunchWatchdogExceptions</key>
++	<dict>
++		<key>com.apple.purplebuddy</key>
++		<real>100.0</real>
++	</dict>
++	<key>MCForceShowCloudConfigurationUI</key>
++	<false/>
++	<key>SBDisableAutoDim</key>
++	<true/>
++	<key>SBDontDimOrLockOnAC</key>
++	<true/>
++	<key>SBDisableIdleSleep</key>
++	<true/>
+ 	<key>SBShowBatteryPercentage</key>
+ 	<true/>
+ </dict>

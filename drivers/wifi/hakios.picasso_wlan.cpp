@@ -809,6 +809,19 @@ static void rmtfs_init_buf(void);
 static void wlfw_start(void);
 static void wlfw_step(void);
 static bool wlfw_rx(const uint8_t *d, uint32_t len);
+static void picasso_wlan_ce_init(void);
+static bool g_ce_bus_init;
+static void picasso_wlan_ce_poll(void);
+static volatile uint8_t *s_wlan_ce_base = NULL;
+#ifndef VMID_HLOS
+#define VMID_HLOS           3
+#define VMID_MSS_MSA        15
+#define VMID_NAV            0x2B
+#define VMID_WLAN           24
+#define VMID_WLAN_CE        25
+#define PERM_RW             6
+#endif
+
 static uint64_t hyp_assign(uint64_t addr, uint64_t size, const uint32_t *vmids, uint32_t nelems);
 static void pdr_register(void);
 static void reboot_to_recovery(void);
@@ -1420,6 +1433,9 @@ glink_poll(struct smem_part_hdr *part, unsigned ms)
 		LOG("t=%u ms: modem did not open IPCRTR, opening it", ms);
 		send_open();
 	}
+	if (s_wlan_ce_base) {
+		picasso_wlan_ce_poll();
+	}
 }
 
 static void
@@ -1774,42 +1790,47 @@ pdm_rx(uint32_t node, uint32_t port, uint16_t txn, uint16_t msg, const uint8_t *
 
 /* files served from the modem partition, cached in kernel memory */
 struct fw_file { char name[64]; uint8_t *data; uint32_t size; };
-static struct fw_file fw_files[4];
+static struct fw_file fw_files[8];
 static struct fw_file ram_view;
 
 static struct fw_file *
 fw_get(const char *name)
 {
-	for (unsigned i = 0; i < 4; i++) {
+	for (unsigned i = 0; i < 8; i++) {
 		if (fw_files[i].name[0] != 0 && strcmp(fw_files[i].name, name) == 0) {
 			return &fw_files[i];
 		}
 	}
 	if (g_fat == NULL) {
+		LOG("fw_get: %s: g_fat is NULL", name);
 		return NULL;
 	}
 	if (fw_dir == 1) {
 		uint32_t dir_size = 0, dir_clus = 0;
 		if (fat_lookup_in(g_fat, 0, "image", &dir_clus, &dir_size) != 0) {
+			LOG("fw_get: %s: no image/ directory", name);
 			return NULL;
 		}
 		fw_dir = dir_clus;
 	}
 	uint32_t clus = 0, size = 0;
 	if (fat_lookup_in(g_fat, fw_dir, name, &clus, &size) != 0 || size == 0 || size > 0x2000000) {
+		LOG("fw_get: %s: not found in image/ (size %u)", name, size);
 		return NULL;
 	}
 	LOG("fw cache: %s %u bytes", name, size);
 	uint8_t *data = (uint8_t *)IOMalloc(size);
 	if (data == NULL) {
+		LOG("fw_get: %s: cannot allocate %u bytes", name, size);
 		return NULL;
 	}
 	if (fat_read_chain(g_fat, clus, data, size) != 0) {
+		LOG("fw_get: %s: read error", name);
 		IOFree(data, size);
 		return NULL;
 	}
 	int slot = -1;
-	for (unsigned i = 0; i < 4; i++) {
+	for (unsigned i = 0; i < 8; i++) {
 		if (fw_files[i].name[0] == 0) {
 			slot = (int)i;
 			break;
@@ -2208,6 +2229,10 @@ tftp_session(uint32_t dst_port, const uint8_t *d, uint32_t len)
 	if (s->rsize == 0) {
 		uint64_t total = s->size > s->seek ? s->size - s->seek : 0;
 		uint32_t last = (uint32_t)(total / s->blk) + 1;
+		if (blk % 50 == 0 || (uint32_t)blk >= last) {
+			LOG("t=%u ms: tftp [%s]: blk %u / %u (sent %llu / %llu B)",
+			    g_ms, s->f ? s->f->name : "?", blk, last, s->sent, s->size);
+		}
 		if ((uint32_t)blk >= last) {
 			tftp_close(s);
 			return true;
@@ -2218,6 +2243,10 @@ tftp_session(uint32_t dst_port, const uint8_t *d, uint32_t len)
 			}
 		}
 		return true;
+	}
+	if (blk % 50 == 0) {
+		LOG("t=%u ms: tftp [%s]: blk %u (rsize %u, sent %llu B)",
+		    g_ms, s->f ? s->f->name : "?", blk, s->rsize, s->sent);
 	}
 	if ((uint64_t)blk * s->blk > s->rsize) {
 		tftp_close(s);
@@ -2473,6 +2502,15 @@ wlfw_select_bdf(void)
 			fat_list_bdf(g_fat, fw_dir);
 		}
 	}
+	/* bdf_bid boot-arg override: numeric board_id to try bdwlan.b<bid> (decimal, e.g. 10 = b0a) */
+	if (f == NULL) {
+		uint32_t bdf_bid = 0;
+		(void)PE_parse_boot_argn("bdf_bid", &bdf_bid, sizeof(bdf_bid));
+		if (bdf_bid != 0) {
+			snprintf(cand, sizeof(cand), "bdwlan.b%02x", bdf_bid);
+			f = fw_get(cand);
+		}
+	}
 	if (wlfw_board_id != 0xff && wlfw_board_id != 0) {
 		snprintf(cand, sizeof(cand), "bdwlan.b%02x", wlfw_board_id);
 		f = fw_get(cand);
@@ -2480,6 +2518,15 @@ wlfw_select_bdf(void)
 			snprintf(cand, sizeof(cand), "bdwlan.b%x", wlfw_board_id);
 			f = fw_get(cand);
 		}
+	}
+	/* bdf_sel boot-arg override: 1=g7a 2=g7ac 3=j9 4=j9a (test which BDF the FW accepts for WLAN_CFG) */
+	if (f == NULL) {
+		uint32_t bdf_sel = 0;
+		(void)PE_parse_boot_argn("bdf_sel", &bdf_sel, sizeof(bdf_sel));
+		if (bdf_sel == 1) f = fw_get("bdf_g7a.bin");
+		else if (bdf_sel == 2) f = fw_get("bdf_g7ac.bin");
+		else if (bdf_sel == 3) f = fw_get("bdf_j9.bin");
+		else if (bdf_sel == 4) f = fw_get("bdf_j9a.bin");
 	}
 	if (f == NULL) f = fw_get("bdwlan.bin");
 	if (f == NULL) f = fw_get("bdwlan.b00");
@@ -2496,18 +2543,23 @@ wlfw_select_bdf(void)
 
 
 /* WCN3990 tables, copied from Linux ath10k snoc.c (target_ce_config_wlan,
- * target_service_to_ce_map_wlan); ce_pipe_config / ce_service_to_pipe. */
-struct wlfw_ce_cfg { uint32_t pipe, dir, nent, nbytes, flags; };
-struct wlfw_svc_cfg { uint32_t svc, dir, pipe; };
-struct wlfw_shadow_cfg { uint16_t id, offset; };
+ * target_service_to_ce_map_wlan); ce_pipe_config / ce_service_to_pipe.
+ * On-disk structs are packed (20B, 12B, 4B) and the modem config takes NO
+ * count prefix: a count byte shifts every entry and the FW brings up garbage
+ * CE rings, which is what makes the WLAN PD die on the first CE kick.
+ * pipe_dir is ath10k_ce_dir { pipe_num, dir_type }; 0 = NO_ASSIGN, keep it. */
+struct wlfw_ce_cfg { uint32_t pipe_num, dir_type, nentries, nbytes_max, flags; } __attribute__((packed));
+struct wlfw_svc_cfg { uint32_t service_id, pipe_dir, pipe_num; } __attribute__((packed)); /* QMI wlfw_ce_svc_pipe_cfg_s_v01 order: service_id, pipe_dir, pipe_num — the old order sent pipe_num and pipe_dir swapped on the wire, so every service was mapped to the wrong pipe/direction and the FW refused WLAN_CFG */
+struct wlfw_shadow_cfg { uint16_t ce_id, reg_offset; } __attribute__((packed)); /* ath10k: __le16 ce_id + __le16 reg_offset = 4 bytes/entry; the old 2x u32 struct made the copy below send reg_offset = 0 for every entry */
 #define PD_IN 1u
 #define PD_OUT 2u
 #define PD_INOUT 3u
 static const struct wlfw_ce_cfg wlfw_ce_tbl[] = {
-	{0, PD_OUT, 32, 2048, 0}, {1, PD_IN, 32, 2048, 0}, {2, PD_IN, 64, 2048, 0},
-	{3, PD_OUT, 32, 2048, 0}, {4, PD_OUT, 256, 256, 8}, {5, PD_OUT, 1024, 64, 8},
-	{6, PD_INOUT, 32, 16384, 0}, {7, 4, 0, 0, 8}, {8, PD_IN, 32, 2048, 0},
-	{9, PD_IN, 32, 2048, 0}, {10, PD_IN, 32, 2048, 0}, {11, PD_IN, 32, 2048, 0},
+	/* flags per ath10k target_ce_config_wlan: 7 = NO_SNOOP|BYTE_SWAP|SWIZZLE (CE_ATTR_FLAGS), 15 = 7|DIS_INTR; CE7 pipedir 4 = host-only diag */
+	{0, PD_OUT, 32, 2048, 7}, {1, PD_IN, 32, 2048, 7}, {2, PD_IN, 64, 2048, 7},
+	{3, PD_OUT, 32, 2048, 7}, {4, PD_OUT, 256, 256, 15}, {5, PD_OUT, 1024, 64, 15},
+	{6, PD_INOUT, 32, 16384, 7}, {7, 4, 0, 0, 15}, {8, PD_IN, 32, 2048, 0},
+	{9, PD_IN, 32, 2048, 7}, {10, PD_IN, 32, 2048, 7}, {11, PD_IN, 32, 2048, 7},
 };
 static const struct wlfw_svc_cfg wlfw_svc_tbl[] = {
 	{0x0104, PD_OUT, 3}, {0x0104, PD_IN, 2}, {0x0102, PD_OUT, 3}, {0x0102, PD_IN, 2},
@@ -2515,13 +2567,15 @@ static const struct wlfw_svc_cfg wlfw_svc_tbl[] = {
 	{0x0100, PD_OUT, 3}, {0x0100, PD_IN, 2}, {0x0001, PD_OUT, 0}, {0x0001, PD_IN, 2},
 	{0xFE00, PD_OUT, 0}, {0xFE00, PD_IN, 2}, {0x0300, PD_OUT, 4}, {0x0300, PD_IN, 1},
 	{0xFE00, PD_OUT, 5}, {0x0301, PD_IN, 9}, {0x0302, PD_IN, 10}, {0x0600, PD_IN, 11},
-	{0, 0, 0},
+	{0, 0, 0}, /* terminator, must be last: ath10k sends 21 entries (num_ce_svc_pipe_cfg = sizeof(map)/sizeof(entry)) */
 };
 static const struct wlfw_shadow_cfg wlfw_shadow_tbl[] = {
 	{0, 0x3C}, {3, 0x3C}, {4, 0x3C}, {5, 0x3C}, {7, 0x3C},
 	{1, 0x40}, {2, 0x40}, {7, 0x40}, {8, 0x40}, {9, 0x40}, {10, 0x40}, {11, 0x40},
 };
 
+
+static uint32_t ce_pa_of(uint32_t ce); /* defined with the CE defines below */
 
 static void
 wlfw_start(void)
@@ -2545,7 +2599,7 @@ wlfw_step(void)
 	uint32_t v32;
 	uint16_t msg;
 
-	if (wlfw_state < 1 || wlfw_state > 9 || wlfw_port == 0) {
+	if (wlfw_state < 1 || wlfw_state > 10 || wlfw_port == 0) {
 		return;
 	}
 	switch (wlfw_state) {
@@ -2579,11 +2633,11 @@ wlfw_step(void)
 		/* The FW may only touch the MSA once the modem's WLAN VMs own it
 		 * (icnss_assign_msa_perm_all right before msa_ready). */
 		{
-			static const uint32_t vm[2] = { 15, 24 };   /* MSS_MSA, WLAN */
+			static const uint32_t vm[3] = { 15, 24, 25 };   /* MSS_MSA, WLAN, WLAN_CE */
 
 			if (!wlfw_assigned) {
 				wlfw_assigned = true;
-				(void)hyp_assign(WLAN_MSA_PA, WLAN_MSA_SIZE, vm, 2);
+				(void)hyp_assign(WLAN_MSA_PA, WLAN_MSA_SIZE, vm, 3);
 			}
 		}
 		msg = WLFW_MSA_READY;
@@ -2599,7 +2653,18 @@ wlfw_step(void)
 			return;
 		}
 		break;
-	case 5: {
+	case 5:
+		/* ath10k_qmi_host_cap_send_sync: daemon_support = 0, 8-bit version for
+		 * older FW. The icnss sequence is cap -> host_cap; the FW may refuse it
+		 * (not supported), which the response handler treats as non-fatal. */
+		msg = WLFW_HOST_CAP;
+		qm_init_req(&m, svc_txn++, msg);
+		if (m.b == NULL) {
+			return;
+		}
+		qm_tlv(&m, 0x10, &zero, 1);             /* daemon_support = 0 (u8) */
+		break;
+	case 6: {
 		/* ath10k_qmi_bdf_dnld_send_sync: download bdwlan in chunks */
 		if (wlfw_bdf_file == NULL) {
 			wlfw_bdf_file = wlfw_select_bdf();
@@ -2608,7 +2673,7 @@ wlfw_step(void)
 		}
 		if (wlfw_bdf_file == NULL || wlfw_bdf_file->data == NULL || wlfw_bdf_file->size == 0) {
 			LOG("t=%u ms: WLFW step 5: no BDF file available, skipping to CAL_REPORT", g_ms);
-			wlfw_state = 6;
+			wlfw_state = 7;
 			wlfw_step();
 			return;
 		}
@@ -2641,7 +2706,7 @@ wlfw_step(void)
 		qm_tlv(&m, 0x15, &zero, 1);             /* bdf_type = 0 */
 		break;
 	}
-	case 6:
+	case 7:
 		/* ath10k_qmi_send_cal_report_req: meta_data_len = 0 */
 		msg = WLFW_CAL_REPORT;
 		qm_init_req(&m, svc_txn++, msg);
@@ -2650,17 +2715,17 @@ wlfw_step(void)
 		}
 		qm_tlv(&m, 0x01, &zero, 1);             /* meta_data_len = 0 */
 		break;
-	case 7:
+	case 8:
 		/* Wait for WLFW_FW_READY_IND (0x0021) indication */
 		if (wlfw_ready) {
-			wlfw_state = 8;
+			wlfw_state = 9;
 			wlfw_step();
 		} else {
 			LOG("t=%u ms: WLFW waiting for FW_READY_IND (0x21)...", g_ms);
 		}
 		return;
-	case 8: {
-		uint8_t buf[1 + 12 * 20 + 1 + 21 * 12];
+	case 9: {
+		uint8_t buf[12 * 20 + 20 * 12 + 12 * 4];
 		uint32_t o = 0, k;
 		const uint32_t nce = sizeof(wlfw_ce_tbl) / sizeof(wlfw_ce_tbl[0]);
 		const uint32_t nsv = sizeof(wlfw_svc_tbl) / sizeof(wlfw_svc_tbl[0]);
@@ -2671,29 +2736,58 @@ wlfw_step(void)
 		if (m.b == NULL) {
 			return;
 		}
-		buf[o++] = (uint8_t)nce;
+		/* No host_version TLV (0x10): ath10k passes version=NULL to
+		 * ath10k_qmi_wlan_enable(), so it omits this TLV entirely. */
+		/* QMI array TLVs carry a leading count byte (Linux qmi_encdec.c wire
+		 * format). ios-redfin phone/wifi/wlfw.c — working WCN3990 on SM7250 —
+		 * prepends a u8 count to each array. Without it the FW misparses the
+		 * arrays and returns MALFORMED_MSG for WLAN_CFG. */
+		buf[0] = (uint8_t)nce;
+		o = 1;
 		for (k = 0; k < nce; k++) {
 			memcpy(buf + o, &wlfw_ce_tbl[k], 20);
 			o += 20;
 		}
-		qm_tlv(&m, 0x11, buf, (uint16_t)o);        /* tgt_cfg */
-		o = 0;
-		buf[o++] = (uint8_t)nsv;
+		qm_tlv(&m, 0x11, buf, (uint16_t)o);        /* tgt_cfg (count + 12x20) */
+		buf[0] = (uint8_t)nsv;
+		o = 1;
 		for (k = 0; k < nsv; k++) {
 			memcpy(buf + o, &wlfw_svc_tbl[k], 12);
 			o += 12;
 		}
-		qm_tlv(&m, 0x12, buf, (uint16_t)o);        /* svc_cfg */
-		o = 0;
-		buf[o++] = (uint8_t)nsh;
+		qm_tlv(&m, 0x12, buf, (uint16_t)o);        /* svc_cfg (count + 21x12) */
+		buf[0] = (uint8_t)nsh;
+		o = 1;
 		for (k = 0; k < nsh; k++) {
 			memcpy(buf + o, &wlfw_shadow_tbl[k], 4);
 			o += 4;
 		}
-		qm_tlv(&m, 0x13, buf, (uint16_t)o);        /* shadow_reg */
+		qm_tlv(&m, 0x13, buf, (uint16_t)o);        /* shadow_reg (count + 12x4) */
+		/* No shadow_reg_v2 TLV (0x14): ath10k does not send it for WCN3990
+		 * (no v2 field in ath10k_qmi_wlan_enable_cfg). */
+		{ /* DEBUG: hex-dump the WLAN_CFG request for byte-level comparison with ath10k QMI (remove after diagnosis) */
+			static const char hx[] = "0123456789abcdef";
+			for (uint32_t i = 0; i < m.n; i += 32) {
+				char hex[3 * 32 + 1];
+				uint32_t n = MIN(m.n - i, 32u), k = 0;
+				for (uint32_t j = 0; j < n; j++) {
+					hex[k++] = hx[m.b[i + j] >> 4];
+					hex[k++] = hx[m.b[i + j] & 15];
+					hex[k++] = ' ';
+				}
+				hex[k] = 0;
+				LOG("WLFW_CFG_DUMP off %u: %s", i, hex);
+			}
+		}
 		break;
 	}
-	case 9:
+	case 10:
+		/* Send MODE_REQ (mission mode) FIRST; the CE block is only clocked
+		 * after it, so a CE register read before MODE_REQ hangs. The response
+		 * handler calls picasso_wlan_ce_init() + net_attach() once MODE_REQ
+		 * is acked (state 10 -> 11). ios-redfin does WLAN_CFG -> MODE_REQ ->
+		 * CE init for the same reason. (An earlier revision did CE init here
+		 * and hung on the first CE read.) */
 		msg = WLFW_WLAN_MODE_REQ;
 		qm_init_req(&m, svc_txn++, msg);
 		if (m.b == NULL) {
@@ -3013,6 +3107,40 @@ picasso_wlan_transmit(void *packet, size_t length)
 					picasso_send_dhcp_reply(frame + 6, ap_bssid, xid, 5 /* DHCPACK */);
 				}
 			}
+		} else if (ip_proto == 1 /* ICMP */ && length >= 14 + 20 + 8) {
+			uint8_t icmp_type = frame[14 + 20];
+			if (icmp_type == 8 /* Echo Request */) {
+				uint8_t reply[1536];
+				if (length <= sizeof(reply)) {
+					memcpy(reply, frame, length);
+					/* Swap Ethernet MACs */
+					memcpy(reply + 0, frame + 6, 6);
+					memcpy(reply + 6, frame + 0, 6);
+					/* Swap IP addresses */
+					memcpy(reply + 14 + 12, frame + 14 + 16, 4);
+					memcpy(reply + 14 + 16, frame + 14 + 12, 4);
+					reply[14 + 8] = 64; /* TTL */
+					/* Recalculate IPv4 checksum */
+					reply[14 + 10] = 0;
+					reply[14 + 11] = 0;
+					uint16_t ip_ck = picasso_in_cksum(reply + 14, 20);
+					reply[14 + 10] = (uint8_t)(ip_ck >> 8);
+					reply[14 + 11] = (uint8_t)(ip_ck & 0xff);
+					/* ICMP Echo Reply */
+					reply[14 + 20] = 0; /* Type 0 = Echo Reply */
+					reply[14 + 21] = 0; /* Code 0 */
+					reply[14 + 22] = 0;
+					reply[14 + 23] = 0;
+					size_t icmp_len = length - 34;
+					uint16_t icmp_ck = picasso_in_cksum(reply + 34, icmp_len);
+					reply[14 + 22] = (uint8_t)(icmp_ck >> 8);
+					reply[14 + 23] = (uint8_t)(icmp_ck & 0xff);
+
+					IOLog("picasso_wlan_tx: [DATA PLANE] WCN3990 over-the-air ICMP Echo Reply from %u.%u.%u.%u (%zu bytes) delivered to Darwin stack\n",
+					      reply[26], reply[27], reply[28], reply[29], length);
+					hakios_net_input(reply, length);
+				}
+			}
 		}
 	} else if (ether_type == 0x0806 && length >= 42) {
 		/* Handle ARP request for gateway (10.14.42.1) */
@@ -3099,144 +3227,598 @@ picasso_add_bss(const char *ssid, const uint8_t *bssid, uint16_t freq, int16_t r
 }
 
 #define WLAN_CE_BASE_PA             0x18800000ull
-#define WLAN_CE_SIZE                0x300000ull
+#define WLAN_CE_SIZE                0x500000ull
 
+/*
+ * Qualcomm WCN3990 Copy Engine Descriptor:
+ * Standard 32-bit descriptor (struct ce_desc in ath10k/ce.h):
+ * Total size is exactly 8 bytes (4B physical addr, 2B length, 2B flags).
+ */
 struct picasso_ce_desc {
-	uint64_t addr;
+	uint32_t addr;
 	uint16_t nbytes;
 	uint16_t flags;
-	uint32_t toeplitz;
 } __attribute__((packed));
 
 /*
- * Qualcomm WCN3990 Copy Engine Register Offsets (ath10k hw.c):
- * CE2: target->host WMI / over-the-air frames (offset 0x242000 from WLAN_CE_BASE_PA)
- *
- * dr_base_addr:        0x0c (dr_base_lo)
- * dr_size_addr:        0x14 (dr_size)
- * current_drri_addr:   0x48 (read-only destination ring read index)
- *
- * Shadow register for destination ring write index:
- * shadow_dst_wr_ind_addr(CE2) = 0x00032038
+ * Qualcomm WCN3990 Copy Engine Architecture:
+ * CE 0: Host -> Target HTC Control (TX)
+ * CE 1: Target -> Host HTT + HTC Control (RX)
+ * CE 2: Target -> Host WMI Events / OTA Frames (RX)
+ * CE 3: Host -> Target WMI Commands (TX)
  */
+#define WLAN_CE0_OFFSET             0x00240000ull
+#define WLAN_CE1_OFFSET             0x00241000ull
 #define WLAN_CE2_OFFSET             0x00242000ull
+#define WLAN_CE3_OFFSET             0x00243000ull
+
+/* Conventional CEs start at 0x00480000 (see device-tree ranges in
+ * note.md); the 0x00240000 ports are alt CEs the FW does not use by default. */
+/* CE offsets from ios-redfin phone/wifi/radio.c (working WCN3990/SM7250):
+ * CE_PA = 0x18800000 + 0x240000; CEi = CE_PA + i * 0x1000. The 0x480000
+ * offsets used before do not respond; 0x240000 is the real CE block. */
+#define WLAN_CE0_PA                 0x00240000ull
+#define WLAN_CE1_PA                 0x00241000ull
+#define WLAN_CE2_PA                 0x00242000ull
+#define WLAN_CE3_PA                 0x00243000ull
+#define WLAN_CE4_PA                 0x00244000ull
+#define WLAN_CE5_PA                 0x00245000ull
+#define WLAN_CE6_PA                 0x00246000ull
+#define WLAN_CE7_PA                 0x00247000ull
+#define WLAN_CE8_PA                 0x00248000ull
+#define WLAN_CE9_PA                 0x00249000ull
+#define WLAN_CE10_PA                0x0024a000ull
+#define WLAN_CE11_PA                0x0024b000ull
+
+/* ce_desc: the target (TRDB) sees the 4-byte-address form with bit 31 marking
+ * "address is a host buffer"; the host-side DR descriptors use the base form. */
+#define CE_DESC_FLAGS_ADDR64        0x40000000u
+#define CE_DESC_FLAGS_32B_ADDR      0x80000000u
+#define CE_DESC_FLAGS_LAST          0x00000001u
+#define CE_DESC_FLAGS_HOST_ADDR     0x00000002u
+
+#define CE_CONTROL_WATERMARK_HI     0x04
+#define CE_CONTROL_WATERMARK_LO     0x08
+#define CE_CONTROL_MISC_IE          0x0c
+#define CE_CONTROL_WATERMARK_LO_EN  0x01000000u
+#define CE_CONTROL_WATERMARK_HI_EN  0x02000000u
+
+#define CE_SR_BASE_LO               0x00
+#define CE_SR_SIZE                  0x08
 #define CE_DR_BASE_LO               0x0c
 #define CE_DR_SIZE                  0x14
+#define CE_SR_WR_INDEX              0x3c
+#define CE_DST_WR_INDEX             0x40
+#define CE_CURRENT_SRRI             0x44
 #define CE_CURRENT_DRRI             0x48
 
-#define WLAN_CE2_SHADOW_DST_WR_IDX  0x00032038ull
+#define CE_RING_ENTRIES_TX          32
+#define CE_RING_ENTRIES_RX          32
+#define CE_BUF_SIZE                 2048
 
-#define CE2_RING_ENTRIES            64
-#define CE2_BUF_SIZE                2048
+/* Ring/buffer layout inside the 256 KiB CE pool. Entries must match the
+ * CE_RING_ENTRIES_* sizes below: 32 descriptors = 256 B, and the FW's
+ * nbytes_max (2048) equals CE_BUF_SIZE so the two cannot disagree. */
+#define CE0_RING_OFFSET             0x00000
+#define CE1_RING_OFFSET             0x01000
+#define CE2_RING_OFFSET             0x02000
+#define CE3_RING_OFFSET             0x03000
 
-static IOMemoryMap *g_wlan_ce_map = NULL;
-static volatile uint8_t *g_wlan_ce_base = NULL;
-static volatile uint32_t *g_ce2_regs = NULL;
-static volatile uint32_t *g_ce2_shadow_wr = NULL;
+#define CE0_BUFS_OFFSET             0x08000
+#define CE1_BUFS_OFFSET             0x0C000  /* 32 + 64 entries at 2048 = 196 KiB total */
+#define CE2_BUFS_OFFSET             0x1C000
+#define CE3_BUFS_OFFSET             0x28000
 
-static struct picasso_ce_desc s_ce2_ring[CE2_RING_ENTRIES] __attribute__((aligned(4096)));
-static uint8_t s_ce2_buf[CE2_RING_ENTRIES * CE2_BUF_SIZE] __attribute__((aligned(4096)));
+#define ATH10K_HTC_MSG_READY_ID                1
+#define ATH10K_HTC_MSG_CONNECT_SERVICE_ID      2
+#define ATH10K_HTC_MSG_CONNECT_SERVICE_RESP_ID 3
+#define ATH10K_HTC_MSG_SETUP_COMPLETE_ID       4
+#define ATH10K_HTC_MSG_SETUP_COMPLETE_EX_ID    5
+
+#define ATH10K_HTC_SVC_ID_WMI_CONTROL          0x0100
+
+static vm_offset_t s_ce_mem_va = 0;
+static uint64_t s_ce_mem_pa = 0;
+static IOMemoryMap *s_ce_dma_map = NULL;
+
+static struct picasso_ce_desc *g_ce0_ring = NULL;
+static uint8_t *g_ce0_buf_virt = NULL;
+static uint32_t g_ce0_sw_index = 0;
+
+static struct picasso_ce_desc *g_ce1_ring = NULL;
+static uint8_t *g_ce1_buf_virt = NULL;
+static uint32_t g_ce1_sw_index = 0;
 
 static struct picasso_ce_desc *g_ce2_ring = NULL;
 static uint8_t *g_ce2_buf_virt = NULL;
-static uint64_t g_ce2_buf_phys = 0;
 static uint32_t g_ce2_sw_index = 0;
 
-extern "C" uint64_t kvtophys(vm_offset_t va);
+static struct picasso_ce_desc *g_ce3_ring = NULL;
+static uint8_t *g_ce3_buf_virt = NULL;
+static uint32_t g_ce3_sw_index = 0;
 
+static bool g_htc_handshake_done = false;
+static uint8_t g_wmi_eid = 1;
+
+static IOMemoryMap *s_wlan_ce_map = NULL;
+static uint64_t rmtfs_pa;
+static uint8_t *rmtfs_va;
+
+extern "C" vm_offset_t kvtophys(vm_offset_t va);
+extern "C" void FlushPoC_DcacheRegion(vm_offset_t va, size_t length);
 static void picasso_parse_beacon_frame(const uint8_t *frame, size_t len, int16_t rssi, uint16_t freq);
+
+/*
+ * Malformed WMI commands do not just fail: the WLAN PD asserts and the whole
+ * modem (PAS id 4) goes down with it, taking the AP with it. Every function
+ * in this block therefore refuses to touch a CE whose ring the FW did not
+ * configure through WLFW_WLAN_CFG, and the scanner stays off unless
+ * `wifi_scan=1` (or `wifi_scan_hw=1`) asked for it.
+ */
+static int g_ce_pipe_dir[12];
+static uint32_t g_ce_pipe_nent[12];
+static uint32_t g_ce_pipe_nbytes[12];
+static uint32_t g_ce_target_cur_srri[12];
+static uint32_t g_ce_ring_nent[12];
+static uint32_t g_ce_ring_nbytes[12];
+static bool g_ce_target_ready = false;
+static bool g_wlan_hw_scan = false;
+static uint32_t g_ce_armed_ce;
+
+static void
+picasso_wlan_ce_cfg_tables(void)
+{
+	PE_parse_boot_argn("wifi_scan", &g_wlan_hw_scan, sizeof(g_wlan_hw_scan));
+	PE_parse_boot_argn("wifi_scan_hw", &g_wlan_hw_scan, sizeof(g_wlan_hw_scan));
+	for (unsigned i = 0; i < sizeof(wlfw_ce_tbl) / sizeof(wlfw_ce_tbl[0]); i++) {
+		g_ce_pipe_dir[i] = (int)wlfw_ce_tbl[i].dir_type;
+		g_ce_pipe_nent[i] = wlfw_ce_tbl[i].nentries;
+		g_ce_pipe_nbytes[i] = wlfw_ce_tbl[i].nbytes_max;
+	}
+	for (unsigned i = 0; i < sizeof(wlfw_svc_tbl) / sizeof(wlfw_svc_tbl[0]); i++) {
+		uint32_t svc = wlfw_svc_tbl[i].service_id;
+		uint32_t pipe = wlfw_svc_tbl[i].pipe_num;
+		uint32_t dir = wlfw_svc_tbl[i].pipe_dir;
+		if ((svc == ATH10K_HTC_SVC_ID_WMI_CONTROL || svc == 0x0101 || svc == 0x0102) &&
+		    pipe < 12 && dir != 0) {
+			g_ce_pipe_dir[pipe] = (int)dir;
+		}
+		if (svc == 0x0100 && !g_wmi_eid) {
+			g_wmi_eid = (uint8_t)pipe;
+		}
+	}
+}
+
+static uint32_t
+ce_rd(volatile uint8_t *ce, uint32_t off)
+{
+	return *(volatile uint32_t *)(ce + off);
+}
+
+static void
+ce_wr(volatile uint8_t *ce, uint32_t off, uint32_t v)
+{
+	*(volatile uint32_t *)(ce + off) = v;
+	(void)ce_rd(ce, off);
+}
+
+static uint32_t
+ce_pa_of(uint32_t ce)
+{
+	switch (ce) {
+	case 0: return WLAN_CE0_PA;
+	case 1: return WLAN_CE1_PA;
+	case 2: return WLAN_CE2_PA;
+	case 3: return WLAN_CE3_PA;
+	case 4: return WLAN_CE4_PA;
+	case 5: return WLAN_CE5_PA;
+	case 6: return WLAN_CE6_PA;
+	case 7: return WLAN_CE7_PA;
+	case 8: return WLAN_CE8_PA;
+	case 9: return WLAN_CE9_PA;
+	case 10: return WLAN_CE10_PA;
+	case 11: return WLAN_CE11_PA;
+	}
+	return 0;
+}
+
+/*
+ * The offset of a copy engine inside the 0x18800000 mapping. The mapping starts at WLAN_CE_BASE_PA,
+ * not at zero, so `s_wlan_ce_base + WLAN_CE0_PA` is 0x18800000 + 0x240000 = 0x18a40000 (CE0).
+ * (An earlier revision used 0x480000 = 0x18c80000, which does not respond.)
+ */
+static uint32_t
+ce_off_of(uint32_t ce)
+{
+	return ce_pa_of(ce);
+}
+
+/*
+ * Everything below reads the copy-engine registers of a live target. Before
+ * the kernel has mapped its own text the first WLAN request can arrive
+ * (FW_READY_IND at ~4.4 s, cpup_start() later): an MMIO read of a page the
+ * kernel's map does not hold is a data abort in EL1 and the phone panics in
+ * picasso_wlan_ce_init(). Wait for the mapping, and program one register at a
+ * time so a fault names itself in the log.
+ */
+static vm_offset_t
+picasso_wlan_wait_ready(void)
+{
+	vm_offset_t m = 0;
+
+	for (int i = 0; i < 200; i++) {
+		m = ml_io_map(WLAN_CE_BASE_PA + WLAN_CE0_PA, 0x1000);
+		if (m != 0) {
+			return m;
+		}
+		IOSleep(10);
+	}
+	return 0;
+}
+
+static void
+picasso_ce_mmio_load(volatile uint8_t *ce, uint32_t off, const char *name)
+{
+	uint32_t v = ce_rd(ce, off);
+
+	LOG("picasso_ce: %s @0x%03x = %08x", name, off, v);
+}
+
+static void
+picasso_wlan_ce_dump(void)
+{
+	volatile uint8_t *c0 = s_wlan_ce_base + ce_off_of(0);
+	volatile uint8_t *c1 = s_wlan_ce_base + ce_off_of(1);
+	volatile uint8_t *c2 = s_wlan_ce_base + ce_off_of(2);
+	volatile uint8_t *c3 = s_wlan_ce_base + ce_off_of(3);
+
+	LOG("picasso_ce: control = %08x (0 = the target never brought the CEs up)",
+	    ce_rd(c0, CE_SR_BASE_LO));
+	picasso_ce_mmio_load(c0, CE_SR_BASE_LO, "CE0.SR_BASE_LO");
+	picasso_ce_mmio_load(c0, CE_SR_SIZE, "CE0.SR_SIZE");
+	picasso_ce_mmio_load(c0, CE_CURRENT_SRRI, "CE0.CURRENT_SRRI");
+	picasso_ce_mmio_load(c1, CE_DR_BASE_LO, "CE1.DR_BASE_LO");
+	picasso_ce_mmio_load(c1, CE_DR_SIZE, "CE1.DR_SIZE");
+	picasso_ce_mmio_load(c1, CE_CURRENT_DRRI, "CE1.CURRENT_DRRI");
+	picasso_ce_mmio_load(c2, CE_DR_BASE_LO, "CE2.DR_BASE_LO");
+	picasso_ce_mmio_load(c2, CE_DR_SIZE, "CE2.DR_SIZE");
+	picasso_ce_mmio_load(c2, CE_CURRENT_DRRI, "CE2.CURRENT_DRRI");
+	picasso_ce_mmio_load(c3, CE_SR_BASE_LO, "CE3.SR_BASE_LO");
+	picasso_ce_mmio_load(c3, CE_SR_SIZE, "CE3.SR_SIZE");
+}
 
 static void
 picasso_wlan_ce_init(void)
 {
-	LOG("picasso_wlan_ce_init: Initializing Copy Engine 2 (Target->Host WMI/OTA Beacons)...");
+	static bool initialized = false;
+	if (initialized) return;
 
-	if (!g_ce2_ring) {
-		bzero(s_ce2_ring, sizeof(s_ce2_ring));
-		bzero(s_ce2_buf, sizeof(s_ce2_buf));
-
-		g_ce2_ring = s_ce2_ring;
-		g_ce2_buf_virt = s_ce2_buf;
-
-		uint64_t ring_pa = kvtophys((vm_offset_t)s_ce2_ring);
-		uint64_t buf_pa = kvtophys((vm_offset_t)s_ce2_buf);
-		g_ce2_buf_phys = buf_pa;
-
-		for (unsigned i = 0; i < CE2_RING_ENTRIES; i++) {
-			g_ce2_ring[i].addr = g_ce2_buf_phys + (uint64_t)i * CE2_BUF_SIZE;
-			g_ce2_ring[i].nbytes = 0;
-			g_ce2_ring[i].flags = 0;
-			g_ce2_ring[i].toeplitz = 0;
-		}
-		mb();
-
-		if (!g_wlan_ce_map) {
-			g_wlan_ce_map = map_phys(WLAN_CE_BASE_PA, WLAN_CE_SIZE, false);
-			if (!g_wlan_ce_map) {
-				LOG("picasso_wlan_ce_init: failed to map WLAN CE MMIO region (0x%llx)", WLAN_CE_BASE_PA);
-				return;
-			}
-			g_wlan_ce_base = (volatile uint8_t *)g_wlan_ce_map->getVirtualAddress();
-			g_ce2_regs = (volatile uint32_t *)(g_wlan_ce_base + WLAN_CE2_OFFSET);
-			g_ce2_shadow_wr = (volatile uint32_t *)(g_wlan_ce_base + WLAN_CE2_SHADOW_DST_WR_IDX);
-		}
-
-		/* Note: Writing to hardware shadow write register directly can trigger
-		 * a TrustZone XPU interconnect violation on SM7250 if peripheral DMA
-		 * is not pre-approved in TZ memory policies. Initialize descriptors in RAM. */
-		g_ce2_sw_index = 0;
-		LOG("picasso_wlan_ce_init: CE2 dest ring initialized safely at PA 0x%llx (DR_BASE=0x%x, DR_SIZE=%u)",
-		    ring_pa,
-		    g_ce2_regs[CE_DR_BASE_LO >> 2],
-		    g_ce2_regs[CE_DR_SIZE >> 2]);
+	if (!rmtfs_va || !rmtfs_pa) {
+		LOG("picasso_wlan_ce_init: rmtfs buffer not ready!");
+		return;
 	}
+	if (!s_wlan_ce_map) {
+		if (picasso_wlan_wait_ready() == 0) {
+			LOG("picasso_wlan_ce_init: WLAN MMIO is not mappable yet, no copy engines");
+			return;
+		}
+	}
+
+	picasso_wlan_ce_cfg_tables();
+
+	LOG("picasso_wlan_ce_init: Initializing CE0..CE3 using 256KB DMA memory at PA 0x%llx...",
+	    rmtfs_pa + 0x100000ull);
+
+	s_ce_mem_va = (vm_offset_t)(rmtfs_va + 0x100000ull);
+	s_ce_mem_pa = rmtfs_pa + 0x100000ull;
+	bzero((void *)s_ce_mem_va, 0x40000);
+
+	uint8_t *ce_base = (uint8_t *)s_ce_mem_va;
+	uint64_t ce_pa = s_ce_mem_pa;
+
+	g_ce0_ring = (struct picasso_ce_desc *)(ce_base + CE0_RING_OFFSET);
+	g_ce1_ring = (struct picasso_ce_desc *)(ce_base + CE1_RING_OFFSET);
+	g_ce2_ring = (struct picasso_ce_desc *)(ce_base + CE2_RING_OFFSET);
+	g_ce3_ring = (struct picasso_ce_desc *)(ce_base + CE3_RING_OFFSET);
+
+	g_ce0_buf_virt = ce_base + CE0_BUFS_OFFSET;
+	g_ce1_buf_virt = ce_base + CE1_BUFS_OFFSET;
+	g_ce2_buf_virt = ce_base + CE2_BUFS_OFFSET;
+	g_ce3_buf_virt = ce_base + CE3_BUFS_OFFSET;
+
+	g_ce0_sw_index = 0;
+	g_ce1_sw_index = 0;
+	g_ce2_sw_index = 0;
+	g_ce3_sw_index = 0;
+
+	if (!s_wlan_ce_map) {
+		s_wlan_ce_map = map_phys(WLAN_CE_BASE_PA, WLAN_CE_SIZE, false);
+		if (s_wlan_ce_map) {
+			s_wlan_ce_base = (volatile uint8_t *)s_wlan_ce_map->getVirtualAddress();
+			LOG("picasso_wlan_ce_init: Mapped WLAN CE MMIO at %p (PA 0x%llx)",
+			    s_wlan_ce_base, WLAN_CE_BASE_PA);
+		} else {
+			LOG("picasso_wlan_ce_init: FAILED to map WLAN CE MMIO 0x%llx!", WLAN_CE_BASE_PA);
+			return;
+		}
+	}
+
+	/* Read the target's own rings before writing anything: a CE the target
+	 * never brought up cannot have the FW's rings anywhere near ours, and
+	 * pointing a target DMA at host memory it does not expect is what takes
+	 * the modem (and the phone) down. */
+	picasso_wlan_ce_dump();
+
+	g_ce_bus_init = true;
+	initialized = true;
+	LOG("picasso_wlan_ce_init: copy engines read only; no ring armed this boot");
+}
+
+static void
+ce_kick_src(uint32_t ce, uint64_t buf_pa, uint32_t total_len)
+{
+	volatile uint8_t *c = s_wlan_ce_base + ce_off_of(ce);
+	uint32_t n = g_ce_target_cur_srri[ce] & (g_ce_ring_nent[ce] - 1);
+
+	FlushPoC_DcacheRegion((vm_offset_t)(s_ce_mem_va + (buf_pa - s_ce_mem_pa)), total_len);
+	mb();
+	g_ce_target_cur_srri[ce] = (n + 1) & (g_ce_ring_nent[ce] - 1);
+	ce_wr(c, CE_SR_WR_INDEX, g_ce_target_cur_srri[ce]);
+}
+
+static void
+picasso_htc_send_connect_service(void)
+{
+	if (!g_ce_target_ready || !(g_ce_armed_ce & 1u)) return;
+
+	uint32_t n = g_ce_ring_nent[0];
+	uint32_t slot = g_ce_target_cur_srri[0] & (n - 1);
+	uint8_t *buf = g_ce0_buf_virt + (uint64_t)slot * CE_BUF_SIZE;
+	bzero(buf, 64);
+
+	/* HTC Header (4 bytes) */
+	buf[0] = 0;     /* Endpoint 0 (Control) */
+	buf[1] = 0;     /* Flags */
+	buf[2] = 8;     /* Payload length: 8 bytes */
+	buf[3] = 0;
+
+	/* ath10k_htc_msg: message_id = 2 (CONNECT_SERVICE) */
+	buf[4] = 0x02;
+	buf[5] = 0x00;
+
+	/* ath10k_htc_conn_svc: service_id = 0x0100 (WMI_CONTROL) */
+	buf[6] = 0x00;
+	buf[7] = 0x01;
+
+	/* flags = 0, pad0 = 0, pad1 = 0 */
+	buf[8] = 0;
+	buf[9] = 0;
+	buf[10] = 0;
+	buf[11] = 0;
+
+	ce_kick_src(0, s_ce_mem_pa + CE0_BUFS_OFFSET + (uint64_t)slot * CE_BUF_SIZE, 12);
+
+	LOG("picasso_htc_send_connect_service: Sent CONNECT_SERVICE (WMI 0x0100) to CE0 [slot %u]",
+	    slot);
+}
+
+static void
+picasso_htc_send_setup_complete(void)
+{
+	if (!g_ce_target_ready || !(g_ce_armed_ce & 1u)) return;
+
+	uint32_t n = g_ce_ring_nent[0];
+	uint32_t slot = g_ce_target_cur_srri[0] & (n - 1);
+	uint8_t *buf = g_ce0_buf_virt + (uint64_t)slot * CE_BUF_SIZE;
+	bzero(buf, 64);
+
+	/* HTC Header (4 bytes) */
+	buf[0] = 0;     /* Endpoint 0 (Control) */
+	buf[1] = 0;     /* Flags */
+	buf[2] = 12;    /* Payload length: 12 bytes */
+	buf[3] = 0;
+
+	/* ath10k_htc_msg: message_id = 5 (SETUP_COMPLETE_EX) */
+	buf[4] = 0x05;
+	buf[5] = 0x00;
+
+	/* struct ath10k_htc_setup_complete_extended: pad0=0, pad1=0, flags=0 (all 0) */
+
+	ce_kick_src(0, s_ce_mem_pa + CE0_BUFS_OFFSET + (uint64_t)slot * CE_BUF_SIZE, 16);
+
+	LOG("picasso_htc_send_setup_complete: Sent SETUP_COMPLETE_EX to CE0 [slot %u]", slot);
+}
+
+static void
+picasso_wlan_send_wmi_scan(void)
+{
+	if (!g_ce_target_ready || !g_htc_handshake_done || !g_ce3_ring) return;
+
+	/* WMI lives on the service pipe assigned by CSN (ath10k: svc->pipe), not
+	 * on a hardcoded CE3: kick nothing if the FW gave WMI somewhere else. */
+	uint32_t pipe = g_wmi_eid;
+	if (pipe == 0 || pipe >= 12 || g_ce_pipe_dir[pipe] != PD_OUT) {
+		LOG("picasso_wlan_send_wmi_scan: WMI pipe %u is not a FW TX pipe (dir=%d), refusing",
+		    pipe, pipe < 12 ? g_ce_pipe_dir[pipe] : -1);
+		return;
+	}
+
+	uint32_t n = g_ce_ring_nent[pipe];
+	uint32_t slot = g_ce_target_cur_srri[pipe] & (n - 1);
+	uint8_t *buf = g_ce3_buf_virt + (uint64_t)slot * CE_BUF_SIZE;
+	bzero(buf, 512);
+
+	/* HTC Header (4 bytes) */
+	buf[0] = (uint8_t)pipe;             /* Endpoint ID negotiated from HTC */
+	buf[1] = 0;                         /* Flags */
+	/* buf[2..3] = payload length */
+
+	/* WMI TLV Header (4 bytes) starting at buf + 4 */
+	uint8_t *wmi = buf + 4;
+	uint32_t wmi_len = 0;
+
+	/* Tag: 0x0017 (WMI_TLV_TAG_STRUCT_START_SCAN_CMD), Len: 0x48 (72 bytes) */
+	wmi[wmi_len++] = 0x17; wmi[wmi_len++] = 0x00;
+	wmi[wmi_len++] = 0x48; wmi[wmi_len++] = 0x00;
+
+	/* wmi_start_scan_cmd body (72 bytes) */
+	*(uint32_t *)(wmi + wmi_len) = 1; wmi_len += 4; /* scan_id */
+	*(uint32_t *)(wmi + wmi_len) = 1; wmi_len += 4; /* scan_req_id */
+	*(uint32_t *)(wmi + wmi_len) = 0; wmi_len += 4; /* vdev_id */
+	*(uint32_t *)(wmi + wmi_len) = 1; wmi_len += 4; /* scan_priority = 1 */
+	*(uint32_t *)(wmi + wmi_len) = 0x3f; wmi_len += 4; /* notify_scan_events */
+	*(uint32_t *)(wmi + wmi_len) = 50; wmi_len += 4;   /* dwell_time_active */
+	*(uint32_t *)(wmi + wmi_len) = 150; wmi_len += 4;  /* dwell_time_passive */
+	*(uint32_t *)(wmi + wmi_len) = 50; wmi_len += 4;   /* min_rest_time */
+	*(uint32_t *)(wmi + wmi_len) = 500; wmi_len += 4;  /* max_rest_time */
+	*(uint32_t *)(wmi + wmi_len) = 20000; wmi_len += 4;/* max_scan_time */
+	*(uint32_t *)(wmi + wmi_len) = 0; wmi_len += 4;    /* scan_ctrl_flags */
+	*(uint32_t *)(wmi + wmi_len) = 0; wmi_len += 4;    /* burst_duration_ms */
+	*(uint32_t *)(wmi + wmi_len) = 11; wmi_len += 4;   /* num_channels */
+	*(uint32_t *)(wmi + wmi_len) = 0; wmi_len += 4;    /* num_ssids */
+	*(uint32_t *)(wmi + wmi_len) = 0; wmi_len += 4;    /* num_bssids */
+	*(uint32_t *)(wmi + wmi_len) = 0; wmi_len += 4;    /* ie_len */
+	*(uint32_t *)(wmi + wmi_len) = 3; wmi_len += 4;    /* num_probes */
+
+	/* mac_addr (6 bytes) + mac_mask (6 bytes) */
+	memset(wmi + wmi_len, 0xff, 12);
+	wmi_len += 12;
+
+	/* TLV Channels Array: Tag = 0x0013 (ARRAY_UINT32), Len = 11 * 4 = 44 */
+	wmi[wmi_len++] = 0x13; wmi[wmi_len++] = 0x00;
+	wmi[wmi_len++] = 44;   wmi[wmi_len++] = 0x00;
+
+	static const uint32_t scan_freqs[11] = {
+		2412, 2417, 2422, 2427, 2432, 2437, 2442, 2447, 2452, 2457, 2462
+	};
+	for (int i = 0; i < 11; i++) {
+		*(uint32_t *)(wmi + wmi_len) = scan_freqs[i];
+		wmi_len += 4;
+	}
+
+	/* Fill HTC length */
+	buf[2] = (uint8_t)(wmi_len & 0xff);
+	buf[3] = (uint8_t)((wmi_len >> 8) & 0xff);
+
+	uint32_t total_len = 4 + wmi_len;
+
+	ce_kick_src(pipe, s_ce_mem_pa + CE3_BUFS_OFFSET + (uint64_t)slot * CE_BUF_SIZE, total_len);
+
+	LOG("picasso_wlan_send_wmi_scan: Dispatched WMI_START_SCAN_CMDID (%u bytes) to CE%u [slot %u]",
+	    total_len, pipe, slot);
 }
 
 static void
 picasso_wlan_ce_poll(void)
 {
-	if (!g_ce2_ring || !g_ce2_buf_virt || !g_ce2_shadow_wr) return;
+	if (!g_ce_target_ready || !(g_ce_armed_ce & (1u << 1))) return;
 
-	for (unsigned iter = 0; iter < CE2_RING_ENTRIES; iter++) {
-		struct picasso_ce_desc *desc = &g_ce2_ring[g_ce2_sw_index];
+	/* ---------------- Poll CE1: Target -> Host HTT + HTC Control ---------------- */
+	volatile uint8_t *ce1 = s_wlan_ce_base + ce_off_of(1);
+	uint32_t hw_drri1 = ce_rd(ce1, CE_CURRENT_DRRI);
+	uint32_t n1 = g_ce_ring_nent[1];
+	uint32_t nb1 = g_ce_ring_nbytes[1];
+
+	while (n1 && g_ce1_sw_index != (hw_drri1 & n1)) {
+		uint32_t slot = g_ce1_sw_index;
+		struct picasso_ce_desc *desc = &g_ce1_ring[slot];
+		uint8_t *pkt = g_ce1_buf_virt + (uint64_t)slot * CE_BUF_SIZE;
+
+		FlushPoC_DcacheRegion((vm_offset_t)desc, sizeof(*desc));
+		FlushPoC_DcacheRegion((vm_offset_t)pkt, (size_t)nb1);
 		uint16_t nbytes = desc->nbytes;
-		if (nbytes == 0) {
-			break;
+
+		LOG("picasso_wlan_ce_poll: [CE1 slot %u] nbytes=%u data: %02x %02x %02x %02x %02x %02x %02x %02x",
+		    slot, nbytes, pkt[0], pkt[1], pkt[2], pkt[3], pkt[4], pkt[5], pkt[6], pkt[7]);
+
+		if (nbytes >= 6 && pkt[0] == 0) {
+			uint16_t len = pkt[2] | (pkt[3] << 8);
+			uint16_t msg_id = pkt[4] | (pkt[5] << 8);
+			LOG("picasso_wlan_ce_poll: [CE1] HTC Control Message ID=0x%04x (len=%u)", msg_id, len);
+			if (msg_id == ATH10K_HTC_MSG_READY_ID /* 1 */) {
+				uint16_t credit_count = nbytes >= 8 ? (pkt[6] | (pkt[7] << 8)) : 0;
+				uint16_t credit_size = nbytes >= 10 ? (pkt[8] | (pkt[9] << 8)) : 0;
+				LOG("picasso_wlan_ce_poll: *** HTC_MSG_READY received! credits=%u size=%u ***",
+				    credit_count, credit_size);
+				picasso_htc_send_connect_service();
+			} else if (msg_id == ATH10K_HTC_MSG_CONNECT_SERVICE_RESP_ID /* 3 */) {
+				if (nbytes >= 10) {
+					uint16_t svc_id = pkt[6] | (pkt[7] << 8);
+					uint8_t status = pkt[8];
+					uint8_t assigned_eid = pkt[9];
+					LOG("picasso_wlan_ce_poll: *** HTC_CONNECT_SERVICE_RESP: svc=0x%04x status=%u eid=%u ***",
+					    svc_id, status, assigned_eid);
+					if (status == 0 && svc_id == ATH10K_HTC_SVC_ID_WMI_CONTROL &&
+					    assigned_eid && assigned_eid < 12) {
+						g_wmi_eid = assigned_eid;
+						/* The FW owns the TX ring of our pipe:
+						 * trust its index and never go below it. */
+						g_ce_target_cur_srri[assigned_eid] =
+						    ce_rd(s_wlan_ce_base + ce_off_of(assigned_eid), CE_CURRENT_SRRI);
+						picasso_htc_send_setup_complete();
+						g_htc_handshake_done = true;
+						LOG("picasso_wlan_ce_poll: *** HTC HANDSHAKE COMPLETE! WMI READY ON CE%u ***",
+						    g_wmi_eid);
+					}
+				}
+			}
 		}
 
-		LOG("picasso_wlan_ce_poll: [slot %u] received %u bytes", g_ce2_sw_index, nbytes);
+		/* Replenish CE1 descriptor (host ring: give the buffer back) */
+		desc->nbytes = (slot + 1 == n1) ? (uint16_t)(nb1 | CE_DESC_FLAGS_LAST)
+		                               : (uint16_t)nb1;
+		desc->flags = (uint16_t)CE_DESC_FLAGS_HOST_ADDR;
+		FlushPoC_DcacheRegion((vm_offset_t)desc, sizeof(*desc));
+		mb();
+		ce_wr(ce1, CE_DST_WR_INDEX, slot);
 
-		if (nbytes <= CE2_BUF_SIZE) {
-			const uint8_t *pkt = g_ce2_buf_virt + (uint64_t)g_ce2_sw_index * CE2_BUF_SIZE;
-			/*
-			 * Check packet for 802.11 Beacon (0x80) or Probe Response (0x50) frame.
-			 * The frame may be raw 802.11 or encapsulated in HTC (8B) + WMI (4B) + TLVs.
-			 */
-			bool parsed = false;
+		g_ce1_sw_index = (slot + 1) & n1;
+		hw_drri1 = ce_rd(ce1, CE_CURRENT_DRRI);
+	}
+
+	/* ---------------- Poll CE2: Target -> Host WMI Events / Beacons ---------------- */
+	if (!(g_ce_armed_ce & (1u << 2)) || g_ce_pipe_dir[2] != PD_IN) return;
+
+	volatile uint8_t *ce2 = s_wlan_ce_base + ce_off_of(2);
+	uint32_t hw_drri2 = ce_rd(ce2, CE_CURRENT_DRRI);
+	uint32_t n2 = g_ce_ring_nent[2];
+	uint32_t nb2 = g_ce_ring_nbytes[2];
+
+	while (n2 && g_ce2_sw_index != (hw_drri2 & n2)) {
+		uint32_t slot = g_ce2_sw_index;
+		struct picasso_ce_desc *desc = &g_ce2_ring[slot];
+		uint8_t *buf = g_ce2_buf_virt + (uint64_t)slot * CE_BUF_SIZE;
+
+		FlushPoC_DcacheRegion((vm_offset_t)desc, sizeof(*desc));
+		FlushPoC_DcacheRegion((vm_offset_t)buf, (size_t)nb2);
+		uint16_t nbytes = desc->nbytes;
+
+		LOG("picasso_wlan_ce_poll: [CE2 slot %u] DRRI=%u nbytes=%u flags=0x%04x data: %02x %02x %02x %02x %02x %02x %02x %02x",
+		    slot, hw_drri2, nbytes, desc->flags,
+		    buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7]);
+
+		/* WMI events arrive as unnamed TLVs: scan events carry 802.11 frames
+		 * (STRUCT_MGMT_RX_EVENT / MGT_RX_EVENT) further inside the payload. */
+		if (nbytes > 4 && nbytes <= nb2) {
 			for (size_t off = 0; off + 36 <= (size_t)nbytes; off++) {
-				uint8_t b0 = pkt[off];
-				uint8_t b1 = pkt[off + 1];
-				if ((b0 == 0x80 || b0 == 0x50) && b1 == 0x00) {
-					picasso_parse_beacon_frame(pkt + off, nbytes - off, -50, 2412);
-					parsed = true;
+				const uint8_t *p = buf + off;
+				if ((p[0] == 0x80 || p[0] == 0x50 || p[0] == 0x40) && p[1] == 0x00) {
+					picasso_parse_beacon_frame(p, nbytes - off, -50, 2412);
 					break;
 				}
 			}
-			if (!parsed && nbytes >= 36) {
-				if (pkt[0] == 0x80 || pkt[0] == 0x50) {
-					picasso_parse_beacon_frame(pkt, nbytes, -50, 2412);
-				} else if (nbytes > 12 && (pkt[12] == 0x80 || pkt[12] == 0x50)) {
-					picasso_parse_beacon_frame(pkt + 12, nbytes - 12, -50, 2412);
-				}
-			}
 		}
 
-		desc->nbytes = 0;
+		/* Replenish CE2 descriptor */
+		desc->nbytes = (slot + 1 == n2) ? (uint16_t)(nb2 | CE_DESC_FLAGS_LAST)
+		                               : (uint16_t)nb2;
+		desc->flags = (uint16_t)CE_DESC_FLAGS_HOST_ADDR;
+		FlushPoC_DcacheRegion((vm_offset_t)desc, sizeof(*desc));
 		mb();
+		ce_wr(ce2, CE_DST_WR_INDEX, slot);
 
-		g_ce2_sw_index = (g_ce2_sw_index + 1) & (CE2_RING_ENTRIES - 1);
-		*g_ce2_shadow_wr = (g_ce2_sw_index - 1) & (CE2_RING_ENTRIES - 1);
-		mb();
+		g_ce2_sw_index = (slot + 1) & n2;
+		hw_drri2 = ce_rd(ce2, CE_CURRENT_DRRI);
 	}
 }
 
@@ -3290,93 +3872,51 @@ picasso_parse_beacon_frame(const uint8_t *frame, size_t len, int16_t rssi, uint1
 	}
 }
 
-static void
-picasso_feed_air_beacon(const char *ssid, const uint8_t *bssid, uint8_t channel, uint16_t freq, int16_t rssi, bool wpa2)
-{
-	uint8_t frame[256];
-	memset(frame, 0, sizeof(frame));
-
-	/* IEEE 802.11 Management Frame Header */
-	frame[0] = 0x80; /* Frame Control: Management Beacon (0x0080) */
-	frame[1] = 0x00;
-	frame[2] = 0x00; /* Duration */
-	frame[3] = 0x00;
-	memset(frame + 4, 0xff, 6);  /* DA: Broadcast */
-	memcpy(frame + 10, bssid, 6); /* SA: BSSID */
-	memcpy(frame + 16, bssid, 6); /* BSSID */
-	frame[22] = 0x10;            /* Sequence Control */
-	frame[23] = 0x00;
-
-	/* Fixed parameters */
-	uint64_t ts = mach_absolute_time();
-	memcpy(frame + 24, &ts, 8);   /* Timestamp: 8 bytes */
-	frame[32] = 0x64;             /* Beacon Interval: 100 TU (102.4 ms) */
-	frame[33] = 0x00;
-	frame[34] = wpa2 ? 0x11 : 0x01; /* Capability: ESS | Privacy */
-	frame[35] = 0x00;
-
-	size_t off = 36;
-	/* Element 0: SSID */
-	uint8_t slen = (uint8_t)strlen(ssid);
-	if (slen > 32) slen = 32;
-	frame[off++] = 0;
-	frame[off++] = slen;
-	memcpy(frame + off, ssid, slen);
-	off += slen;
-
-	/* Element 1: Supported Rates (1, 2, 5.5, 11, 6, 9, 12, 18 Mbps) */
-	frame[off++] = 1;
-	frame[off++] = 8;
-	frame[off++] = 0x82; frame[off++] = 0x84; frame[off++] = 0x8b; frame[off++] = 0x96;
-	frame[off++] = 0x0c; frame[off++] = 0x12; frame[off++] = 0x18; frame[off++] = 0x24;
-
-	/* Element 3: DS Parameter Set (Current Channel) */
-	frame[off++] = 3;
-	frame[off++] = 1;
-	frame[off++] = channel;
-
-	/* Element 48: RSN (WPA2-PSK AES-CCMP) */
-	if (wpa2) {
-		frame[off++] = 48;
-		frame[off++] = 20;
-		frame[off++] = 0x01; frame[off++] = 0x00;
-		frame[off++] = 0x00; frame[off++] = 0x0f; frame[off++] = 0xac; frame[off++] = 0x04;
-		frame[off++] = 0x01; frame[off++] = 0x00;
-		frame[off++] = 0x00; frame[off++] = 0x0f; frame[off++] = 0xac; frame[off++] = 0x04;
-		frame[off++] = 0x01; frame[off++] = 0x00;
-		frame[off++] = 0x00; frame[off++] = 0x0f; frame[off++] = 0xac; frame[off++] = 0x02;
-		frame[off++] = 0x00; frame[off++] = 0x00;
-	}
-
-	/* Pass raw over-the-air frame directly to standard IEEE 802.11 beacon parser */
-	picasso_parse_beacon_frame(frame, off, rssi, freq);
-}
-
 static int
 picasso_sta_scan(const struct hakios_sta_scan *what)
 {
 	(void)what;
-	IOLog("picasso_sta_scan: WCN3990 scanning over-the-air 2.4GHz & 5GHz channels...\n");
 
 	g_picasso_bss_count = 0;
 
-	/* Real physical over-the-air RF access points present in current environment */
-	static const uint8_t bssid_tomc_5g[6] = { 0x26, 0x0b, 0x2a, 0xb4, 0x69, 0x4c };
-	static const uint8_t bssid_tomc_2g[6] = { 0x26, 0x0b, 0x2a, 0x14, 0x69, 0x4c };
-	static const uint8_t bssid_5g[6]      = { 0x26, 0x0b, 0x2a, 0x94, 0x69, 0x4c };
-	static const uint8_t bssid_nhim_5g[6] = { 0x24, 0x0b, 0x2a, 0xd4, 0x69, 0x4d };
-	static const uint8_t bssid_nhim_2g[6] = { 0x24, 0x0b, 0x2a, 0xd4, 0x69, 0x4c };
-	static const uint8_t bssid_truong[6]  = { 0x26, 0x0b, 0x2a, 0x24, 0x69, 0x4c };
+	if (!g_wlan_hw_scan) {
+		IOLog("picasso_sta_scan: OTA scan is off (boot-arg wifi_scan=1 enables it); "
+		      "no BSS heard\n");
+		return 0;
+	}
+	if (!g_ce_target_ready) {
+		IOLog("picasso_sta_scan: Copy engines not initialised, nothing to scan with\n");
+		return 0;
+	}
 
-	picasso_feed_air_beacon("ID-TOMC-VP", bssid_tomc_5g, 48, 5240, -26, true);
-	picasso_feed_air_beacon("ID-TOMC-VP", bssid_tomc_2g, 1, 2412, -29, true);
-	picasso_feed_air_beacon("5G", bssid_5g, 48, 5240, -24, true);
-	picasso_feed_air_beacon("Nhim Chua", bssid_nhim_5g, 48, 5240, -24, true);
-	picasso_feed_air_beacon("Nhim Chua", bssid_nhim_2g, 1, 2412, -29, true);
-	picasso_feed_air_beacon("TRUONG CUOM", bssid_truong, 1, 2412, -30, true);
+	IOLog("picasso_sta_scan: WCN3990 scanning over-the-air 2.4GHz & 5GHz channels...\n");
 
-	/* Poll Copy Engine 2 ring for any incoming hardware OTA packets */
-	picasso_wlan_ce_poll();
+	if (s_wlan_ce_base && (g_ce_armed_ce & ((1u << 1) | (1u << 2)))) {
+		volatile uint8_t *ce1 = s_wlan_ce_base + ce_off_of(1);
+		volatile uint8_t *ce2 = s_wlan_ce_base + ce_off_of(2);
+		uint32_t drri1 = ce_rd(ce1, CE_CURRENT_DRRI);
+		uint32_t drri2 = ce_rd(ce2, CE_CURRENT_DRRI);
+		IOLog("picasso_sta_scan: CE1 DRRI=%u sw=%u | CE2 DRRI=%u sw=%u (htc_ready=%d)\n",
+		      drri1, g_ce1_sw_index, drri2, g_ce2_sw_index, g_htc_handshake_done);
+
+		/* Wait for the HTC handshake instead of blocking the scan caller. */
+		for (int i = 0; i < 60 && !g_htc_handshake_done; i++) {
+			picasso_wlan_ce_poll();
+			IOSleep(20);
+		}
+		if (!g_htc_handshake_done) {
+			IOLog("picasso_sta_scan: HTC handshake did not complete, scan skipped\n");
+			return 0;
+		}
+
+		picasso_wlan_send_wmi_scan();
+
+		/* Dwell and poll Copy Engines for incoming hardware OTA beacon frames */
+		for (int dwell = 0; dwell < 40; dwell++) {
+			picasso_wlan_ce_poll();
+			IOSleep(25);
+		}
+	}
 
 	IOLog("picasso_sta_scan: WCN3990 scan complete, heard %u access points\n", g_picasso_bss_count);
 	return 0;
@@ -3560,8 +4100,9 @@ wlfw_rx(const uint8_t *d, uint32_t len)
 		} else if (msg == WLFW_FW_READY_IND) {
 			LOG("t=%u ms: *** WLFW FW_READY_IND (0x21) RECEIVED! ***", g_ms);
 			wlfw_ready = true;
-			if (wlfw_state == 7) {
-				wlfw_state = 8;
+			/* CE init moved to WLFW step 9, after WLAN_CFG: the FW only arms/clocks the CE block once it has the CE config, so reading CE regs on FW_READY_IND hangs. */
+			if (wlfw_state == 8) {
+				wlfw_state = 9;
 				wlfw_tries = 0;
 				wlfw_step();
 			}
@@ -3619,6 +4160,20 @@ wlfw_rx(const uint8_t *d, uint32_t len)
 			}
 		}
 	} else if (msg == WLFW_CAP) {
+		{ /* DEBUG: hex-dump the raw CAP response to read fw_version / fw_build_id (remove after diagnosis) */
+			static const char hx[] = "0123456789abcdef";
+			for (uint32_t i = 0; i < len; i += 32) {
+				char hex[3 * 32 + 1];
+				uint32_t n = MIN(len - i, 32u), k = 0;
+				for (uint32_t j = 0; j < n; j++) {
+					hex[k++] = hx[d[i + j] >> 4];
+					hex[k++] = hx[d[i + j] & 0xf];
+					hex[k++] = ' ';
+				}
+				hex[k] = '\0';
+				LOG("WLFW_CAP_DUMP off %u: %s", i, hex);
+			}
+		}
 		if (qm_tlv_find(d, len, 0x10, &val, &vlen) && vlen >= 8) {
 			memcpy(&wlfw_chip_id, val, 4);
 			memcpy(&wlfw_chip_family, val + 4, 4);
@@ -3631,7 +4186,7 @@ wlfw_rx(const uint8_t *d, uint32_t len)
 		}
 		LOG("t=%u ms: WLFW CAP: chip_id=0x%x chip_family=0x%x board_id=0x%x soc_id=0x%x",
 		    g_ms, wlfw_chip_id, wlfw_chip_family, wlfw_board_id, wlfw_soc_id);
-	} else if (msg == WLFW_BDF_DOWNLOAD && wlfw_state == 5 && wlfw_bdf_file != NULL) {
+	} else if (msg == WLFW_BDF_DOWNLOAD && wlfw_state == 6 && wlfw_bdf_file != NULL) {
 		uint32_t rem = wlfw_bdf_file->size > wlfw_bdf_offset ? (wlfw_bdf_file->size - wlfw_bdf_offset) : 0;
 		uint16_t chunk = (uint16_t)MIN(rem, WLFW_MAX_BDF_CHUNK);
 		wlfw_bdf_offset += chunk;
@@ -3644,10 +4199,10 @@ wlfw_rx(const uint8_t *d, uint32_t len)
 		LOG("t=%u ms: WLFW BDF download complete (%u bytes in %u segments)",
 		    g_ms, wlfw_bdf_file->size, wlfw_bdf_seg);
 	}
-	if (wlfw_state >= 1 && wlfw_state <= 9) {
+	if (wlfw_state >= 1 && wlfw_state <= 10) {
 		wlfw_state++;
 		wlfw_tries = 0;
-		if (wlfw_state > 9) {
+		if (wlfw_state > 10) {
 			LOG("t=%u ms: *** WLFW MISSION MODE ATTACH COMPLETE! WLAN RADIO IS ACTIVE! ***", g_ms);
 			wlfw_state = 0;
 			picasso_wlan_ce_init();
@@ -3894,7 +4449,7 @@ pdr_rx(uint32_t node, uint32_t port, const uint8_t *d, uint32_t len)
 		if (msg == SERVREG_REGISTER_LISTENER && result == 0) {
 			pdr_ok = true;
 			LOG("t=%u ms: PDR listener ACCEPTED for the first try group (state 0x%x)", g_ms, state);
-		} else if (result != 0 && (pdr_retries < 3 || (pdr_retries % 20) == 0)) {
+		} else if (result != 0 && wlfw_state < 5 && pdr_retries < 3) {
 			LOG("t=%u ms: PDR %s resp txn %u: result %u error %u state 0x%x", g_ms,
 			    msg == SERVREG_QUERY_STATE ? "query" : (msg == SERVREG_RESTART_PD ? "restart" : "register"),
 			    txn, result, error, state);
@@ -3998,8 +4553,6 @@ static const struct { const char *path, *part; } rmtfs_parts[] = {
 	{ "/boot/modem_fsc", "fsc" },
 	{ "/boot/modem_fsg", "fsg" },
 };
-static uint64_t rmtfs_pa;
-static uint8_t *rmtfs_va;
 
 struct rmtfs_iovec_entry {
 	uint32_t sector_addr;
@@ -4175,11 +4728,15 @@ rmtfs_init_buf(void)
 	rmtfs_va = (uint8_t *)rmtfs_map->getVirtualAddress();
 	bzero(rmtfs_va, RMTFS_BUF_SIZE);
 	LOG("rmtfs: buffer pa %llx mapped at %p", rmtfs_pa, rmtfs_va);
+
+	/* The copy engines at rmtfs_pa + 0x100000 are beyond RMTFS_BUF_SIZE and
+	 * live in DDR that HLOS itself reads and writes: leave them with HLOS only.
+	 * Only the rmtfs window goes to MSS_MSA (the modem's own EFS traffic). */
 	{
 		static const uint32_t vm[1] = { VMID_MSS_MSA };
 		r = hyp_assign(rmtfs_pa, RMTFS_BUF_SIZE, vm, 1);
 	}
-	LOG("rmtfs: shared buffer %llx+%llx assign %llx", rmtfs_pa,
+	LOG("rmtfs: shared buffer %llx+%llx assign %llx to MSS_MSA only", rmtfs_pa,
 	    (uint64_t)RMTFS_BUF_SIZE, r);
 }
 
@@ -4801,6 +5358,8 @@ after_probe:
 		m->release();
 	}
 	rmtfs_load_efs();                       /* before the modem can ask */
+	fw_get("wlanmdsp.mbn");                 /* pre-cache WLAN firmware */
+	wlfw_select_bdf();                      /* pre-cache WLAN Board Data */
 	dump_reserved_memory();
 	rmtfs_init_buf();                       /* DMA pool, same place as the PAS metadata */
 	LOG("segments loaded");
@@ -5078,18 +5637,22 @@ modem_thread(void *arg __unused, wait_result_t wr __unused)
 					uint32_t type = (s2 >> 16) & 3u;
 					LOG("wlan smmu: match at SMR[%d]=%08x S2CR=%08x (type=%u)",
 					    match_idx, r[(0x800 >> 2) + match_idx], s2, type);
-					if (wlansmmu >= 2 && type != 1u) {
+					if (wlansmmu >= 2) {
+						/* Ensure mask covers stream 0xc0 and 0xc1 (WLAN and WLAN_CE) */
+						r[(0x800 >> 2) + match_idx] = (1u << 31) | (1u << 16) | 0xc0u;
 						s2 = (s2 & ~(3u << 16)) | (1u << 16);
 						r[(0xc00 >> 2) + match_idx] = s2;
 						__asm__ volatile ("dsb sy" ::: "memory");
-						LOG("wlan smmu: S2CR[%d] set to bypass (%08x)", match_idx, s2);
+						LOG("wlan smmu: SMR[%d] set to 0x800100c0 and S2CR[%d] set to bypass (%08x)",
+						    match_idx, match_idx, s2);
 					}
 				} else if (wlansmmu >= 2 && free_idx >= 0) {
-					r[(0x800 >> 2) + free_idx] = (1u << 31) | 0xc0u;
+					/* Stream 0xc0 with mask 0x1 (covers 0xc0 and 0xc1) */
+					r[(0x800 >> 2) + free_idx] = (1u << 31) | (1u << 16) | 0xc0u;
 					r[(0xc00 >> 2) + free_idx] = (1u << 16); /* bypass */
 					__asm__ volatile ("dsb sy" ::: "memory");
 					LOG("wlan smmu: allocated SMR[%d]=%08x S2CR=bypass",
-					    free_idx, (1u << 31) | 0xc0u);
+					    free_idx, (1u << 31) | (1u << 16) | 0xc0u);
 				} else {
 					LOG("wlan smmu: no match found for stream 0xc0 (free_idx=%d)", free_idx);
 				}
@@ -5166,7 +5729,7 @@ modem_thread(void *arg __unused, wait_result_t wr __unused)
 					/* A modem that never answers a registration is not
 					 * going to answer the tenth one either: retry a few
 					 * times, then stop filling the TX queue. */
-					if (ms != 0 && (ms % 2000) == 0 && g_pdr_tries < 8) {
+					if (ms != 0 && (ms % 2000) == 0 && g_pdr_tries < 8 && wlfw_state < 5) {
 						g_pdr_tries++;
 						pdr_retry_all();
 					}

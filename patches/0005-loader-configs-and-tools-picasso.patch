@@ -1,5 +1,5 @@
 diff --git a/configs/boot-args.lst b/configs/boot-args.lst
-index 7af859d..1d9cafc 100644
+index 7af859d..3138169 100644
 --- a/configs/boot-args.lst
 +++ b/configs/boot-args.lst
 @@ -8,16 +8,20 @@ adreno_pause	k
@@ -24,7 +24,15 @@ index 7af859d..1d9cafc 100644
  adsp_step	k
  adsp_wait	k
  apfs_cheap	k
-@@ -159,6 +163,7 @@ metal_gmem	u
+@@ -97,6 +101,7 @@ fb_hz	k
+ fb_measure	k
+ fb_pri	k
+ fb_queue	k
++fb_sync	k
+ fb_threads	k
+ fbheight	k
+ fbscale	k
+@@ -159,6 +164,7 @@ metal_gmem	u
  metal_gmem_draws	u
  metal_gmem_off	u
  metal_skip	u
@@ -32,7 +40,7 @@ index 7af859d..1d9cafc 100644
  metal_trace	u
  metal_watch	u
  mic	k
-@@ -212,6 +217,17 @@ modem_wait	k
+@@ -212,6 +218,17 @@ modem_wait	k
  modem_wda_off	k
  net_names	k
  net_trace	k
@@ -50,7 +58,7 @@ index 7af859d..1d9cafc 100644
  pmic	k
  pmic_list	k
  press_power	k
-@@ -258,6 +274,7 @@ surf_clear	k
+@@ -258,6 +275,7 @@ surf_clear	k
  surf_wrap	k
  surftrace	k
  surftrace_of	k
@@ -58,7 +66,7 @@ index 7af859d..1d9cafc 100644
  switcher_wallpaper	u
  syssleep	k
  systrace	k
-@@ -305,6 +322,7 @@ virtio_blk	k
+@@ -305,6 +323,7 @@ virtio_blk	k
  virtio_input	k
  virtio_net	k
  virtio_sound	k
@@ -296,7 +304,7 @@ index 08ae448..1a2c019 100644
  # Extra arguments (1)
  #
 diff --git a/configs/symbols.tsv b/configs/symbols.tsv
-index 31ed41b..3137ed1 100644
+index 31ed41b..767c67c 100644
 --- a/configs/symbols.tsv
 +++ b/configs/symbols.tsv
 @@ -8,15 +8,19 @@ ADRENO_PAUSE	arg	adreno_pause	GPU and display	k	hakios.adreno.c	how long the new
@@ -320,7 +328,15 @@ index 31ed41b..3137ed1 100644
  ADSP_STEP	arg	adsp_step	Audio and battery	k	hakios.adsp.c	
  ADSP_WAIT	arg	adsp_wait	Audio and battery	k	hakios.adsp.c	
  APFS_CHEAP	arg	apfs_cheap	Storage and APFS	k	apfs_vfsops.c	
-@@ -145,6 +149,7 @@ METAL_GMEM	arg	metal_gmem	User space	u	HakiosMetalCA.m
+@@ -88,6 +92,7 @@ FB_HZ	arg	fb_hz	GPU and display	k	MiniIOMobileFramebuffer.cpp
+ FB_MEASURE	arg	fb_measure	GPU and display	k	MiniIOMobileFramebuffer.cpp	how often the panel is really refreshed
+ FB_PRI	arg	fb_pri	GPU and display	k	MiniIOMobileFramebuffer.cpp	
+ FB_QUEUE	arg	fb_queue	GPU and display	k	MiniIOMobileFramebuffer.cpp	
++FB_SYNC	arg	fb_sync	GPU and display	k	MiniIOMobileFramebuffer.cpp	
+ FB_THREADS	arg	fb_threads	GPU and display	k	MiniIOMobileFramebuffer.cpp	
+ FBHEIGHT	arg	fbheight	GPU and display	k	MiniIOMobileFramebuffer.cpp	
+ FBSCALE	arg	fbscale	GPU and display	k	MiniIOMobileFramebuffer.cpp	the same 375 x 812 points drawn at two pixels a point instead of three
+@@ -145,6 +150,7 @@ METAL_GMEM	arg	metal_gmem	User space	u	HakiosMetalCA.m
  METAL_GMEM_DRAWS	arg	metal_gmem_draws	User space	u	HakiosMetalCA.m	GMEM for a pass whose like had at least N draws in the frame before (hakios_metal_cb_set_gmem_min_draws), sysmem for the rest; 56 when not given, 0
  METAL_GMEM_OFF	arg	metal_gmem_off	User space	u	HakiosMetalCA.m	
  METAL_SKIP	arg	metal_skip	User space	u	HakiosMetalCA.m	
@@ -328,7 +344,7 @@ index 31ed41b..3137ed1 100644
  METAL_TRACE	arg	metal_trace	User space	u	HakiosMetalCA.m	
  METAL_WATCH	arg	metal_watch	User space	u	inject.c	
  MIC_ADC	arg	mic_adc	Audio and battery	k	hakios.mic.c	
-@@ -192,6 +197,17 @@ MODEM_SIM_SWITCH_OFF	arg	modem_sim_switch_off	Cellular	k	hakios.mpss.c
+@@ -192,6 +198,17 @@ MODEM_SIM_SWITCH_OFF	arg	modem_sim_switch_off	Cellular	k	hakios.mpss.c
  MODEM_STEP	arg	modem_step	Cellular	k	hakios.mpss.c	the steps once the root is there, then back to the loader if modem_return=1 says so
  MODEM_WAIT	arg	modem_wait	Cellular	k	hakios.mpss.c	
  MODEM_WDA_OFF	arg	modem_wda_off	Cellular	k	hakios.mpss.c	
@@ -346,7 +362,7 @@ index 31ed41b..3137ed1 100644
  PMIC_LIST	arg	pmic_list	Chip, thermal and PMIC	k	hakios.pmic.c	only the clock, not the inventory of every block
  PRESS_POWER	arg	press_power	Touch and buttons	k	hakios.buttons.c	a short press of the power key that many seconds after boot, and another ten seconds later, given to Darwin as the key's own are (hakios_touch_post):
  PRESS_POWER_MS	arg	press_power_ms	Touch and buttons	k	hakios.buttons.c	
-@@ -234,6 +250,7 @@ SURF_CLEAR	arg	surf_clear	GPU and display	k	MiniIOSurface.cpp	kept memory is giv
+@@ -234,6 +251,7 @@ SURF_CLEAR	arg	surf_clear	GPU and display	k	MiniIOSurface.cpp	kept memory is giv
  SURF_WRAP	arg	surf_wrap	GPU and display	k	MiniIOSurface.cpp	surfaces around the client's pictures refused, as before methodWrapClientImage (for comparing)
  SURFTRACE	arg	surftrace	GPU and display	k	MiniIOSurface.cpp	log the first N surfaces created (default 24)
  SURFTRACE_OF	arg	surftrace_of	GPU and display	k	MiniIOSurface.cpp	
@@ -354,7 +370,7 @@ index 31ed41b..3137ed1 100644
  SWITCHER_WALLPAPER	arg	switcher_wallpaper	User space	u	inject_sb.c	
  SYSSLEEP	arg	syssleep	CPU, memory and boot	k	(patch)	
  SYSTRACE	arg	systrace	CPU, memory and boot	k	(patch),user_exception_trace.c	
-@@ -272,6 +289,7 @@ VBLUR	arg	vblur	GPU and display	u	eagl.c
+@@ -272,6 +290,7 @@ VBLUR	arg	vblur	GPU and display	u	eagl.c
  VIRTIO_BLK	arg	virtio_blk	Storage and APFS	k	hakios.virtio_blk.c	
  VIRTIO_INPUT	arg	virtio_input	Touch and buttons	k	hakios.virtio_input.c	
  VIRTIO_SOUND	arg	virtio_sound	Audio and battery	k	hakios.virtio_sound.c	
@@ -378,7 +394,7 @@ index 60616fe..e9dfe94 100644
  	repository  https://github.com/oosexgang/hakios-uefi.git
  	revision    1c6522893266157506c767e2ca427053ed3634a8
 diff --git a/docs/boot-args.md b/docs/boot-args.md
-index 16bc0fd..a3bd44c 100644
+index 16bc0fd..e8f8065 100644
 --- a/docs/boot-args.md
 +++ b/docs/boot-args.md
 @@ -2,13 +2,13 @@
@@ -386,14 +402,14 @@ index 16bc0fd..a3bd44c 100644
  Made by `tools/boot-args.py --markdown`; CI fails if it is out of date with the source (`tools/boot-args.py --check`).
  
 -Every argument that the kernel, the loader or user space of this port reads, and which file reads it. **339 arguments**: 276 read by the kernel, 14 by the loader, 59 by user space (one is read in more than one place).
-+Every argument that the kernel, the loader or user space of this port reads, and which file reads it. **357 arguments**: 294 read by the kernel, 14 by the loader, 59 by user space (one is read in more than one place).
++Every argument that the kernel, the loader or user space of this port reads, and which file reads it. **358 arguments**: 295 read by the kernel, 14 by the loader, 59 by user space (one is read in more than one place).
  
  This is a catalogue of what exists and who reads it, not a manual. What an argument means is in the head of the file that reads it. The stable switches have a symbol in the configuration (`tools/hakios-config.py help SYMBOL`, `docs/configs.md`); the rest are the knobs of bring-up (a driver's steps, pauses, traces, test modes) and can change with the driver. Any of them can be given in a configuration with `CONFIG_BOOTARGS="name=value ..."`, which checks that each name is in this list.
  
  Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl kern.bootargs`).
  
 -## GPU and display (74)
-+## GPU and display (77)
++## GPU and display (78)
  
  | Argument | Layer | Read by | Configuration | Set by |
  |---|---|---|---|---|
@@ -409,7 +425,15 @@ index 16bc0fd..a3bd44c 100644
  | `display_probe` | K | `hakios.adreno.c` | `CONFIG_DISPLAY_PROBE` |  |
  | `fb_beat` | K | `MiniIOMobileFramebuffer.cpp` | `CONFIG_FB_BEAT` |  |
  | `fb_ca_hz` | K | `MiniIOMobileFramebuffer.cpp` | `CONFIG_FB_CA_HZ` |  |
-@@ -75,6 +77,7 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
+@@ -33,6 +35,7 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
+ | `fb_measure` | K | `MiniIOMobileFramebuffer.cpp` | `CONFIG_FB_MEASURE` |  |
+ | `fb_pri` | K | `MiniIOMobileFramebuffer.cpp` | `CONFIG_FB_PRI` |  |
+ | `fb_queue` | K | `MiniIOMobileFramebuffer.cpp` | `CONFIG_FB_QUEUE` |  |
++| `fb_sync` | K | `MiniIOMobileFramebuffer.cpp` | `CONFIG_FB_SYNC` |  |
+ | `fb_threads` | K | `MiniIOMobileFramebuffer.cpp` | `CONFIG_FB_THREADS` |  |
+ | `fbheight` | K | `MiniIOMobileFramebuffer.cpp` | `CONFIG_FBHEIGHT` |  |
+ | `fbscale` | K | `MiniIOMobileFramebuffer.cpp` | `CONFIG_FBSCALE` |  |
+@@ -75,6 +78,7 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
  | `gpu_keep` | K | `hakios.gpu.cpp` | `CONFIG_GPU_KEEP` |  |
  | `gpu_log` | K | `hakios.adreno.c` | `CONFIG_GPU_LOG` |  |
  | `metal` | KU | `HakiosMetal.m`, `MiniIOMobileFramebuffer.cpp` | `CONFIG_METAL` |  |
@@ -417,7 +441,7 @@ index 16bc0fd..a3bd44c 100644
  | `rec_mb` | K | `MiniIOMobileFramebuffer.cpp` | `CONFIG_REC_MB` |  |
  | `rec_ring` | K | `MiniIOMobileFramebuffer.cpp` | `CONFIG_REC_RING` |  |
  | `rec_secs` | K | `MiniIOMobileFramebuffer.cpp` | `CONFIG_REC_SECS` |  |
-@@ -187,7 +190,7 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
+@@ -187,7 +191,7 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
  | `soc_pas_mpss` | K | `hakios.mpss.c` | `CONFIG_SOC_PAS_MPSS` |  |
  | `soc_smem` | K | `hakios.mpss.c`, `hakios.socinfo.c` | `CONFIG_SOC_SMEM` |  |
  
@@ -426,7 +450,7 @@ index 16bc0fd..a3bd44c 100644
  
  | Argument | Layer | Read by | Configuration | Set by |
  |---|---|---|---|---|
-@@ -196,9 +199,11 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
+@@ -196,9 +200,11 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
  | `adsp_apr_wait` | K | `hakios.adsp.c` | `CONFIG_ADSP_APR_WAIT` |  |
  | `adsp_keep` | K | `hakios.adsp.c` | `CONFIG_ADSP_KEEP` |  |
  | `adsp_listen` | K | `hakios.adsp.c` | `CONFIG_ADSP_LISTEN` |  |
@@ -438,7 +462,7 @@ index 16bc0fd..a3bd44c 100644
  | `adsp_step` | K | `hakios.adsp.c` | `CONFIG_ADSP_STEP` |  |
  | `adsp_wait` | K | `hakios.adsp.c` | `CONFIG_ADSP_WAIT` |  |
  | `battery` | KL | `hakios.adsp.c`, `hakios.battery.c`, `loader.c` | `CONFIG_BATTERY` |  |
-@@ -213,6 +218,7 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
+@@ -213,6 +219,7 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
  | `mic_secs` | K | `hakios.mic.c` | `CONFIG_MIC_SECS` |  |
  | `mic_tap` | K | `hakios.mic.c` | `CONFIG_MIC_TAP` |  |
  | `mic_test` | K | `hakios.mic.c` | `CONFIG_MIC_TEST` |  |
@@ -446,7 +470,7 @@ index 16bc0fd..a3bd44c 100644
  | `rec_sound` | K | `hakios.audio.c` | `CONFIG_REC_SOUND` |  |
  | `rec_sound_fed` | K | `hakios.audio.c` | `CONFIG_REC_SOUND_FED` |  |
  | `rec_sound_mic` | K | `hakios.audio.c` | `CONFIG_REC_SOUND_MIC` |  |
-@@ -345,7 +351,7 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
+@@ -345,7 +352,7 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
  |---|---|---|---|---|
  | `hakios_kver` | K | `hakios.version.c` |  | the loader (from the payload's kernel.ver) |
  
@@ -455,7 +479,7 @@ index 16bc0fd..a3bd44c 100644
  
  | Argument | Layer | Read by | Configuration | Set by |
  |---|---|---|---|---|
-@@ -362,12 +368,14 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
+@@ -362,12 +369,14 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
  | `loader_return_after` | KL | `loader.c`, `loader_return.c` |  | xl (XL_SECS) |
  | `machine_name` | K | `GenericARMPE.cpp` | `CONFIG_MACHINE_NAME` |  |
  | `membench` | K | `hakios.cpufreq.c` | `CONFIG_MEMBENCH` |  |
@@ -470,7 +494,7 @@ index 16bc0fd..a3bd44c 100644
  | `syssleep` | K | `(patch)` | `CONFIG_SYSSLEEP` |  |
  | `systrace` | K | `(patch)`, `user_exception_trace.c` | `CONFIG_SYSTRACE` |  |
  | `systrace_name` | K | `(patch)` | `CONFIG_SYSTRACE_NAME` |  |
-@@ -395,7 +403,7 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
+@@ -395,7 +404,7 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
  | `ufs` | L | `loader.c` | `CONFIG_UFS` |  |
  | `ufs_probe` | L | `loader.c` | `CONFIG_UFS_PROBE` |  |
  
@@ -479,7 +503,7 @@ index 16bc0fd..a3bd44c 100644
  
  | Argument | Layer | Read by | Configuration | Set by |
  |---|---|---|---|---|
-@@ -421,8 +429,18 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
+@@ -421,8 +430,18 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
  | `metal_skip` | U | `HakiosMetalCA.m` | `CONFIG_METAL_SKIP` |  |
  | `metal_trace` | U | `HakiosMetalCA.m` | `CONFIG_METAL_TRACE` |  |
  | `metal_watch` | U | `inject.c` | `CONFIG_METAL_WATCH` |  |
@@ -760,10 +784,32 @@ index d8e696a..5a95481 100755
 +$LD /subsystem:efi_application /entry:efi_main /nodefaultlib /base:0xA1000000 /out:loader.efi loader.obj
  ls -la loader.efi
 diff --git a/xnuloader/loader.c b/xnuloader/loader.c
-index 422f9d3..bd3b560 100644
+index 422f9d3..b438ee8 100644
 --- a/xnuloader/loader.c
 +++ b/xnuloader/loader.c
-@@ -588,6 +588,18 @@ static const struct platform platform_redwood = {
+@@ -41,6 +41,21 @@ struct payload_entry { char name[16]; uint32_t size; uint32_t reserved; };
+ #define PANIC_LOG_BASE      (PAYLOAD_BASE + PAYLOAD_MAX_SIZE - 0x100000ULL)
+ #define PAYLOAD_MAX_SIZE    0x04000000ULL         /* RAM reserved for the payload in the UEFI memory map */
+ 
++#define EMBEDDED_PANIC_MAGIC   0x46554E4Bu        /* 'FUNK': Apple embedded panic log magic */
++
++struct embedded_panic_header {
++	uint32_t eph_magic;
++	uint32_t eph_crc;
++	uint32_t eph_version;
++	uint32_t eph_panic_flags;
++	uint32_t eph_panic_log_offset;
++	uint32_t eph_panic_log_len;
++	uint32_t eph_stackshot_offset;
++	uint32_t eph_stackshot_len;
++	uint32_t eph_other_log_offset;
++	uint32_t eph_other_log_len;
++};
++
+ /* ------------------------------------------------------------------------ */
+ /* XNU structures (pexpert/pexpert/arm64/boot.h, mach-o/loader.h)           */
+ 
+@@ -588,6 +603,18 @@ static const struct platform platform_redwood = {
  	.small_cores = 0x0f,
  };
  
@@ -782,7 +828,40 @@ index 422f9d3..bd3b560 100644
  /* ------------------------------------------------------------------------ */
  
  static void
-@@ -3441,6 +3453,10 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
+@@ -2393,7 +2420,7 @@ run_on_other_cpu(uint64_t mpidr, uint64_t entry, uint64_t boot_args_pa, const st
+ 		 * the kernel does it too, but whether that counts from another core is not known.
+ 		 * After that a kernel that neither returns nor hangs visibly meets the watchdog.
+ 		 */
+-		if (wdt_armed && seconds_since(last_pet) >= 5 && seconds_since(started) < budget + 60) {
++		if (wdt_armed && seconds_since(last_pet) >= 5 && (budget == 0 || seconds_since(started) < budget + 60)) {
+ 			wdt_pet();
+ 			last_pet = READ_SYSREG(CNTVCT_EL0);
+ 		}
+@@ -3122,12 +3149,12 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
+ 	}
+ 	const char *base_cmdline = (PLAT->uart != 0 && !own_serial) ? "debug=0x8 serial=3 " : "debug=0x8 ";
+ 	uint32_t n = 0;
+-	for (const char *c = base_cmdline; *c && n < BOOT_LINE_LENGTH - 1; c++) {
++	for (const char *c = base_cmdline; *c && n + 1 < BOOT_LINE_LENGTH - 1; c++) {
+ 		ba->commandLine[n++] = *c;
+ 	}
+ 	/* one processor unless the payload asks for more (of two "cpus=" the kernel takes the first) */
+ 	if (!more_cores) {
+-		for (const char *c = "cpus=1 "; *c && n < BOOT_LINE_LENGTH - 1; c++) {
++		for (const char *c = "cpus=1 "; *c && n + 1 < BOOT_LINE_LENGTH - 1; c++) {
+ 			ba->commandLine[n++] = *c;
+ 		}
+ 	}
+@@ -3137,7 +3164,7 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
+ 		own_root |= starts_with(c, "rd=") && (c == pi.cmdline || c[-1] == ' ');
+ 	}
+ 	if (rd_size != 0 && !own_root) {
+-		for (const char *c = "rd=md0 "; *c && n < BOOT_LINE_LENGTH - 1; c++) {
++		for (const char *c = "rd=md0 "; *c && n + 1 < BOOT_LINE_LENGTH - 1; c++) {
+ 			ba->commandLine[n++] = *c;
+ 		}
+ 	}
+@@ -3441,6 +3468,10 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
  		dt_prop_u32(&w, "boot-console", 1);
  		dt_end(&w);
  	}
@@ -793,7 +872,19 @@ index 422f9d3..bd3b560 100644
  	dt_end(&w);
  
  	dt_end(&w);
-@@ -4345,6 +4361,9 @@ efi_main(efi_handle image, efi_system_table *st)
+@@ -3988,6 +4019,11 @@ fb_command(char *cmd)
+ 			/* the firmware's memory map into the log (then "oem log" and fetch it) */
+ 			print_memory_map();
+ 			fb_reply("OKAY", "");
++		} else if (starts_with(cmd, "oem paniclog")) {
++			/* Stage the raw 512 KB /pram panic log region for host extraction */
++			staged_data = (const char *)PANIC_LOG_BASE;
++			staged_len = PANIC_LOG_SIZE;
++			fb_reply("OKAY", "");
+ 		} else if (starts_with(cmd, "oem log")) {
+ 			if (busy && running_live != NULL) {
+ 				compose_live_log(running_live, running_slide);
+@@ -4345,6 +4381,9 @@ efi_main(efi_handle image, efi_system_table *st)
  		SCREEN.stride = GOP->mode->info->pixels_per_scanline * 4;
  		if (SCREEN.base == 0xE1000000ULL) {
  			PLAT = &platform_redwood;
@@ -803,3 +894,19 @@ index 422f9d3..bd3b560 100644
  		} else {
  			ramfb_phone_screen();
  		}
+@@ -4357,7 +4396,14 @@ efi_main(efi_handle image, efi_system_table *st)
+ 
+ 	int have_payload = parse_payload(&pi, 0);
+ 	if (have_payload && pi.usb_mode && usb_start()) {
+-		flush_log();
++		const struct embedded_panic_header *hdr = (const struct embedded_panic_header *)PANIC_LOG_BASE;
++		if (hdr->eph_magic == EMBEDDED_PANIC_MAGIC) {
++			print("[!] DETECTED PREVIOUS KERNEL PANIC in /pram (version %d, flags 0x%x, log_len %d)\n",
++			    (uint64_t)hdr->eph_version, (uint64_t)hdr->eph_panic_flags, (uint64_t)hdr->eph_panic_log_len);
++			write_logs((const char *)PANIC_LOG_BASE, PANIC_LOG_SIZE);
++		} else {
++			flush_log();
++		}
+ 		usb_command_loop();
+ 	}
+ 

@@ -1,9 +1,9 @@
 diff --git a/xnu/files/bsd/dev/picasso_usb.c b/xnu/files/bsd/dev/picasso_usb.c
 new file mode 100644
-index 0000000..1df30d0
+index 0000000..596dd8d
 --- /dev/null
 +++ b/xnu/files/bsd/dev/picasso_usb.c
-@@ -0,0 +1,3155 @@
+@@ -0,0 +1,3161 @@
 +/* Picasso USB debug console: CDC-ACM log streaming over DWC3.
 + *
 + * Port of the vermeer (ios-vermeer-lab) USB bring-up to the UniXNU Darwin 23
@@ -1683,10 +1683,16 @@ index 0000000..1df30d0
 +		char c = (char)data[i];
 +
 +		if (km_tty[0] != NULL) {
-+			if (c == '\n' && last_cr) {
++			if (c == '\r') {
++				cons_cinput('\n');
++				last_cr = true;
++			} else if (c == '\n') {
++				if (!last_cr) {
++					cons_cinput('\n');
++				}
 +				last_cr = false;
 +			} else {
-+				last_cr = (c == '\r');
++				last_cr = false;
 +				cons_cinput(c);
 +			}
 +		}

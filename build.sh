@@ -86,7 +86,8 @@ prepare_workspaces() {
 			echo "    + applying $p"
 			git -C "$BUILD_DIR/hakios-xnu-kernel" apply --whitespace=nowarn "$PICASSO_DIR/patches/$p"
 		done
-		git -C "$BUILD_DIR/hakios-xnu-kernel" add -N xnu/files/bsd/dev/picasso_usb.c userland/com.apple.ZhuGeService.plist 2>/dev/null || true
+		# 0002 adds a new file: intent-to-add after it is applied, or every later diff (and its export) drops it
+		git -C "$BUILD_DIR/hakios-xnu-kernel" add -N xnu/files/bsd/dev/picasso_usb.c userland/com.apple.ZhuGeService.plist userland/var userland/src/sh.c 2>/dev/null || true
 
 		ln -sfn "$PICASSO_DIR" "$BUILD_DIR/hakios-xnu-kernel/devices/picasso"
 
@@ -154,6 +155,9 @@ build_kernel_and_loader() {
 		XNU_URL="file://$UPSTREAM_DIR/xnu-8796.121.2" \
 		HFS_URL="file://$UPSTREAM_DIR/hfs-627.100.6" \
 			./xnu/apply.sh
+	else
+		echo "==> Syncing modified xnu/files/ into xnu-src/xnu-8796.121.2..."
+		cp -rf xnu/files/. xnu-src/xnu-8796.121.2/
 	fi
 
 	echo "==> Compiling XNU kernel (-j$(nproc))..."
@@ -170,11 +174,23 @@ build_userland() {
 	echo "==> [2/3] Building Darwin Userland & APFS RAM Disks..."
 	echo "========================================================================"
 	cd "$BUILD_DIR/hakios-xnu-kernel"
+	export PATH="$BUILD_DIR/hakios-xnu-kernel/xnu-deps/host/bin:$PATH"
 
 	cp -f "$PICASSO_DIR/userland/rc.jobs.picasso" userland/rc.jobs.picasso
 	RC_JOBS=rc.jobs.picasso HAKIOS_METAL="$BUILD_DIR/hakios-metal" GL=1 ./userland/build.sh
 	cp -f userland/root.apfs "$OUT_DIR/root.apfs"
 	[ -f userland/system.apfs ] && cp -al -f userland/system.apfs "$OUT_DIR/system.apfs"
+
+	if [ -f "$OUT_DIR/loader.efi" ] && [ -f "$OUT_DIR/hakios-kernel" ] && [ -f "$OUT_DIR/root.apfs" ]; then
+		echo "==> Packing updated XNUP payload.bin..."
+		local ARGS="-v debug=0x14e rd=md0 nointr_consio=1 buttons=1 touchscreen=1 hv_wdt_pet=1 cpus=8 small_cores_after=0 mfb=1 ca_vbl=1 wifi=1 modem=0 modem_wlansmmu=2 ufs=2 ufs_native=1 serial=3 picasso_usb=2 picasso_usb_watchdog=0 virtual_timer_intid=19 glwait=0 glcopy=1 glenv=OSMESA_SOFTWARE=1 press_power=40 thermal=1 pmic=1 loader_return_after=86400 modem_ipa_fw_at=0x8bc00000 thermal_tm0=0xc222000 thermal_tm1=0xc223000 soc_ipa_base=0x1e00000 soc_gsi_base=0x1e04000 soc_ipcc=0x408000 soc_aoss=0xc300000 soc_rsc=0x18220000 soc_apps_smmu=0x15000000 soc_smem=0x80900000 soc_imem=0x146ab000 soc_cmd_db=0x80860000"
+		python3 "$BUILD_DIR/hakios-xnu-kernel/xnuloader/mkpayload.py" -o "$OUT_DIR/payload.bin" \
+			loader.efi="$OUT_DIR/loader.efi" \
+			kernel="$OUT_DIR/hakios-kernel" \
+			ramdisk="$OUT_DIR/root.apfs" \
+			--usb \
+			--cmdline "$ARGS"
+	fi
 }
 
 build_uefi() {
@@ -229,14 +245,14 @@ export_patches() {
 	local BASE_SHA="96ffbc532e970f3540885755d457e401e04d4707"
 	local METAL_SHA="7025778b8c0bbb1a99793f1be06474782d50cdaf"
 
-	git -C "$KWS" add -N xnu/files/bsd/dev/picasso_usb.c userland/com.apple.ZhuGeService.plist 2>/dev/null || true
+	git -C "$KWS" add -N xnu/files/bsd/dev/picasso_usb.c userland/com.apple.ZhuGeService.plist userland/var userland/src/sh.c 2>/dev/null || true
 
 	if [ -d "$KWS/xnu-src/xnu-8796.121.2" ]; then
 		echo "==> Running xnu/export.sh and updating boot-args tables in $KWS..."
 		(
 			cd "$KWS"
 			HFS_SRC="$UPSTREAM_DIR/hfs-627.100.6" ./xnu/export.sh
-			git add -N xnu/files/bsd/dev/picasso_usb.c userland/com.apple.ZhuGeService.plist 2>/dev/null || true
+			git add -N xnu/files/bsd/dev/picasso_usb.c userland/com.apple.ZhuGeService.plist userland/var userland/src/sh.c 2>/dev/null || true
 			python3 tools/boot-args.py --markdown > docs/boot-args.md
 			python3 tools/boot-args.py --lst > configs/boot-args.lst
 			python3 tools/boot-args.py --symbols > configs/symbols.tsv

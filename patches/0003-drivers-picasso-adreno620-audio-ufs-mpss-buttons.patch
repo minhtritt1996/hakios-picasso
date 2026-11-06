@@ -1575,7 +1575,7 @@ index ed5ca7f..83d4ce9 100644
 +void hakios_bt_init(void) {}
 +#endif
 diff --git a/drivers/gpu/hakios.adreno.c b/drivers/gpu/hakios.adreno.c
-index 3f1f97a..241da2c 100644
+index 3f1f97a..3965fd7 100644
 --- a/drivers/gpu/hakios.adreno.c
 +++ b/drivers/gpu/hakios.adreno.c
 @@ -412,8 +412,8 @@ step_outside(void)
@@ -1752,7 +1752,17 @@ index 3f1f97a..241da2c 100644
  	}
  	return true;
  }
-@@ -1257,6 +1244,8 @@ space_new_table(struct gpu_space *space)
+@@ -1224,6 +1211,9 @@ to_memory(vm_offset_t start, vm_size_t size)
+ 
+ #define SPACE_TABLES            1024            /* 2 GB of addresses, were they all in use */
+ 
++struct gpu_space;
++static uint32_t smmu_context(const struct gpu_space *space);
++
+ struct gpu_space {
+ 	const char *name;
+ 	uint32_t context;               /* which of the SMMU's */
+@@ -1257,6 +1247,8 @@ space_new_table(struct gpu_space *space)
  		spare_left = PAGE_SIZE / 4096;
  	}
  	table = (uint64_t *)(spare + PAGE_SIZE - 4096 * spare_left--);
@@ -1761,7 +1771,26 @@ index 3f1f97a..241da2c 100644
  	space->tables[space->table_count].phys = kvtophys((vm_offset_t)table);
  	space->tables[space->table_count++].table = table;
  	return table;
-@@ -1358,6 +1347,7 @@ block_new(struct gpu_space *space, struct gpu_block *block, uint64_t address, ui
+@@ -1285,9 +1277,15 @@ static void
+ space_commit(struct gpu_space *space)
+ {
+ 	for (uint32_t i = 0; i < space->table_count; i++) {
+-		if (space->tables[i].changed) {
+-			to_memory((vm_offset_t)space->tables[i].table, 4096);
+-			space->tables[i].changed = false;
++		to_memory((vm_offset_t)space->tables[i].table, 4096);
++		space->tables[i].changed = false;
++	}
++	if (smmu.base != 0) {
++		uint32_t context = smmu_context(space);
++		wr(smmu.base + context + SMMU_CB_TLBIASID, space->context);
++		wr(smmu.base + context + SMMU_CB_TLBSYNC, 1);
++		for (int i = 0; i < 1000 && (rd(smmu.base + context + SMMU_CB_TLBSTATUS) & 1); i++) {
++			sleep_us(10);
+ 		}
+ 	}
+ }
+@@ -1358,6 +1356,7 @@ block_new(struct gpu_space *space, struct gpu_block *block, uint64_t address, ui
  	    VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
  		return false;
  	}
@@ -1769,7 +1798,7 @@ index 3f1f97a..241da2c 100644
  	for (uint32_t offset = 0; offset < block->size; offset += 4096) {
  		if (!space_map(space, address + offset, kvtophys(block->memory + offset), attributes)) {
  			return false;
-@@ -1404,27 +1394,40 @@ space_faulted(const struct gpu_space *space)
+@@ -1404,27 +1403,40 @@ space_faulted(const struct gpu_space *space)
  	printf("adreno: %u: THE SMMU REFUSED %s: status %#x, address %#llx, syndrome %#x\n", step, space->name, status,
  	    (uint64_t)rd(smmu.base + context + SMMU_CB_FAR + 4) << 32 | rd(smmu.base + context + SMMU_CB_FAR),
  	    rd(smmu.base + context + SMMU_CB_FSYNR0));
@@ -1816,7 +1845,7 @@ index 3f1f97a..241da2c 100644
  /* Give a context our tables and send a stream through it; `match` is the entry of the stream table to use. */
  static bool
  space_on(struct gpu_space *space, uint32_t match, uint32_t stream)
-@@ -1455,11 +1458,19 @@ space_on(struct gpu_space *space, uint32_t match, uint32_t stream)
+@@ -1455,11 +1467,19 @@ space_on(struct gpu_space *space, uint32_t match, uint32_t stream)
  		return false;
  	}
  	put(&smmu, "cb sctlr", context + SMMU_CB_SCTLR, SMMU_SCTLR_ON | space->control);
@@ -1838,7 +1867,7 @@ index 3f1f97a..241da2c 100644
  	    (get(&smmu, "s2cr", SMMU_S2CR(match)) & 0x300ff) != space->context ||
  	    (get(&smmu, "cbar", smmu_page + SMMU_CBAR(space->context)) & 0x30000) != (SMMU_CBAR_STAGE_1 & 0x30000) ||
  	    !(get(&smmu, "cb sctlr", context + SMMU_CB_SCTLR) & 1) ||
-@@ -1554,9 +1565,9 @@ step_trustzone(void)
+@@ -1554,9 +1574,9 @@ step_trustzone(void)
  	static const struct {
  		const char *name;
  		uint32_t id;
@@ -1850,7 +1879,7 @@ index 3f1f97a..241da2c 100644
  
  	announce("ask TrustZone what Linux asks it first: is the call \"is this call available\" available");
  	if (scm("whether it can be asked", how | SCM_IS_CALL_AVAILABLE, SCM_ONE_VALUE, SCM_SIP | SCM_IS_CALL_AVAILABLE, 0,
-@@ -1577,19 +1588,16 @@ step_trustzone(void)
+@@ -1577,19 +1597,16 @@ step_trustzone(void)
  
  	announce("ask TrustZone which images it \"supports\": three this phone starts through it, and the GPU's; each asked "
  	    "both ways, at once and (as Linux does) as a call that may be preempted");
@@ -1874,7 +1903,7 @@ index 3f1f97a..241da2c 100644
  	return true;
  }
  
-@@ -1607,6 +1615,11 @@ extern int mdevgetkernelrange(dev_t dev, vm_offset_t *base, uint64_t *size);
+@@ -1607,6 +1624,11 @@ extern int mdevgetkernelrange(dev_t dev, vm_offset_t *base, uint64_t *size);
   */
  static bool image_asked_quietly;        /* image_file() says nothing: is the file there at all */
  
@@ -1886,7 +1915,7 @@ index 3f1f97a..241da2c 100644
  extern const uint8_t *hakios_image_file(const char *dir, const char *name, uint64_t *size, int *disk_out);
  static const uint8_t *
  image_file(const char *directory, const char *name, uint64_t *size)
-@@ -1648,7 +1661,7 @@ zap_header(uint64_t *phys)
+@@ -1648,7 +1670,7 @@ zap_header(uint64_t *phys)
  	uint64_t size = 0;
  	uint32_t segments, hashes;
  
@@ -1895,7 +1924,7 @@ index 3f1f97a..241da2c 100644
  	if (header == NULL) {
  		return false;
  	}
-@@ -1711,11 +1724,14 @@ step_zap_signature(void)
+@@ -1711,11 +1733,14 @@ step_zap_signature(void)
  #define GMU_ITCM_ADDRESS        0x00000000u
  #define GMU_DTCM_ADDRESS        0x10004000u     /* a6xx_gmu_fw_load: the 650 family's */
  #define GMU_TCM_SIZE            0x4000u
@@ -1911,7 +1940,7 @@ index 3f1f97a..241da2c 100644
  
  struct gmu_firmware_block {
  	uint32_t address, size, type, value;
-@@ -1724,7 +1740,7 @@ struct gmu_firmware_block {
+@@ -1724,7 +1749,7 @@ struct gmu_firmware_block {
  #define GMU_FIRMWARE_NEEDS_KEPT 7
  
  static struct gpu_space gmu_space = { .name = "the GMU", .context = 1 };
@@ -1920,7 +1949,7 @@ index 3f1f97a..241da2c 100644
  static unsigned gmu_block_count;
  static const uint8_t *gmu_firmware;
  static uint64_t gmu_firmware_size;
-@@ -1743,8 +1759,8 @@ step_gmu_space(void)
+@@ -1743,8 +1768,8 @@ step_gmu_space(void)
  	if (!cx_ready()) {
  		return false;
  	}
@@ -1931,7 +1960,7 @@ index 3f1f97a..241da2c 100644
  	if (gmu_firmware == NULL) {
  		return false;
  	}
-@@ -1768,8 +1784,9 @@ step_gmu_space(void)
+@@ -1768,8 +1793,9 @@ step_gmu_space(void)
  			return false;
  		}
  	}
@@ -1943,7 +1972,7 @@ index 3f1f97a..241da2c 100644
  		return false;
  	}
  
-@@ -1779,7 +1796,10 @@ step_gmu_space(void)
+@@ -1779,7 +1805,10 @@ step_gmu_space(void)
  		return false;
  	}
  	gmu_space_is_on = true;         /* whatever of it has been written by the time something fails is taken back */
@@ -1955,7 +1984,7 @@ index 3f1f97a..241da2c 100644
  }
  
  /* ---- step 14: the GMU's firmware ----------------------------------------------------------------------- */
-@@ -1797,6 +1817,10 @@ step_gmu_firmware(void)
+@@ -1797,6 +1826,10 @@ step_gmu_firmware(void)
  	announce("load the GMU's firmware: its first 16K of code and of data through the GMU's registers (0x3d6d000, "
  	    "0x3d71000), the rest into the memory just made");
  	put(&gmu, "cm3_sysreset", GMU_CM3_SYSRESET, 1);
@@ -1966,7 +1995,7 @@ index 3f1f97a..241da2c 100644
  	for (int pass = 0; pass < 2; pass++) {
  		for (uint64_t at = 0; at + sizeof(struct gmu_firmware_block) <= gmu_firmware_size;) {
  			struct gmu_firmware_block block;
-@@ -1862,6 +1886,7 @@ step_gmu_firmware(void)
+@@ -1862,6 +1895,7 @@ step_gmu_firmware(void)
  #define GMU_DCACHE_CONFIG       GMU_WORD(0x4c01)
  #define GMU_SYS_BUS_CONFIG      GMU_WORD(0x4c0f)
  #define GMU_PWR_COL_INTER_FRAME_CTRL GMU_WORD(0x50c0)
@@ -1974,7 +2003,7 @@ index 3f1f97a..241da2c 100644
  #define GMU_RPMH_CTRL           GMU_WORD(0x50e8)
  #define GMU_RPMH_CTRL_ALL       0xf11           /* the RPMh interface, and every vote the firmware may cast */
  #define GMU_CX_FAL_INTF         GMU_WORD(0x50f0)
-@@ -1878,7 +1903,7 @@ step_gmu_firmware(void)
+@@ -1878,7 +1912,7 @@ step_gmu_firmware(void)
  #define GMU_RSCC_CONTROL_REQ    GMU_WORD(0x9307)
  #define GMU_AO_AHB_FENCE_CTRL   GMU_WORD(0x9310)
  #define GMU_AHB_FENCE_RANGE_0   GMU_WORD(0x9311)
@@ -1983,7 +2012,7 @@ index 3f1f97a..241da2c 100644
  #define GMU_STARTED_MASK        0x1ff           /* of fw_init_result, for firmware newer than core 0x20010004 */
  #define GMU_STARTED             0x100
  #define GMU_FAILED              0xe00
-@@ -1893,7 +1918,7 @@ struct hfi_table {
+@@ -1893,7 +1927,7 @@ struct hfi_table {
  };
  #define HFI_QUEUES              3               /* 0: ours to the GMU; 1: its answers; 2: its debugging messages */
  #define HFI_QUEUE_WORDS         1024
@@ -1992,7 +2021,7 @@ index 3f1f97a..241da2c 100644
  
  static volatile struct hfi_table *hfi;  /* the uncached view */
  
-@@ -1915,16 +1940,32 @@ step_gmu_start(void)
+@@ -1915,16 +1949,32 @@ step_gmu_start(void)
  		printf("adreno: %u: the page for the messages is not in one piece\n", step);
  		return false;
  	}
@@ -2028,7 +2057,7 @@ index 3f1f97a..241da2c 100644
  
  	announce("tell the GMU where things are, by its registers: the message table, the log, which GPU this is; its "
  	    "caches and its use of RPMh; then let its processor out of reset");
-@@ -1971,7 +2012,7 @@ step_gmu_start(void)
+@@ -1971,7 +2021,7 @@ step_gmu_start(void)
  
  	gmu_runs = true;
  	put(&gmu, "cm3_sysreset", GMU_CM3_SYSRESET, 0);
@@ -2037,7 +2066,7 @@ index 3f1f97a..241da2c 100644
  		sleep_us(100);
  		result = rd(gmu.base + GMU_CM3_FW_INIT_RESULT);
  	}
-@@ -1979,7 +2020,7 @@ step_gmu_start(void)
+@@ -1979,7 +2029,7 @@ step_gmu_start(void)
  	get(&gmu, "gmu2host_intr_info", GMU_GMU2HOST_INTR_INFO);
  	get(&gmu, "ao_host_interrupt_status", GMU_AO_HOST_INTERRUPT_STATUS);
  	get(&gmu, "hfi_ctrl_status", GMU_HFI_CTRL_STATUS);
@@ -2046,7 +2075,7 @@ index 3f1f97a..241da2c 100644
  		printf("adreno: %u: the GMU's firmware does not come up\n", step);
  		gmu_post_mortem();
  		return false;
-@@ -1998,6 +2039,7 @@ step_gmu_start(void)
+@@ -1998,6 +2048,7 @@ step_gmu_start(void)
   * firmware has started and before the message queues are).
   */
  static struct block pdc = { "pdc", 0x0b290000, 0x10000 };       /* dt: qcom,gmu "kgsl_gmu_pdc_cfg" */
@@ -2054,7 +2083,7 @@ index 3f1f97a..241da2c 100644
  #define PDC_GPU_ENABLE          (4 * 0x1140)
  #define PDC_GPU_SEQ_START_ADDR  (4 * 0x1148)
  #define RSCC_PDC_SEQ_START_ADDR (4 * 0x008)
-@@ -2010,50 +2052,121 @@ static struct block pdc = { "pdc", 0x0b290000, 0x10000 };       /* dt: qcom,gmu
+@@ -2010,50 +2061,121 @@ static struct block pdc = { "pdc", 0x0b290000, 0x10000 };       /* dt: qcom,gmu
  static bool
  step_gmu_queues(void)
  {
@@ -2197,7 +2226,7 @@ index 3f1f97a..241da2c 100644
  	}
  	get(&gmu, "hfi_ctrl_status", GMU_HFI_CTRL_STATUS);
  	get(&gmu, "hfi_version_info", GMU_HFI_VERSION_INFO);
-@@ -2104,16 +2217,22 @@ hfi_receive(unsigned which, uint32_t number, uint32_t *verdict)
+@@ -2104,16 +2226,22 @@ hfi_receive(unsigned which, uint32_t number, uint32_t *verdict)
  	volatile uint32_t *data = (volatile uint32_t *)((vm_offset_t)hfi + HFI_QUEUE_AT(which));
  	bool answered = false;
  
@@ -2217,17 +2246,17 @@ index 3f1f97a..241da2c 100644
 -			at = (at + 1) % HFI_QUEUE_WORDS;
 +		if (words == 0 || words > HFI_QUEUE_WORDS) {
 +			break;
- 		}
--		queue->read = (at + 3) / 4 * 4 % HFI_QUEUE_WORDS;
++		}
 +		for (uint32_t i = 0; i < words && i < 8; i++) {
 +			message[i] = data[(at + i) % HFI_QUEUE_WORDS];
-+		}
+ 		}
+-		queue->read = (at + 3) / 4 * 4 % HFI_QUEUE_WORDS;
 +		queue->read = (at + padded) % HFI_QUEUE_WORDS;
 +		settle();
  		if ((message[0] >> 16 & 0xf) == HFI_ANSWER && message[1] >> 20 == number) {
  			*verdict = message[2];
  			answered = true;
-@@ -2127,10 +2246,9 @@ hfi_receive(unsigned which, uint32_t number, uint32_t *verdict)
+@@ -2127,10 +2255,9 @@ hfi_receive(unsigned which, uint32_t number, uint32_t *verdict)
  				    message[0], message[1], message[2], message[3], message[4], message[5]);
  			}
  		}
@@ -2240,7 +2269,7 @@ index 3f1f97a..241da2c 100644
  	return answered;
  }
  
-@@ -2165,6 +2283,13 @@ gmu_post_mortem(void)
+@@ -2165,6 +2292,13 @@ gmu_post_mortem(void)
  	const volatile uint32_t *log = (const volatile uint32_t *)gmu_log.memory;
  
  	to_memory(gmu_log.memory, GMU_LOG_SIZE);
@@ -2254,7 +2283,7 @@ index 3f1f97a..241da2c 100644
  	printf("adreno: %u: the GMU's log (event, time, two values), %u events in, the last 40:\n", step, next);
  	for (uint32_t i = next > 40 ? next - 40 : 0; i < next && i + 4 <= entries; i += 4) {
  		printf("adreno: %u:   %x %x %x %x | %x %x %x %x | %x %x %x %x | %x %x %x %x\n", step,
-@@ -2211,25 +2336,37 @@ hfi_send(const char *what, uint32_t id, uint32_t *message, uint32_t words)
+@@ -2211,25 +2345,37 @@ hfi_send(const char *what, uint32_t id, uint32_t *message, uint32_t words)
  		data[at] = i < words ? message[i] : 0xfafafafa;
  		at = (at + 1) % HFI_QUEUE_WORDS;
  	}
@@ -2295,7 +2324,7 @@ index 3f1f97a..241da2c 100644
  		space_faulted(&gmu_space);
  		if (!post_mortem_done) {
  			post_mortem_done = true;
-@@ -2287,10 +2424,10 @@ step_core_power(void)
+@@ -2287,10 +2433,10 @@ step_core_power(void)
  {
  	static const struct {
  		uint32_t khz, level;
@@ -2308,7 +2337,7 @@ index 3f1f97a..241da2c 100644
  	uint16_t gfx[16], cx[16], mx[16];
  	unsigned gfx_levels, cx_levels, mx_levels;
  
-@@ -2302,6 +2439,7 @@ step_core_power(void)
+@@ -2302,6 +2448,7 @@ step_core_power(void)
  		printf("adreno: %u: RPMh's list lacks one of the rails\n", step);
  		return false;
  	}
@@ -2316,7 +2345,7 @@ index 3f1f97a..241da2c 100644
  	perf.gpu_levels = sizeof(speeds) / sizeof(speeds[0]);
  	for (unsigned i = 0; i < perf.gpu_levels; i++) {
  		perf.gpu[i].khz = speeds[i].khz;
-@@ -2320,21 +2458,25 @@ step_core_power(void)
+@@ -2320,21 +2467,25 @@ step_core_power(void)
  	printf("adreno: %u: votes: 3D core %#x %#x %#x %#x, GMU %#x %#x\n", step, perf.gpu[0].vote, perf.gpu[1].vote,
  	    perf.gpu[2].vote, perf.gpu[3].vote, perf.gmu[0].vote, perf.gmu[1].vote);
  
@@ -2350,7 +2379,7 @@ index 3f1f97a..241da2c 100644
  		return false;
  	}
  
-@@ -2342,38 +2484,51 @@ step_core_power(void)
+@@ -2342,38 +2493,51 @@ step_core_power(void)
  		vote[2] = speed;
  	}
  	core_khz = speeds[vote[2]].khz;
@@ -2366,19 +2395,19 @@ index 3f1f97a..241da2c 100644
 -	    !hfi_send("the speed wanted", HFI_GX_BW_PERF_VOTE, vote, 4)) {
 +	    !hfi_send("start the core firmware", HFI_CORE_FW_START, core_start, 2) ||
 +	    !hfi_send("start", HFI_START, start, 1)) {
-+		return false;
-+	}
-+
+ 		return false;
+ 	}
+ 
+-	announce("ask the GMU to power the 3D core and keep it powered");
 +	/* a6xx_gmu_resume order: after START is acked, clear GMU2HOST interrupt */
 +	wr(gmu.base + GMU_GMU2HOST_INTR_CLR, 0xffffffff);
 +	settle();
 +
 +	announce("send the GMU the initial GX performance vote (GX_BW_PERF_VOTE)");
 +	if (!hfi_send("the speed wanted", HFI_GX_BW_PERF_VOTE, vote, 4)) {
- 		return false;
- 	}
- 
--	announce("ask the GMU to power the 3D core and keep it powered");
++		return false;
++	}
++
 +	announce("ask the GMU to power the 3D core and keep it powered (OOB GPU_SET)");
  	get(&gmu, "sptprac_pwr_clk_status", GMU_SPTPRAC_PWR_CLK_STATUS);
  	get(&gpucc, "gx_gdscr", GPUCC_GX_GDSCR);
@@ -2413,7 +2442,7 @@ index 3f1f97a..241da2c 100644
  	printf("adreno: %u: measured: the 3D core's clock runs at %u Hz (%u MHz was asked for), the GMU's in it at %u Hz\n", step,
  	    measure_quietly(GPUCC_DEBUG_GX_GFX3D), core_khz / 1000, measure_quietly(GPUCC_DEBUG_GX_GMU));
  
-@@ -2397,8 +2552,16 @@ step_core_power(void)
+@@ -2397,8 +2561,16 @@ step_core_power(void)
   * is Linux's a6xx_gpu.c hw_init for this GPU, less what only matters once it draws (clock gating,
   * the protection of registers against user programs' commands, counters).
   */
@@ -2432,7 +2461,7 @@ index 3f1f97a..241da2c 100644
  #define PTE_CORE                (PTE_GMU | PTE_UNPRIVILEGED)
  #define PTE_READ_ONLY           (1ull << 7)     /* Linux gives the core its microcode so (MSM_BO_GPU_READONLY) */
  #define CORE_RING_ADDRESS       0x01000000u
-@@ -2416,6 +2579,7 @@ step_core_power(void)
+@@ -2416,6 +2588,7 @@ step_core_power(void)
  #define RBBM_PERFCTR_CNTL       GPU_WORD(0x0500)
  #define RBBM_PERFCTR_GPU_BUSY_MASKED GPU_WORD(0x050b)
  #define CP_RB_CNTL              GPU_WORD(0x0802)
@@ -2440,7 +2469,7 @@ index 3f1f97a..241da2c 100644
  #define CP_RB_RPTR              GPU_WORD(0x0806)
  #define CP_RB_WPTR              GPU_WORD(0x0807)
  #define CP_SQE_CNTL             GPU_WORD(0x0808)
-@@ -2467,12 +2631,6 @@ step_core_power(void)
+@@ -2467,12 +2640,6 @@ step_core_power(void)
   */
  #define SMMU_SCTLR_SERVE_AFTER_FAULT (1u << 8)
  static struct gpu_space core_space = { .name = "the 3D core", .context = 0, .control = SMMU_SCTLR_SERVE_AFTER_FAULT };
@@ -2453,7 +2482,7 @@ index 3f1f97a..241da2c 100644
  static struct gpu_block core_ring, core_sqe, core_scratch, core_target;
  static bool core_space_is_on, core_runs, zap_is_loaded;
  #define RING_WORDS              (CORE_RING_SIZE / 4)
-@@ -2507,6 +2665,22 @@ ring_register(uint32_t number, uint32_t value)
+@@ -2507,6 +2674,22 @@ ring_register(uint32_t number, uint32_t value)
  	ring(value);
  }
  
@@ -2476,7 +2505,7 @@ index 3f1f97a..241da2c 100644
  /* What has been written to the ring since the last time: out to memory, and the core told how far to read. */
  static void
  ring_send(void)
-@@ -2518,7 +2692,7 @@ ring_send(void)
+@@ -2518,7 +2701,7 @@ ring_send(void)
  		to_memory(core_ring.memory, 4 * ring_at);
  	}
  	ring_sent = ring_at;
@@ -2485,7 +2514,7 @@ index 3f1f97a..241da2c 100644
  }
  
  /* Let the 3D core have what is in the ring, and wait until it has taken all of it and rests. */
-@@ -2560,41 +2734,45 @@ step_core_space(void)
+@@ -2560,41 +2743,45 @@ step_core_space(void)
  {
  	const uint8_t *microcode;
  	uint64_t size = 0;
@@ -2550,7 +2579,7 @@ index 3f1f97a..241da2c 100644
  	}
  	get(&gpu, "rbbm_status", RBBM_STATUS);
  	return !space_faulted(&core_space);
-@@ -2623,7 +2801,9 @@ step_core_space(void)
+@@ -2623,7 +2810,9 @@ step_core_space(void)
   * (Step 21 is what tells whether the 3D core gets out of secure mode with it.) There was a
   * boot-arg adreno_zap=0 for the second and later runs of a started phone; nothing reads it now.
   */
@@ -2561,7 +2590,7 @@ index 3f1f97a..241da2c 100644
  #define ZAP_MEMORY_SIZE         0x2000u
  #define SCM_PAS_MEM_SETUP       SCM_CALL(2, 2)
  #define SCM_THREE_VALUES        3
-@@ -2644,14 +2824,28 @@ step_zap_load(void)
+@@ -2644,14 +2833,28 @@ step_zap_load(void)
  	const uint8_t *segment;
  	volatile uint8_t *memory;
  	uint64_t size = 0, header = 0, answer = ~0ull;
@@ -2591,7 +2620,7 @@ index 3f1f97a..241da2c 100644
  	if (segment == NULL || size == 0 || size > 0x1000) {
  		return false;
  	}
-@@ -2664,24 +2858,24 @@ step_zap_load(void)
+@@ -2664,24 +2867,24 @@ step_zap_load(void)
  	    header, 0, &answer) != 0 || answer != 0) {
  		printf("adreno: %u: TrustZone does not take the signature (%#llx): TAKEN TO MEAN THAT IT KEEPS A ZAP SHADER FROM "
  		    "BEFORE, which is used as it is\n", step, answer);
@@ -2623,7 +2652,7 @@ index 3f1f97a..241da2c 100644
  		memory[i] = i < size ? segment[i] : 0;
  	}
  	settle();
-@@ -2717,6 +2911,7 @@ step_core_start(void)
+@@ -2717,6 +2920,7 @@ step_core_start(void)
  	for (unsigned i = 0; i < sizeof(address_modes) / sizeof(address_modes[0]); i++) {
  		put(&gpu, "address mode: 64 bits", GPU_WORD(address_modes[i]), 1);
  	}
@@ -2631,7 +2660,7 @@ index 3f1f97a..241da2c 100644
  	for (unsigned i = 0; i < 4; i++) {
  		put(&gbif, "qsb_side", GBIF_QSB_SIDE0 + 4 * i, 0x00071620);
  	}
-@@ -2731,7 +2926,7 @@ step_core_start(void)
+@@ -2731,7 +2935,7 @@ step_core_start(void)
  	put(&gpu, "cp_roq_thresholds_1", CP_ROQ_THRESHOLDS_1, 0x8040362c);
  	put(&gpu, "cp_lpac_prog_fifo_size", CP_LPAC_PROG_FIFO_SIZE, 0x20);
  	put(&gpu, "cp_mem_pool_size", CP_MEM_POOL_SIZE, 128);
@@ -2640,7 +2669,7 @@ index 3f1f97a..241da2c 100644
  	put(&gpu, "cp_ahb_cntl", CP_AHB_CNTL, 1);
  	/*
  	 * How textures in the GPU's own tiled and compressed layouts are laid out in memory (Linux's
-@@ -2742,7 +2937,7 @@ step_core_start(void)
+@@ -2742,7 +2946,7 @@ step_core_start(void)
  	put(&gpu, "tpl1_nc_mode_cntl", GPU_WORD(0xb604), 1u << 1);
  	put(&gpu, "sp_nc_mode_cntl", GPU_WORD(0xae02), 2u << 4 | 1u << 1);
  	put(&gpu, "uche_mode_cntl", GPU_WORD(0x0e01), 1u << 21);
@@ -2649,7 +2678,7 @@ index 3f1f97a..241da2c 100644
  	put(&gpu, "rbbm_perfctr_cntl", RBBM_PERFCTR_CNTL, 1);
  	put(&gpu, "rbbm_interface_hang_int_cntl", RBBM_INTERFACE_HANG_INT_CNTL, 1u << 30 | 0x1fffff);
  	put(&gpu, "uche_client_pf", UCHE_CLIENT_PF, 1u << 7 | 1);
-@@ -2758,7 +2953,12 @@ step_core_start(void)
+@@ -2758,7 +2962,12 @@ step_core_start(void)
  	PE_parse_boot_argn("adreno_blind", &blind, sizeof(blind));
  	put64(&gpu, "cp_sqe_instr_base", CP_SQE_INSTR_BASE, blind ? CORE_NOWHERE : CORE_SQE_ADDRESS);
  	put64(&gpu, "cp_rb_base", CP_RB_BASE, CORE_RING_ADDRESS);
@@ -2663,7 +2692,7 @@ index 3f1f97a..241da2c 100644
  	get(&gpu, "cp_sqe_instr_base", CP_SQE_INSTR_BASE);
  	get(&gpu, "cp_rb_base", CP_RB_BASE);
  	get(&gpu, "cp_rb_cntl", CP_RB_CNTL);
-@@ -2780,10 +2980,6 @@ step_core_start(void)
+@@ -2780,10 +2989,6 @@ step_core_start(void)
  	if (blind) {
  		return space_faulted(&core_space);
  	}
@@ -2674,7 +2703,7 @@ index 3f1f97a..241da2c 100644
  	if (space_faulted(&core_space)) {
  		return false;
  	}
-@@ -2815,11 +3011,13 @@ step_core_commands(void)
+@@ -2815,11 +3020,13 @@ step_core_commands(void)
  	if (!cx_ready() || !core_runs) {
  		return false;
  	}
@@ -2693,7 +2722,7 @@ index 3f1f97a..241da2c 100644
  	}
  	ring_command(CP_MEM_WRITE, 3);
  	ring(CORE_SCRATCH_ADDRESS);
-@@ -2902,6 +3100,13 @@ step_frame(void)
+@@ -2902,6 +3109,13 @@ step_frame(void)
  	for (uint32_t i = 0; i < core_space.table_count; i++) {
  		to_memory((vm_offset_t)core_space.tables[i].table, 4096);
  	}
@@ -2707,7 +2736,18 @@ index 3f1f97a..241da2c 100644
  	ring_command(CP_SET_MARKER, 1);
  	ring(12);                               /* "2D blits follow" */
  	ring_register(RB_CCU_CNTL, 0x10000004); /* Mesa's for this GPU when it draws straight into memory */
-@@ -3093,19 +3298,15 @@ gpu_block_stop(void)
+@@ -2943,8 +3157,8 @@ step_frame(void)
+ 		printf("adreno: %u: the picture is not what the 3D core was told to draw\n", step);
+ 		return false;
+ 	}
+-	MiniIOMobileFramebufferShow((const uint8_t *)core_target.memory, TARGET_WIDTH, TARGET_HEIGHT, TARGET_ROW);
+-	printf("adreno: %u: A PICTURE DRAWN BY THE GPU IS ON THE PANEL: orange, white, blue from the top\n", step);
++	// MiniIOMobileFramebufferShow((const uint8_t *)core_target.memory, TARGET_WIDTH, TARGET_HEIGHT, TARGET_ROW);
++	printf("adreno: %u: 3D core rendered self-test pattern successfully in memory (screen display suppressed)\n", step);
+ 	return true;
+ }
+ 
+@@ -3093,19 +3307,15 @@ gpu_block_stop(void)
  		gmu_space_is_on = false;
  		power_off = true;
  	}
@@ -2734,7 +2774,7 @@ index 3f1f97a..241da2c 100644
  		core_space_is_on = core_runs = false;
  	}
  	/*
-@@ -3151,10 +3352,6 @@ hakios_adreno_quiesce(void)
+@@ -3151,10 +3361,6 @@ hakios_adreno_quiesce(void)
  		wr(smmu.base + smmu_context(&core_space) + SMMU_CB_SCTLR, 0);
  		core_space_is_on = false;
  	}
@@ -2745,7 +2785,7 @@ index 3f1f97a..241da2c 100644
  }
  
  /* ---- the GPU kept on, for the system to draw with --------------------------------------------------- */
-@@ -3168,7 +3365,7 @@ hakios_adreno_quiesce(void)
+@@ -3168,7 +3374,7 @@ hakios_adreno_quiesce(void)
   * far it has got (a "fence": a submission's number, written by the core when it is through
   * with it). The caller holds one lock around all of these.
   */
@@ -2754,7 +2794,7 @@ index 3f1f97a..241da2c 100644
  #define GPU_ADDRESSES_START     0x20000000ull   /* above everything the steps use; below 4 GB, as Linux keeps them */
  #define GPU_ADDRESSES_SIZE      0xe0000000ull
  #define GPU_FENCE_AT            0x40            /* in the scratch page */
-@@ -3360,15 +3557,16 @@ hakios_gpu_mapped(void)
+@@ -3360,15 +3566,16 @@ hakios_gpu_mapped(void)
  void
  hakios_gpu_unmap(uint64_t address, uint64_t size)
  {
@@ -2776,7 +2816,19 @@ index 3f1f97a..241da2c 100644
  	}
  }
  
-@@ -3383,6 +3581,9 @@ hakios_gpu_to_memory(void *start, uint64_t size)
+@@ -3376,17 +3583,33 @@ hakios_gpu_unmap(uint64_t address, uint64_t size)
+ void
+ hakios_gpu_to_memory(void *start, uint64_t size)
+ {
+-	to_memory((vm_offset_t)start, size);
++	if (start != NULL && size != 0) {
++		to_memory((vm_offset_t)start, size);
++	} else {
++		__asm__ volatile ("dsb sy" ::: "memory");
++	}
+ }
+ 
+ /* How far the 3D core has got. */
  bool
  hakios_gpu_done(uint32_t fence)
  {
@@ -2786,10 +2838,25 @@ index 3f1f97a..241da2c 100644
  	volatile uint32_t *word = (volatile uint32_t *)(core_scratch.memory + GPU_FENCE_AT);
  
  	to_memory((vm_offset_t)word, 4);
-@@ -3464,6 +3665,15 @@ hakios_gpu_worked(uint64_t *microseconds, uint32_t *submissions, uint32_t by[7])
+-	return (int32_t)(*word - fence) >= 0;
++	if ((int32_t)(*word - fence) >= 0) {
++		return true;
++	}
++	if (gpu.base != 0) {
++		uint32_t reg_fence = rd(gpu.base + GPU_WORD(CP_SCRATCH_REG2));
++		if ((int32_t)(reg_fence - fence) >= 0) {
++			return true;
++		}
++	}
++	return false;
+ }
+ 
+ uint32_t
+@@ -3464,7 +3687,16 @@ hakios_gpu_worked(uint64_t *microseconds, uint32_t *submissions, uint32_t by[7])
  uint32_t
  hakios_gpu_submit(const uint64_t *addresses, const uint32_t *words, uint32_t count)
  {
+-	uint32_t wanted = 26 + 4 * count, room = 0;
 +	if (gpu.base == 0) {
 +		if (++gpu_fence == 0) {
 +			gpu_fence = 1;
@@ -2799,10 +2866,34 @@ index 3f1f97a..241da2c 100644
 +		}
 +		return gpu_fence;
 +	}
- 	uint32_t wanted = 26 + 4 * count, room = 0;
++	uint32_t wanted = 16 + 4 * count, room = 0;
  
  	for (int i = 0; i < 20000; i++) {
-@@ -3509,6 +3719,10 @@ hakios_gpu_submit(const uint64_t *addresses, const uint32_t *words, uint32_t cou
+ 		room = (rd(gpu.base + CP_RB_RPTR) + RING_WORDS - ring_at - 1) % RING_WORDS;
+@@ -3476,11 +3708,9 @@ hakios_gpu_submit(const uint64_t *addresses, const uint32_t *words, uint32_t cou
+ 	if (room < wanted) {
+ 		return 0;
+ 	}
+-	gpu_times();
+ 	if (++gpu_fence == 0) {
+ 		gpu_fence = 1;
+ 	}
+-	ring_time(gpu_fence, 0);
+ 	ring_command(CP_EVENT_WRITE, 1);
+ 	ring(EVENT_INVALIDATE_DEPTH);
+ 	ring_command(CP_EVENT_WRITE, 1);
+@@ -3491,10 +3721,6 @@ hakios_gpu_submit(const uint64_t *addresses, const uint32_t *words, uint32_t cou
+ 		ring((uint32_t)(addresses[i] >> 32));
+ 		ring(words[i]);
+ 	}
+-	if (gpu_exact) {
+-		ring_command(CP_WAIT_FOR_IDLE, 0);      /* the time is the pipeline's, not the command processor's, which is ahead of it */
+-	}
+-	ring_time(gpu_fence, 1);
+ 	ring_register(CP_SCRATCH_REG2, gpu_fence);
+ 	ring_command(CP_EVENT_WRITE, 4);
+ 	ring(EVENT_CACHE_FLUSH);
+@@ -3509,6 +3735,10 @@ hakios_gpu_submit(const uint64_t *addresses, const uint32_t *words, uint32_t cou
  void
  hakios_gpu_report(const char *why)
  {
@@ -2813,7 +2904,7 @@ index 3f1f97a..241da2c 100644
  	uint32_t context = smmu_context(&core_space);
  
  	printf("adreno: gpu: %s: submission %u is the last, the core has done %u; ring: read up to %u, written up to %u; status "
-@@ -3725,7 +3939,6 @@ extern vm_offset_t pe_arm_get_soc_base_phys(void);
+@@ -3725,7 +3955,6 @@ extern vm_offset_t pe_arm_get_soc_base_phys(void);
  static bool
  start_by_itself(void)
  {
@@ -2821,7 +2912,7 @@ index 3f1f97a..241da2c 100644
  	const char *missing = NULL;
  	uint64_t size;
  
-@@ -3734,6 +3947,19 @@ start_by_itself(void)
+@@ -3734,6 +3963,19 @@ start_by_itself(void)
  		return false;
  	}
  	image_asked_quietly = true;
@@ -2841,7 +2932,7 @@ index 3f1f97a..241da2c 100644
  	for (unsigned i = 0; i < sizeof(files) / sizeof(files[0]) && missing == NULL; i++) {
  		if (image_file("fw", files[i], &size) == NULL) {
  			missing = files[i];
-@@ -3768,13 +3994,32 @@ hakios_adreno_init(void)
+@@ -3768,13 +4010,32 @@ hakios_adreno_init(void)
  	if (PE_parse_boot_argn("display_probe", &only, sizeof(only)) && only) {
  		display_probe();
  	}
@@ -2875,7 +2966,7 @@ index 3f1f97a..241da2c 100644
  		pause_ms = 0;
  		watch_seconds = 0;
  		keep = 1;
-@@ -3846,6 +4091,8 @@ hakios_adreno_init(void)
+@@ -3846,6 +4107,8 @@ hakios_adreno_init(void)
  	gpu_block_stop();
  	if (PE_parse_boot_argn("adreno_return", &only, sizeof(only)) && only) {
  		printf("adreno: over; back to the loader (adreno_return)\n");
@@ -2885,7 +2976,7 @@ index 3f1f97a..241da2c 100644
  	}
  	printf("adreno: over; the system goes on starting\n");
 diff --git a/drivers/gpu/hakios.gpu.cpp b/drivers/gpu/hakios.gpu.cpp
-index 8ed7772..61543e5 100644
+index 8ed7772..8d6f9d5 100644
 --- a/drivers/gpu/hakios.gpu.cpp
 +++ b/drivers/gpu/hakios.gpu.cpp
 @@ -67,6 +67,8 @@ void HakiosGPUStop(void);
@@ -2897,6 +2988,15 @@ index 8ed7772..61543e5 100644
  /* Linux's include/uapi/drm/msm_drm.h and drm.h: the requests' numbers and structures. */
  enum {
  	kDrmGemClose            = 0x09,
+@@ -207,7 +209,7 @@ gpuWait(uint32_t fence, uint64_t milliseconds)
+ 		delay_for_interval(GPU_ASK_AGAIN_US, NSEC_PER_USEC);
+ 		IOLockLock(gGPULock);
+ 	}
+-	if (milliseconds >= 1000 && !gGPUReported) {
++	if (!gGPUReported) {
+ 		gGPUReported = true;
+ 		hakios_gpu_report("no answer");
+ 	}
 @@ -335,6 +337,20 @@ HakiosGPUStart(void)
  		IOLog("HakiosGPU: the service did not start\n");
  	}
@@ -2918,6 +3018,18 @@ index 8ed7772..61543e5 100644
  }
  
  /* The run is ending (hakios.adreno.c): nobody is in the middle of anything when the GPU goes. */
+@@ -997,9 +1013,9 @@ HakiosGPUUserClient::submit(struct msm_gem_submit * request)
+ 		gGPUReported = true;
+ 		hakios_gpu_report("the ring is full");
+ 	}
+-	if (fSubmits++ < 4) {
++	if (fSubmits++ < 16) {
+ 		/* (addresses and words are only set up to `count`: with no command buffer among the commands, the first would be stack garbage) */
+-		IOLog("HakiosGPU: submission %u: %u command buffers, the first at %#llx, %u words\n", request->fence, count,
++		printf("HakiosGPU: submission %u: %u command buffers, the first at %#llx, %u words\n", request->fence, count,
+ 		    count != 0 ? addresses[0] : 0ull, count != 0 ? words[0] : 0u);
+ 	}
+ 	/* every five seconds in which something was submitted: how much, and what it cost here */
 diff --git a/drivers/input/hakios.buttons.c b/drivers/input/hakios.buttons.c
 index 27203ee..112aade 100644
 --- a/drivers/input/hakios.buttons.c
@@ -3046,10 +3158,79 @@ index 27203ee..112aade 100644
  	if (steps < 4) {
  		goto out;
 diff --git a/drivers/input/hakios.input.c b/drivers/input/hakios.input.c
-index 8e5e556..cdbbf8d 100644
+index 8e5e556..3b8f3bf 100644
 --- a/drivers/input/hakios.input.c
 +++ b/drivers/input/hakios.input.c
-@@ -228,12 +228,16 @@ hakios_input_init(void)
+@@ -216,6 +216,60 @@ static const struct cdevsw touch_cdevsw = {
+ 	.d_mmap = eno_mmap, .d_strategy = eno_strat, .d_type = 0
+ };
+ 
++struct vc_info {
++	unsigned int    v_height;
++	unsigned int    v_width;
++	unsigned int    v_depth;
++	unsigned int    v_rowbytes;
++	unsigned long   v_baseaddr;
++	unsigned int    v_type;
++	char            v_name[32];
++	uint64_t        v_physaddr;
++	unsigned int    v_rows;
++	unsigned int    v_columns;
++	unsigned int    v_rowscanbytes;
++	unsigned int    v_scale;
++	unsigned int    v_rotate;
++	unsigned int    v_reserved[3];
++};
++extern struct vc_info vinfo;
++
++static int
++fb_open(__unused dev_t dev, __unused int flags, __unused int devtype, __unused struct proc *p)
++{
++	return (vinfo.v_baseaddr != 0) ? 0 : ENODEV;
++}
++
++static int
++fb_close(__unused dev_t dev, __unused int flags, __unused int devtype, __unused struct proc *p)
++{
++	return 0;
++}
++
++static int
++fb_read(__unused dev_t dev, struct uio *uio, __unused int ioflag)
++{
++	if (vinfo.v_baseaddr == 0) {
++		return EIO;
++	}
++	uint64_t total = (uint64_t)vinfo.v_rowbytes * vinfo.v_height;
++	uint64_t off = (uint64_t)uio_offset(uio);
++	if (off >= total) {
++		return 0;
++	}
++	size_t count = (size_t)uio_resid(uio);
++	if (off + count > total) {
++		count = (size_t)(total - off);
++	}
++	return uiomove((caddr_t)(vinfo.v_baseaddr + off), (int)count, uio);
++}
++
++static const struct cdevsw fb_cdevsw = {
++	.d_open = fb_open, .d_close = fb_close, .d_read = fb_read, .d_write = eno_rdwrt,
++	.d_ioctl = eno_ioctl, .d_stop = eno_stop, .d_reset = eno_reset, .d_select = eno_select,
++	.d_mmap = eno_mmap, .d_strategy = eno_strat, .d_type = 0
++};
++
+ void
+ hakios_input_init(void)
+ {
+@@ -224,16 +278,24 @@ hakios_input_init(void)
+ 	if (major < 0 || devfs_make_node(makedev(major, 0), DEVFS_CHAR, UID_ROOT, GID_WHEEL, 0666, "hakios-touch") == NULL) {
+ 		printf("hakios-touch: cannot create the device\n");
+ 	}
++	int fb_major = cdevsw_add(-1, &fb_cdevsw);
++	if (fb_major >= 0) {
++		devfs_make_node(makedev(fb_major, 0), DEVFS_CHAR, UID_ROOT, GID_WHEEL, 0444, "hakios-fb");
++	}
+ 	exit_call = thread_call_allocate(exit_hold_elapsed, NULL);
  	hakios_cpufreq_init();
  	hakios_virtio_input_init();
  	hakios_goodix_init();

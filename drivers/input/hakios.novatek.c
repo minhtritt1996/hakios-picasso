@@ -9685,6 +9685,21 @@ static void pin_set_out(unsigned gpio, unsigned v) {
 static void
 novatek_thread(__unused void *parameter, __unused wait_result_t result)
 {
+    /*
+     * The panel and its touch controller are one TDDI chip (novatek,reset-tddi in the device tree): the
+     * controller does not answer on SPI until the display side is up. UniXNU-picasso starts its probe at
+     * 60 s for that reason (sheng-touch-start), and its stage 3 identifies the chip then. touch_start=<s>
+     * is the same knob; the default is that 60 s, touch_start=0 starts at once.
+     */
+    uint32_t start_s = 25;
+
+    (void)PE_parse_boot_argn("touch_start", &start_s, sizeof(start_s));
+    if (start_s != 0) {
+        printf("novatek: waiting %u s for the panel before the touch bring-up\n", start_s);
+        for (uint32_t i = 0; i < start_s; i++) {
+            delay_for_interval(1000, NSEC_PER_MSEC);
+        }
+    }
     printf("novatek: starting NT36672C touch bring-up on Picasso (SM7250 SE7 SPI)\n");
 
     /* 1. Map MMIO Regions */

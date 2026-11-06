@@ -44,49 +44,63 @@ index bfb7d63..3b45dc5 100644
  void hakios_mpss_init(void);           /* boot-arg modem=1: the phone's modem started and linked; modem_step=N: the first N steps */
  void hakios_wifi_stop(void);           /* where a run ends in order: the Wi-Fi DSP, if it was started, shut down */
 diff --git a/xnu/files/iokit/Kernel/GenericARMPE.cpp b/xnu/files/iokit/Kernel/GenericARMPE.cpp
-index 8af42ca..d4df13f 100644
+index 8af42ca..da3fbf2 100644
 --- a/xnu/files/iokit/Kernel/GenericARMPE.cpp
 +++ b/xnu/files/iokit/Kernel/GenericARMPE.cpp
-@@ -215,7 +215,12 @@ GenericARMPE::start(IOService * provider)
+@@ -215,7 +215,7 @@ GenericARMPE::start(IOService * provider)
  	if (!super::start(provider)) {
  		return false;
  	}
 -	IOLog("GenericARMPE: platform \"%s\"\n", provider->getName());
 +	printf("GenericARMPE: platform \"%s\"\n", provider->getName());
-+	printf("GenericARMPE: starting MiniIOSurface, MiniIOMobileFramebuffer, MiniAppleKeyStore, MiniIONetworkStack early\n");
-+	MiniIOSurfaceStart(this);
-+	MiniIOMobileFramebufferStart(this);
-+	MiniAppleKeyStoreStart();
-+	MiniIONetworkStackStart();
  
  	/*
  	 * super::start() published the /cpus children as nubs. Attach a CPU driver to each
-@@ -255,6 +260,10 @@ GenericARMPE::start(IOService * provider)
+@@ -252,6 +252,15 @@ GenericARMPE::start(IOService * provider)
+ 	if (cpus[master_cpu] != NULL) {
+ 		/* Unblocks everything that waits for the CPU count to be known. */
+ 		ml_set_max_cpus(count);
++		/* BSD looks the platform expert up by class (IOSecureBSDRoot).
++		 * Register early and start the stand-in graphics/keystore/network drivers
++		 * before starting secondary CPUs so neither BSD init nor MiniIOMobileFramebuffer
++		 * can ever be delayed by secondary CPU bring-up. */
++		registerService();
++		MiniIOSurfaceStart(this);
++		MiniIOMobileFramebufferStart(this);
++		MiniAppleKeyStoreStart();
++		MiniIONetworkStackStart();
  		if (count > 1) {
  			psci_smp_init();
  		}
-+
-+		/* BSD looks the platform expert up by class (IOSecureBSDRoot).
-+		 * Register early before starting secondary CPUs so BSD init never times out. */
-+		registerService();
- 		/*
- 		 * The slower cores (an L2 access penalty, the loader's "small-core") are started 28 seconds
- 		 * later (boot-arg small_cores_after=S; 0: at once). With all seven from the start the lock
-@@ -295,8 +304,7 @@ GenericARMPE::start(IOService * provider)
+@@ -295,14 +304,6 @@ GenericARMPE::start(IOService * provider)
  		}
  	}
  
 -	/* BSD looks the platform expert up by class (IOSecureBSDRoot). */
 -	registerService();
-+
+-
+-	/* Stand-ins for the closed graphics drivers that the Darwin window server talks to. */
+-	MiniIOSurfaceStart(this);
+-	MiniIOMobileFramebufferStart(this);
+-	MiniAppleKeyStoreStart();
+-	MiniIONetworkStackStart();
+ 	return true;
+ }
  
- 	/* Stand-ins for the closed graphics drivers that the Darwin window server talks to. */
- 	MiniIOSurfaceStart(this);
 diff --git a/xnu/files/iokit/Kernel/MiniIOMobileFramebuffer.cpp b/xnu/files/iokit/Kernel/MiniIOMobileFramebuffer.cpp
-index 93d04b5..ab7b9cc 100644
+index 93d04b5..04c9207 100644
 --- a/xnu/files/iokit/Kernel/MiniIOMobileFramebuffer.cpp
 +++ b/xnu/files/iokit/Kernel/MiniIOMobileFramebuffer.cpp
-@@ -31,9 +31,12 @@
+@@ -15,6 +15,8 @@
+ #include <IOKit/IOKitKeys.h>
+ #include <IOKit/IOService.h>
+ #include <IOKit/IOUserClient.h>
++#include <IOKit/IOWorkLoop.h>
++#include <IOKit/IOTimerEventSource.h>
+ #include <IOKit/IODeviceTreeSupport.h>
+ #include <libkern/c++/OSData.h>
+ #include <libkern/c++/OSNumber.h>
+@@ -31,13 +33,17 @@
  extern "C" {
  #include <console/video_console.h>
  extern struct vc_info vinfo;            /* the boot framebuffer, as the text console knows it */
@@ -99,7 +113,37 @@ index 93d04b5..ab7b9cc 100644
  
  #include "MiniIOSurface.h"
  
-@@ -348,6 +351,11 @@ public:
+ extern "C" void hakios_tl(const char * format, ...) __printflike(1, 2);
++extern "C" void hakios_gpu_to_memory(void * start, uint64_t size);
+ 
+ /* IOConnectCallMethod selectors of the framebuffer user client (Darwin userland 16.5) */
+ enum {
+@@ -112,7 +118,7 @@ static TUNABLE(uint32_t, gFBHeight, "fbheight", kFBDefaultHeight);
+ #define kFBDefaultScale         3
+ static TUNABLE(uint32_t, gFBScale, "fbscale", 0);
+ /* Boot-arg fbtrace=N: log the first N calls of every selector (default 3). */
+-static TUNABLE(uint32_t, gFBTrace, "fbtrace", 3);
++static TUNABLE(uint32_t, gFBTrace, "fbtrace", 16);
+ 
+ /*
+  * A recording of the screen, for a machine one cannot look at while it runs (the phone is
+@@ -168,6 +174,7 @@ static TUNABLE(uint32_t, gRefreshHz, "fb_hz", kFBRefreshHz);
+  */
+ static TUNABLE(uint32_t, gCARefreshHz, "fb_ca_hz", 0);
+ static TUNABLE(uint32_t, gOnTheBeat, "fb_beat", 1);
++static TUNABLE(uint32_t, gSync, "fb_sync", 0);
+ /*
+  * Boot-arg fb_threads=N (1 to 8): so many processors scale a frame onto the panel together (see
+  * drawRows()). Three by default: a frame is in the panel's memory 3 ms after its turn instead of 9
+@@ -286,6 +293,7 @@ swapWord(const uint8_t * swap, unsigned offset)
+ /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+ 
+ struct RowJob;
++class IOMobileFramebufferUserClient;
+ 
+ class IOMobileFramebuffer : public IOService
+ {
+@@ -348,6 +356,11 @@ public:
  	bool            fDiff;
  	uint64_t        fDiffPixels;
  	uint32_t        fDiffLeft, fDiffTop, fDiffRight, fDiffBottom;
@@ -111,10 +155,19 @@ index 93d04b5..ab7b9cc 100644
  	/* the screen recording, if one was asked for */
  	uint32_t *      fColumn;                /* drawLayer(): source column for every panel column */
  	uint16_t *      fColumnWeight;          /* ... with fb_filter: how much of the column after it, of 256 */
-@@ -383,6 +391,13 @@ public:
+@@ -383,6 +396,22 @@ public:
  	unsigned        fHelpersBusy, fHelpersStarted;
  	uint32_t *      fHelperBlend[7];
  	void record(MiniIOSurface * s);
++
++	IOWorkLoop *            fWorkLoop;
++	IOTimerEventSource *    fVsync;
++	uint64_t                fVsyncCount;
++	OSArray *               fClients;
++
++	static void vsyncFired(OSObject * owner, IOTimerEventSource * sender);
++	void addClient(IOMobileFramebufferUserClient * client);
++	void removeClient(IOMobileFramebufferUserClient * client);
 +
 +	virtual IOReturn newUserClient(task_t owningTask, void * securityID,
 +	    UInt32 type, OSDictionary * properties,
@@ -125,7 +178,7 @@ index 93d04b5..ab7b9cc 100644
  };
  
  OSDefineMetaClassAndStructors(IOMobileFramebuffer, IOService);
-@@ -497,12 +512,24 @@ IOMobileFramebuffer::start(IOService * provider)
+@@ -497,12 +526,24 @@ IOMobileFramebuffer::start(IOService * provider)
  {
  	thread_t thread;
  
@@ -150,15 +203,27 @@ index 93d04b5..ab7b9cc 100644
  		return false;
  	}
  	if (gMeasure && kernel_thread_start(measurePanel, NULL, &thread) == KERN_SUCCESS) {
-@@ -511,6 +538,7 @@ IOMobileFramebuffer::start(IOService * provider)
+@@ -510,7 +551,19 @@ IOMobileFramebuffer::start(IOService * provider)
+ 	}
  	fLock = IOLockAlloc();
  	fSwapLock = IOLockAlloc();
++	fVsyncCount = 0;
++	fClients = OSArray::withCapacity(4);
++	fWorkLoop = IOWorkLoop::workLoop();
++	fVsync = (fWorkLoop != NULL) ? IOTimerEventSource::timerEventSource(this, &IOMobileFramebuffer::vsyncFired) : NULL;
++	if (fVsync != NULL && fWorkLoop->addEventSource(fVsync) == kIOReturnSuccess) {
++		uint32_t interval_us = 1000000 / refreshHz();
++		fVsync->setTimeoutUS(interval_us);
++		printf("MiniIOMobileFramebuffer: IOTimerEventSource vsync started (%u Hz, interval %u us)\n", refreshHz(), interval_us);
++	} else {
++		printf("MiniIOMobileFramebuffer: failed to create vsync timer!\n");
++	}
  	if (panel_thread_start(&IOMobileFramebuffer::presenterMain, this, &thread) != KERN_SUCCESS) {
 +		kprintf("IOMobileFramebuffer::start: panel_thread_start failed\n");
  		IOLog("MiniIOMobileFramebuffer: no thread to put frames on the panel with\n");
  		return false;
  	}
-@@ -552,6 +580,14 @@ IOMobileFramebuffer::start(IOService * provider)
+@@ -552,6 +605,14 @@ IOMobileFramebuffer::start(IOService * provider)
  	fColumnWeight = IONewZero(uint16_t, fPanelWidth);
  	fDiff = gDiff != 0;
  	fDiffLeft = fDiffTop = ~0u;
@@ -173,7 +238,7 @@ index 93d04b5..ab7b9cc 100644
  	IOLog("MiniIOMobileFramebuffer: display %ux%u on a panel of %ux%u (%u bytes per row)\n", fWidth, fHeight,
  	    fPanelWidth, fPanelHeight, fRowBytes);
  
-@@ -584,9 +620,47 @@ IOMobileFramebuffer::start(IOService * provider)
+@@ -584,9 +645,60 @@ IOMobileFramebuffer::start(IOService * provider)
  	setProperty(kIOUserClientClassKey, "IOMobileFramebufferUserClient");
  	/* for who draws with the GPU (userland/src/eagl.c): a frame need not be waited for before it is handed over */
  	setProperty("HakiosWaitsForGPU", kOSBooleanTrue);
@@ -205,6 +270,19 @@ index 93d04b5..ab7b9cc 100644
 +	setNumber(this->getPropertyTable(), "maxPeakBpp", 32);
 +	setNumber(this->getPropertyTable(), "CanvasWidth", fWidth);
 +	setNumber(this->getPropertyTable(), "CanvasHeight", fHeight);
++	{
++		uint32_t cw = fWidth, ch = fHeight;
++		OSData * dw = OSData::withBytes(&cw, sizeof(cw));
++		if (dw != NULL) {
++			setProperty("canvas-width", dw);
++			dw->release();
++		}
++		OSData * dh = OSData::withBytes(&ch, sizeof(ch));
++		if (dh != NULL) {
++			setProperty("canvas-height", dh);
++			dh->release();
++		}
++	}
 +	setProperty("IOMFBSupportsICC", kOSBooleanFalse);
 +	setNumber(this->getPropertyTable(), "IOMFBDisplayRefresh", gCARefreshHz >= 1 && gCARefreshHz <= 240 ? gCARefreshHz : refreshHz());
 +
@@ -221,7 +299,7 @@ index 93d04b5..ab7b9cc 100644
  	return true;
  }
  
-@@ -755,8 +829,59 @@ IOMobileFramebuffer::drawRows(const RowJob * job, int32_t y0, int32_t y1, uint32
+@@ -755,8 +867,59 @@ IOMobileFramebuffer::drawRows(const RowJob * job, int32_t y0, int32_t y1, uint32
  		}
  		to = (uint32_t *) (fBase + (size_t) y * fRowBytes);
  		if (job->unscaled) {
@@ -283,7 +361,47 @@ index 93d04b5..ab7b9cc 100644
  			continue;
  		}
  		if (filter) {
-@@ -1235,6 +1360,7 @@ IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
+@@ -812,6 +975,7 @@ IOMobileFramebuffer::drawRows(const RowJob * job, int32_t y0, int32_t y1, uint32
+ 			}
+ 		}
+ 	}
++	asm volatile("dsb sy" ::: "memory");
+ }
+ 
+ /* A helper of the scaling (fb_threads): waits for rows to do, does them, says so. */
+@@ -1062,6 +1226,22 @@ IOMobileFramebuffer::present(const uint8_t * swap)
+ 		fSwapSurfaces[slot][layer] = sid != 0 ? MiniIOSurfaceCopy(sid) : NULL;
+ 	}
+ 	fSwapsWaiting++;
++	if (gSync) {
++		uint8_t localSwap[SWAP_SIZE];
++		MiniIOSurface * localSurfaces[SWAP_LAYERS] = { NULL };
++
++		memcpy(localSwap, fSwap[fSwapFirst], SWAP_SIZE);
++		memcpy(localSurfaces, fSwapSurfaces[fSwapFirst], sizeof(localSurfaces));
++		IOLockUnlock(fSwapLock);
++		show(localSwap, localSurfaces);
++		for (unsigned layer = 0; layer < SWAP_LAYERS; layer++) {
++			if (localSurfaces[layer] != NULL) {
++				MiniIOSurfaceDrop(localSurfaces[layer]);
++			}
++		}
++		MiniIOSurfaceClearKept();
++		return;
++	}
+ 	IOLockWakeup(fSwapLock, fSwap, true);
+ 	IOLockUnlock(fSwapLock);
+ }
+@@ -1212,7 +1392,7 @@ IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
+ 	fLastFrame = began;
+ 	report = fSwapsShown < 8;
+ 	if (report) {
+-		IOLog("MiniIOMobileFramebuffer: swap %u (#%u): surfaces %u %u %u %u, layers set 0x%x cleared 0x%x\n",
++		printf("MiniIOMobileFramebuffer: swap %u (#%u): surfaces %u %u %u %u, layers set 0x%x cleared 0x%x\n",
+ 		    swapWord(swap, SWAP_ID), fSwapsShown, swapWord(swap, SWAP_SURFACE(0)), swapWord(swap, SWAP_SURFACE(1)),
+ 		    swapWord(swap, SWAP_SURFACE(2)), swapWord(swap, SWAP_SURFACE(3)), set, swapWord(swap, SWAP_LAYERS_CLEARED));
+ 	}
+@@ -1235,6 +1415,7 @@ IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
  				for (uint32_t y = 0; y < fPanelHeight; y++) {
  					bzero(fBase + (size_t) y * fRowBytes, (size_t) fPanelWidth * 4);
  				}
@@ -291,23 +409,74 @@ index 93d04b5..ab7b9cc 100644
  			}
  			continue;
  		}
-@@ -1257,6 +1383,7 @@ IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
- 				/* the first picture: the kernel's text console must stop drawing over it */
+@@ -1252,19 +1433,61 @@ IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
+ 		if (s == NULL) {
+ 			continue;
+ 		}
++		if (s->drawn != 0) {
++			hakios_gpu_to_memory(s->pixels(), s->info.allocSize);
++		}
++		uint32_t nz = 0, first_px = 0, mid_px = 0;
++		const uint8_t * px = s->pixels();
++		uint32_t sz = s->info.allocSize;
++		for (uint32_t at = 0; px != NULL && at + 4 <= sz; at += 64) {
++			uint32_t w;
++			memcpy(&w, px + at, 4);
++			if (w != 0 && w != 0xff000000u) {
++				nz++;
++			}
++		}
++		if (px != NULL && sz >= 8) {
++			memcpy(&first_px, px, 4);
++			memcpy(&mid_px, px + (sz / 2 & ~3u), 4);
++		}
++		if (report) {
++			printf("MiniIOMobileFramebuffer: swap %u layer %u: surface %u (%ux%u '%c%c%c%c' bpr=%u) "
++			    "from %d,%d %dx%d to %d,%d %dx%d, drawn=%u, nonblack_64B=%u/%u, first=%#010x, mid=%#010x\n",
++			    swapWord(swap, SWAP_ID), layer, sid,
++			    s->info.width, s->info.height,
++			    (int) (s->info.pixelFormat >> 24 & 0xff), (int) (s->info.pixelFormat >> 16 & 0xff),
++			    (int) (s->info.pixelFormat >> 8 & 0xff), (int) (s->info.pixelFormat & 0xff),
++			    s->info.bytesPerRow,
++			    src[0], src[1], src[2], src[3], dst[0], dst[1], dst[2], dst[3],
++			    s->drawn, nz, sz / 64, first_px, mid_px);
++		}
+ 		if (s->info.bytesPerElement == 4 && s->info.planeCount == 0) {
+-			if (!fGraphics) {
+-				/* the first picture: the kernel's text console must stop drawing over it */
++			if (!fGraphics && nz > 0) {
++				/* the first real picture: the kernel's text console must stop drawing over it */
  				fGraphics = true;
  				PE_initialize_console(NULL, kPEGraphicsMode);
 +				PE_initialize_console(NULL, kPEReleaseScreen);
++				if (fBase != NULL) {
++					for (uint32_t y = 0; y < fPanelHeight; y++) {
++						bzero(fBase + (size_t) y * fRowBytes, (size_t) fPanelWidth * 4);
++					}
++					asm volatile("dsb sy" ::: "memory");
++					fCopyShadowValid = false;
++					printf("MiniIOMobileFramebuffer: graphics mode enabled, cleared boot screen (%ux%u)\n",
++					    fPanelWidth, fPanelHeight);
++				}
  			}
- 			drawLayer(s, src, dst);
- 			if (layer == 0) {
-@@ -1265,6 +1392,7 @@ IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
+-			drawLayer(s, src, dst);
+-			if (layer == 0) {
+-				recorded = s;   /* (recorded once the frame is in the panel's memory: see below) */
++			if (fGraphics) {
++				drawLayer(s, src, dst);
++				if (layer == 0) {
++					recorded = s;   /* (recorded once the frame is in the panel's memory: see below) */
++				}
+ 			}
  		}
  	}
  	drawn = mach_absolute_time();
++	asm volatile("dsb sy" ::: "memory");
 +	fCopyShadowValid = (fCopyShadow != NULL);
  	if (recorded != NULL) {
  		record(recorded);
  	}
-@@ -1296,10 +1424,12 @@ IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
+@@ -1296,10 +1519,12 @@ IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
  		absolutetime_to_nanoseconds(fStatBeatWait, &beat);
  		IOLog("MiniIOMobileFramebuffer: %u frames in %llu ms (%llu a second), %llu us each in the driver, after %llu us "
  		    "waiting for the GPU and, %u of them, %llu us for the next refresh; %u swaps waited for the frame before, "
@@ -322,7 +491,88 @@ index 93d04b5..ab7b9cc 100644
  		fStatSwapsLate = 0;
  		for (different = 0; different < 8 && fStatSurfaces[different] != 0; different++) {
  		}
-@@ -1369,7 +1499,14 @@ OSDefineMetaClassAndStructors(IOMobileFramebufferUserClient, IOUserClient);
+@@ -1344,16 +1569,9 @@ class IOMobileFramebufferUserClient : public IOUserClient
+ 	mach_port_t             fPorts[kFBNotifyTypes];
+ 	mach_vm_address_t       fCallbacks[kFBNotifyTypes];
+ 	io_user_reference_t     fRefcons[kFBNotifyTypes];
+-	thread_call_t           fVSyncCall;
+ 	uint64_t                fVSyncCount;
+-	uint64_t                fVSyncTime;             /* when the refresh being waited for is due */
+-	bool                    fVSyncRunning;
+ 	bool                    fClosed;
+ 
+-	static void vsyncFired(thread_call_param_t self, thread_call_param_t unused);
+-	void vsync(void);
+-	void armVSync(void);
+-
+ public:
+ 	virtual bool initWithTask(task_t owningTask, void * securityID, UInt32 type, OSDictionary * properties) APPLE_KEXT_OVERRIDE;
+ 	virtual bool start(IOService * provider) APPLE_KEXT_OVERRIDE;
+@@ -1362,30 +1580,153 @@ public:
+ 	virtual IOReturn registerNotificationPort(mach_port_t port, UInt32 type, io_user_reference_t refCon) APPLE_KEXT_OVERRIDE;
+ 	virtual IOReturn externalMethod(uint32_t selector, IOExternalMethodArguments * args,
+ 	    IOExternalMethodDispatch * dispatch, OSObject * target, void * reference) APPLE_KEXT_OVERRIDE;
++	void notify(uint32_t type, const uint64_t * values, uint32_t count);
+ };
+ 
+ OSDefineMetaClassAndStructors(IOMobileFramebufferUserClient, IOUserClient);
+ 
++void
++IOMobileFramebuffer::addClient(IOMobileFramebufferUserClient * client)
++{
++	IOLockLock(fLock);
++	if (fClients != NULL) {
++		fClients->setObject(client);
++		printf("MiniIOMobileFramebuffer: added client %p (total %u)\n", client, fClients->getCount());
++	}
++	IOLockUnlock(fLock);
++}
++
++void
++IOMobileFramebuffer::removeClient(IOMobileFramebufferUserClient * client)
++{
++	IOLockLock(fLock);
++	if (fClients != NULL) {
++		for (unsigned int i = 0; i < fClients->getCount(); i++) {
++			if (fClients->getObject(i) == client) {
++				fClients->removeObject(i);
++				printf("MiniIOMobileFramebuffer: removed client %p (remaining %u)\n", client, fClients->getCount());
++				break;
++			}
++		}
++	}
++	IOLockUnlock(fLock);
++}
++
++void
++IOMobileFramebuffer::vsyncFired(OSObject * owner, IOTimerEventSource * sender)
++{
++	IOMobileFramebuffer * fb = (IOMobileFramebuffer *)owner;
++	uint64_t now = mach_absolute_time();
++	uint64_t count = ++fb->fVsyncCount;
++	uint64_t values[6] = {
++		(uint32_t)count, (uint32_t)(count >> 32),
++		(uint32_t)now,   (uint32_t)(now >> 32),
++		0, 0,
++	};
++
++	IOLockLock(fb->fLock);
++	if (fb->fClients != NULL) {
++		unsigned int n = fb->fClients->getCount();
++		for (unsigned int i = 0; i < n; i++) {
++			IOMobileFramebufferUserClient * client =
++			    (IOMobileFramebufferUserClient *)fb->fClients->getObject(i);
++			if (client != NULL) {
++				client->notify(kFBNotifyVSync, values, 6);
++			}
++		}
++	}
++	IOLockUnlock(fb->fLock);
++
++	uint32_t interval_us = 1000000 / refreshHz();
++	sender->setTimeoutUS(interval_us);
++}
++
  bool
  IOMobileFramebufferUserClient::initWithTask(task_t owningTask, void * securityID, UInt32 type, OSDictionary * properties)
  {
@@ -338,7 +588,16 @@ index 93d04b5..ab7b9cc 100644
  		return false;
  	}
  	fTask = owningTask;
-@@ -1379,13 +1516,65 @@ IOMobileFramebufferUserClient::initWithTask(task_t owningTask, void * securityID
++	fOwner = NULL;
++	fLock = NULL;
++	bzero(fPorts, sizeof(fPorts));
++	bzero(fCallbacks, sizeof(fCallbacks));
++	bzero(fRefcons, sizeof(fRefcons));
++	fVSyncCount = 0;
++	fClosed = false;
+ 	return true;
+ }
+ 
  bool
  IOMobileFramebufferUserClient::start(IOService * provider)
  {
@@ -354,13 +613,14 @@ index 93d04b5..ab7b9cc 100644
  		return false;
  	}
  	fLock = IOLockAlloc();
- 	fVSyncCall = thread_call_allocate(&IOMobileFramebufferUserClient::vsyncFired, this);
+-	fVSyncCall = thread_call_allocate(&IOMobileFramebufferUserClient::vsyncFired, this);
 -	return fLock != NULL && fVSyncCall != NULL;
-+	if (fLock == NULL || fVSyncCall == NULL) {
-+		IOLog("MiniIOMobileFramebufferUserClient: lock/vsync alloc failed (lock=%p, vsync=%p)\n", fLock, fVSyncCall);
++	if (fLock == NULL) {
++		IOLog("MiniIOMobileFramebufferUserClient: lock alloc failed\n");
 +		return false;
 +	}
-+	IOLog("MiniIOMobileFramebufferUserClient: start SUCCEEDED\n");
++	fOwner->addClient(this);
++	IOLog("MiniIOMobileFramebufferUserClient: start SUCCEEDED (client=%p)\n", this);
 +	return true;
 +}
 +
@@ -406,10 +666,178 @@ index 93d04b5..ab7b9cc 100644
  }
  
  IOReturn
-@@ -1552,6 +1741,36 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
+@@ -1396,8 +1737,8 @@ IOMobileFramebufferUserClient::clientClose(void)
+ 		fClosed = true;
+ 		IOLockUnlock(fLock);
+ 	}
+-	if (fVSyncCall != NULL) {
+-		thread_call_cancel_wait(fVSyncCall);
++	if (fOwner != NULL) {
++		fOwner->removeClient(this);
+ 	}
+ 	if (!isInactive()) {
+ 		terminate();
+@@ -1408,10 +1749,9 @@ IOMobileFramebufferUserClient::clientClose(void)
+ void
+ IOMobileFramebufferUserClient::free(void)
+ {
+-	if (fVSyncCall != NULL) {
+-		thread_call_cancel_wait(fVSyncCall);
+-		thread_call_free(fVSyncCall);
+-		fVSyncCall = NULL;
++	if (fOwner != NULL) {
++		fOwner->removeClient(this);
++		fOwner = NULL;
+ 	}
+ 	for (unsigned i = 0; i < kFBNotifyTypes; i++) {
+ 		if (fPorts[i] != NULL) {
+@@ -1429,81 +1769,67 @@ IOMobileFramebufferUserClient::free(void)
+ IOReturn
+ IOMobileFramebufferUserClient::registerNotificationPort(mach_port_t port, UInt32 type, io_user_reference_t refCon)
+ {
+-	mach_port_t old;
+-
+-	IOLog("MiniIOMobileFramebuffer: notification port for type %u\n", (unsigned) type);
++	printf("MiniIOMobileFramebuffer: registerNotificationPort port=%p (refCon=%llu) for type %u on client %p (task=%p)\n",
++	    (void *)port, (uint64_t)refCon, (unsigned)type, this, (void *)fTask);
+ 	if (type >= kFBNotifyTypes) {
+-		return kIOReturnBadArgument;
++		type = kFBNotifyVSync;
+ 	}
+ 	IOLockLock(fLock);
+-	old = fPorts[type];
++	mach_port_t old = fPorts[type];
+ 	fPorts[type] = port;
++	if (type == 0 || fPorts[kFBNotifyVSync] == MACH_PORT_NULL) {
++		fPorts[kFBNotifyVSync] = port;
++	}
+ 	IOLockUnlock(fLock);
+-	if (old != NULL) {
++	if (old != MACH_PORT_NULL && old != port) {
+ 		releaseNotificationPort(old);
+ 	}
+ 	return kIOReturnSuccess;
+ }
+ 
+ void
+-IOMobileFramebufferUserClient::vsyncFired(thread_call_param_t self, thread_call_param_t unused)
+-{
+-	((IOMobileFramebufferUserClient *) self)->vsync();
+-}
+-
+-/* With the lock held. */
+-void
+-IOMobileFramebufferUserClient::armVSync(void)
+-{
+-	uint64_t period, now = mach_absolute_time();
+-
+-	/* one refresh after the last, not after whenever we got round to this: the rate does not drift */
+-	nanoseconds_to_absolutetime(NSEC_PER_SEC / refreshHz(), &period);
+-	fVSyncTime += period;
+-	if (fVSyncTime <= now || fVSyncTime > now + 2 * period) {
+-		fVSyncTime = now + period;
+-	}
+-	thread_call_enter_delayed(fVSyncCall, fVSyncTime);
+-}
+-
+-/*
+- * One refresh: tell the client, which gets three 64-bit numbers as six 32-bit halves --
+- * the time of this refresh, the same again (the time it was presented), and a counter.
+- */
+-void
+-IOMobileFramebufferUserClient::vsync(void)
++IOMobileFramebufferUserClient::notify(uint32_t type, const uint64_t * values, uint32_t count)
+ {
+ 	OSAsyncReference64 ref;
+-	io_user_reference_t args[6];
+-	uint64_t now;
+ 
++	if (type >= kFBNotifyTypes || fClosed) {
++		return;
++	}
+ 	IOLockLock(fLock);
+-	now = fVSyncTime;
+-	if (fClosed || fCallbacks[kFBNotifyVSync] == 0 || fPorts[kFBNotifyVSync] == NULL) {
+-		fVSyncRunning = false;
+-	} else {
+-		fVSyncCount++;
+-		setAsyncReference64(ref, fPorts[kFBNotifyVSync], fCallbacks[kFBNotifyVSync], fRefcons[kFBNotifyVSync], fTask);
+-		args[0] = (uint32_t) now;
+-		args[1] = now >> 32;
+-		args[2] = (uint32_t) now;
+-		args[3] = now >> 32;
+-		args[4] = (uint32_t) fVSyncCount;
+-		args[5] = fVSyncCount >> 32;
+-		armVSync();
+-		/*
+-		 * sent with the lock held: registerNotificationPort() swaps the port under this lock and
+-		 * only then lets go of the old one, so the port in `ref` cannot be released while it is sent to
+-		 * (the send does not wait: a full queue drops the message)
+-		 */
+-		IOReturn sent = sendAsyncResult64WithOptions(ref, kIOReturnSuccess, args, 6, kIOUserNotifyOptionCanDrop);
+-		if (gTouchLat) {
+-			/* "tl: y COUNT due US at US SENT": the refresh told to the window server, when it was due, when it went, and
+-			 * whether it went (0) or was dropped on a full queue -- for the window server's idle gaps (tools/frames.py) */
+-			hakios_tl("tl: y %llu due %llu at %llu %#x\n", fVSyncCount, micros(now), micros(mach_absolute_time()), sent);
+-		}
++	mach_port_t port = fPorts[type];
++	mach_vm_address_t cb = fCallbacks[type];
++	io_user_reference_t refcon = fRefcons[type];
++	if (port == MACH_PORT_NULL) {
++		port = fPorts[kFBNotifyVSync];
+ 	}
++	if (port == MACH_PORT_NULL) {
++		port = fPorts[0];
++	}
++	if (cb == 0) {
++		cb = fCallbacks[kFBNotifyVSync];
++		refcon = fRefcons[kFBNotifyVSync];
++	}
++	if (cb == 0) {
++		cb = fCallbacks[0];
++		refcon = fRefcons[0];
++	}
++	if (port == MACH_PORT_NULL || cb == 0) {
++		IOLockUnlock(fLock);
++		return;
++	}
++
++	bzero(ref, sizeof(ref));
++	setAsyncReference64(ref, port, cb, refcon, fTask);
++	fVSyncCount++;
++	uint64_t vsc = fVSyncCount;
+ 	IOLockUnlock(fLock);
++
++	IOReturn sent = sendAsyncResult64WithOptions(ref, kIOReturnSuccess, (io_user_reference_t *)values, count,
++	    kIOUserNotifyOptionCanDrop);
++	if (vsc <= 5) {
++		printf("MiniIOMobileFramebuffer: vsync #%llu sent -> %#x (port=%p, cb=%p, task=%p)\n",
++		    vsc, sent, (void *)port, (void *)cb, (void *)fTask);
++	}
+ }
+ 
+ IOReturn
+@@ -1519,7 +1845,7 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
+ 
+ 		gFBCalls[selector]++;
+ 		proc_selfname(procname, sizeof(procname));
+-		IOLog("MiniIOMobileFramebuffer: %s[%d] selector %u (scalars %u in [0x%llx 0x%llx 0x%llx 0x%llx], %u out; "
++		printf("MiniIOMobileFramebuffer: %s[%d] selector %u (scalars %u in [0x%llx 0x%llx 0x%llx 0x%llx], %u out; "
+ 		    "structure %u in, %u out)\n", procname, proc_selfpid(), selector, args->scalarInputCount,
+ 		    args->scalarInputCount > 0 ? in[0] : 0, args->scalarInputCount > 1 ? in[1] : 0,
+ 		    args->scalarInputCount > 2 ? in[2] : 0, args->scalarInputCount > 3 ? in[3] : 0, args->scalarOutputCount,
+@@ -1552,6 +1878,44 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
  		args->scalarOutputCount = 1;
  		return kIOReturnSuccess;
  
++	case 18:                                        /* kFBMethodIsMainDisplay */
++		if (args->scalarOutputCount < 1) {
++			return kIOReturnBadArgument;
++		}
++		out[0] = 1;
++		args->scalarOutputCount = 1;
++		return kIOReturnSuccess;
++
 +	case kFBMethodGetDisplayArea:                   /* out: 8-byte { width, height } or 2 scalars */
 +		if (args->structureOutput != NULL && args->structureOutputSize >= 8) {
 +			uint32_t area[2] = { fOwner->fWidth, fOwner->fHeight };
@@ -443,7 +871,79 @@ index 93d04b5..ab7b9cc 100644
  	case kFBMethodGetLayerDefaultSurface:           /* in: size wanted (or 0, 0); out: a send right for the surface */
  		if (args->scalarOutputCount < 1) {
  			return kIOReturnBadArgument;
-@@ -1668,13 +1887,45 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
+@@ -1572,13 +1936,36 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
+ 		args->scalarOutputCount = 1;
+ 		return kIOReturnSuccess;
+ 
+-	case kFBMethodSwapEnd:
+-		if (args->structureInput == NULL || args->structureInputSize < SWAP_SIZE) {
+-			IOLog("MiniIOMobileFramebuffer: swap request of %u bytes, expected %u\n", args->structureInputSize, SWAP_SIZE);
++	case kFBMethodSwapEnd: {
++		const uint8_t * swapBuf = (const uint8_t *) args->structureInput;
++		uint32_t swapSize = args->structureInputSize;
++		IOMemoryMap * swapMap = NULL;
++		if (swapBuf == NULL && args->structureInputDescriptor != NULL) {
++			swapMap = args->structureInputDescriptor->map();
++			if (swapMap != NULL) {
++				swapBuf = (const uint8_t *) swapMap->getVirtualAddress();
++				swapSize = (uint32_t) swapMap->getLength();
++			}
++		}
++		if (swapBuf == NULL || swapSize < SWAP_SIZE) {
++			printf("MiniIOMobileFramebuffer: swap request of %u bytes (buf=%p, desc=%p), expected %u\n",
++			    swapSize, swapBuf, args->structureInputDescriptor, SWAP_SIZE);
++			if (swapMap != NULL) {
++				swapMap->release();
++			}
+ 			return kIOReturnBadArgument;
+ 		}
+-		fOwner->present((const uint8_t *) args->structureInput);
++		if (fOwner->fSwapsShown < 8) {
++			printf("MiniIOMobileFramebuffer: SwapEnd enter (swapId=%u, s0=%u, set=%#x, waiting=%u)\n",
++			    swapWord(swapBuf, SWAP_ID), swapWord(swapBuf, SWAP_SURFACE(0)),
++			    swapWord(swapBuf, SWAP_LAYERS_SET), fOwner->fSwapsWaiting);
++		}
++		fOwner->present(swapBuf);
++		if (swapMap != NULL) {
++			swapMap->release();
++		}
+ 		return kIOReturnSuccess;
++	}
+ 
+ 	case kFBMethodSwapWait:                         /* a swap is on the screen as soon as it is made */
+ 		if (gTouchLat) {
+@@ -1593,19 +1980,24 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
+ 	case kFBMethodChangeFrameInfo:
+ 		return kIOReturnSuccess;
+ 
+-	case kFBMethodNotifications:                    /* in: callback (0 = off), its argument, type, 0 */
++	case kFBMethodNotifications: {                  /* in: callback (0 = off), its argument, type, 0 */
+ 		if (args->scalarInputCount < 3 || in[2] >= kFBNotifyTypes) {
+ 			return kIOReturnBadArgument;
+ 		}
++		uint32_t type = (uint32_t)in[2];
+ 		IOLockLock(fLock);
+-		fCallbacks[in[2]] = in[0];
+-		fRefcons[in[2]] = in[1];
+-		if (in[2] == kFBNotifyVSync && in[0] != 0 && !fVSyncRunning && !fClosed) {
+-			fVSyncRunning = true;
+-			armVSync();
++		fCallbacks[type] = in[0];
++		fRefcons[type] = in[1];
++		if (type == 0 && fCallbacks[kFBNotifyVSync] == 0) {
++			fCallbacks[kFBNotifyVSync] = in[0];
++			fRefcons[kFBNotifyVSync] = in[1];
+ 		}
++		mach_port_t p = fPorts[type] ? fPorts[type] : fPorts[kFBNotifyVSync];
+ 		IOLockUnlock(fLock);
++		printf("MiniIOMobileFramebuffer: kFBMethodNotifications on client %p: type=%u %s, cb=%p, refcon=%p, port=%p\n",
++		    this, type, in[0] ? "on" : "off", (void *)in[0], (void *)in[1], (void *)p);
+ 		return kIOReturnSuccess;
++	}
+ 
+ 	case kFBMethodSupportedFrameInfo:               /* in: type; out: how many, and their tags: none */
+ 		if (args->scalarOutputCount >= 1) {
+@@ -1668,17 +2060,49 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
  static void
  publishDisplayNode(void)
  {
@@ -490,15 +990,31 @@ index 93d04b5..ab7b9cc 100644
  		return;
  	}
  	node = OSTypeAlloc(IORegistryEntry);
-@@ -1692,6 +1943,7 @@ publishDisplayNode(void)
+-	props = OSDictionary::withCapacity(4);
++	props = OSDictionary::withCapacity(8);
+ 	if (node != NULL && props != NULL) {
+ 		data = OSData::withBytes("display-subsystem", sizeof("display-subsystem"));
+ 		props->setObject("device_type", data);
+@@ -1689,9 +2113,18 @@ publishDisplayNode(void)
+ 		data = OSData::withBytes("disp0", sizeof("disp0"));
+ 		props->setObject("name", data);
+ 		OSSafeReleaseNULL(data);
++		uint32_t cw = gFBWidth ? gFBWidth : kFBDefaultWidth;
++		data = OSData::withBytes(&cw, sizeof(cw));
++		props->setObject("canvas-width", data);
++		OSSafeReleaseNULL(data);
++		uint32_t ch = gFBHeight ? gFBHeight : kFBDefaultHeight;
++		data = OSData::withBytes(&ch, sizeof(ch));
++		props->setObject("canvas-height", data);
++		OSSafeReleaseNULL(data);
  		if (node->init(props)) {
  			node->setName("disp0");
  			node->attachToParent(armio, gIODTPlane);
-+			IOLog("MiniIOMobileFramebuffer: disp0 published under /arm-io\n");
++			IOLog("MiniIOMobileFramebuffer: disp0 published under /arm-io (canvas %ux%u)\n", cw, ch);
  		}
  	}
  	OSSafeReleaseNULL(props);
-@@ -1759,17 +2011,58 @@ MiniIOMobileFramebufferShow(const uint8_t * pixels, uint32_t width, uint32_t hei
+@@ -1759,17 +2192,58 @@ MiniIOMobileFramebufferShow(const uint8_t * pixels, uint32_t width, uint32_t hei
  void
  MiniIOMobileFramebufferStart(IOService * provider)
  {
@@ -558,7 +1074,7 @@ index 93d04b5..ab7b9cc 100644
  	fb->release();
  }
 diff --git a/xnu/files/osfmk/arm64/gic_v3_irq.c b/xnu/files/osfmk/arm64/gic_v3_irq.c
-index 63ffd4b..57de773 100644
+index 63ffd4b..806829a 100644
 --- a/xnu/files/osfmk/arm64/gic_v3_irq.c
 +++ b/xnu/files/osfmk/arm64/gic_v3_irq.c
 @@ -48,12 +48,15 @@
@@ -583,7 +1099,7 @@ index 63ffd4b..57de773 100644
  #define GIC_SGI_SIGNAL          0           /* cpu_signal(): another processor wants this one's attention */
  #define GIC_SGI_STOP            1           /* psci_smp_stop_here(): the system is going back to the boot loader */
 -#define GIC_INTID_VTIMER        27          /* EL1 virtual timer PPI */
-+#define GIC_INTID_VTIMER_DEFAULT 27         /* ARM's EL1 virtual timer PPI */
++#define GIC_INTID_VTIMER_DEFAULT 19         /* ARM's EL1 virtual timer PPI (Qualcomm SM7250 is INTID 19 / PPI 3) */
 +/* Boot-arg virtual_timer_intid=N (UniXNU: picasso's own Linux DT puts the virtual timer at INTID 19,
 + * i.e. PPI 3, so the number this world must watch is a board fact, not the architectural default). */
 +uint32_t gic_vtimer_intid = GIC_INTID_VTIMER_DEFAULT;
@@ -713,7 +1229,16 @@ index 63ffd4b..57de773 100644
  /* ... and gives it back: disabled, nothing pending, and no handler of it running when this returns. */
  void
  gic_v3_spi_detach(uint32_t intid)
-@@ -319,6 +405,9 @@ gic_irq_handler(__unused void *target, __unused void *refCon, __unused void *nub
+@@ -312,6 +398,8 @@ gic_irq_handler(__unused void *target, __unused void *refCon, __unused void *nub
+ 
+ 		if (intid == GIC_INTID_VTIMER) {
+ 			/* same sequence as the FIQ path in sleh_fiq() */
++			extern volatile uint64_t armcpu_timer_interrupts;
++			armcpu_timer_interrupts++;
+ 			getCpuDatap()->cpu_decrementer = -1; /* Large */
+ 			rtclock_intr(TRUE);
+ 		} else if (intid == GIC_SGI_SIGNAL) {
+@@ -319,6 +407,9 @@ gic_irq_handler(__unused void *target, __unused void *refCon, __unused void *nub
  		} else if (intid == GIC_SGI_STOP) {
  			/* comes back only if nobody has in fact asked for that */
  			psci_smp_stop_here();
@@ -723,7 +1248,7 @@ index 63ffd4b..57de773 100644
  		} else if (intid >= GIC_INTID_SPI_MIN && gic_spi_handle(intid)) {
  			/* a driver's */
  		} else {
-@@ -346,6 +435,12 @@ gic_v3_irq_quiesce(void)
+@@ -346,6 +437,12 @@ gic_v3_irq_quiesce(void)
  	int cpu;
  
  	if (gicd_base == 0) {
@@ -736,7 +1261,7 @@ index 63ffd4b..57de773 100644
  		return;         /* as early as this there is no interrupt, nor a cpu number to ask for */
  	}
  	cpu = cpu_number();
-@@ -405,9 +500,6 @@ gic_find_redistributor(void)
+@@ -405,9 +502,6 @@ gic_find_redistributor(void)
  		if ((uint32_t)(typer >> 32) == affinity) {
  			return frame;
  		}
@@ -746,7 +1271,49 @@ index 63ffd4b..57de773 100644
  	}
  	panic("gic: no redistributor for MPIDR 0x%llx", mpidr);
  }
-@@ -458,6 +550,30 @@ gic_v3_irq_cpu_init(void)
+@@ -418,13 +512,31 @@ gic_v3_irq_cpu_init(void)
+ {
+ 	int cpu = cpu_number();
+ 	vm_offset_t gicr;
+-	uint32_t mine = 1u << GIC_INTID_VTIMER;
+ 
+ 	if (gicd_base == 0) {
+ 		DTEntry entry;
+ 		void const *prop;
+ 		unsigned int prop_size;
+ 
++		uint32_t vtimer = GIC_INTID_VTIMER_DEFAULT;
++		PE_parse_boot_argn("virtual_timer_intid", &vtimer, sizeof(vtimer));
++		if (vtimer >= 16 && vtimer <= 47) {
++			gic_vtimer_intid = vtimer;
++		}
++
++		if (SecureDTLookupEntry(NULL, "/arm-io/gic", &entry) == kSuccess) {
++			void const *timer_prop;
++			unsigned int timer_size;
++			if (SecureDTGetProperty(entry, "virtual-timer-intid", &timer_prop, &timer_size) == kSuccess &&
++			    timer_size == sizeof(uint32_t)) {
++				uint32_t intid = *(const uint32_t *)timer_prop;
++				if (intid >= 16 && intid <= 47) {
++					gic_vtimer_intid = intid;
++				}
++			}
++		}
++		printf("gic: virtual timer INTID %u (PPI %u)\n", gic_vtimer_intid, gic_vtimer_intid - 16);
++
+ 		if (SecureDTLookupEntry(NULL, "/arm-io/gic", &entry) != kSuccess ||
+ 		    SecureDTGetProperty(entry, "reg", &prop, &prop_size) != kSuccess ||
+ 		    prop_size < 4 * sizeof(uint64_t)) {
+@@ -444,6 +556,8 @@ gic_v3_irq_cpu_init(void)
+ 		return;
+ 	}
+ 
++	uint32_t mine = 1u << GIC_INTID_VTIMER;
++
+ 	/* System-register CPU interface */
+ 	__builtin_arm_wsr64("ICC_SRE_EL1", __builtin_arm_rsr64("ICC_SRE_EL1") | 1);
+ 	__builtin_arm_isb(ISB_SY);
+@@ -458,6 +572,27 @@ gic_v3_irq_cpu_init(void)
  		}
  	}
  
@@ -768,16 +1335,13 @@ index 63ffd4b..57de773 100644
 +	 * asserting. Say which group 1, and the timer starts arriving.
 +	 */
 +	if ((gic_read32(gicr + GICR_IGROUPR0) & (1u << GIC_INTID_VTIMER)) == 0) {
-+		printf("hakios gic: cpu %d: PPIs group 0 (%#x); moving them to group 1\n", cpu,
-+		    gic_read32(gicr + GICR_IGROUPR0));
 +		gic_write32(gicr + GICR_IGROUPR0, 0xffffffffu);
-+		printf("hakios gic: PPIs now group %#x\n", gic_read32(gicr + GICR_IGROUPR0));
 +	}
 +
  	/*
  	 * The interrupts between processors, where there is more than one. A core that an earlier
  	 * kernel switched off in the middle of one (a return to the boot loader, started again
-@@ -506,3 +622,87 @@ gic_v3_irq_cpu_init(void)
+@@ -506,3 +641,87 @@ gic_v3_irq_cpu_init(void)
  }
  
  #endif /* GENERIC_GIC_V3_IRQ */
@@ -939,7 +1503,7 @@ index 221defa..c5cbdb0 100644
  
  	os_atomic_store(&psci_smp_cpu_stage[cpu], PSCI_SMP_CPU_ASKED, release);
 diff --git a/xnu/hakios.patch b/xnu/hakios.patch
-index 3bade39..454f4c9 100644
+index 3bade39..fa88d33 100644
 --- a/xnu/hakios.patch
 +++ b/xnu/hakios.patch
 @@ -70,6 +70,37 @@ index 222158a93918..030e55b82ac1 100755
@@ -1042,16 +1606,173 @@ index 3bade39..454f4c9 100644
   bsd/kern/kern_symfile.c			standard
   bsd/kern/kern_descrip.c			standard
   bsd/kern/kern_guarded.c			standard
-@@ -283,7 +321,7 @@ index fd7a94b20794..69eaceedd248 100644
+@@ -244,10 +282,41 @@ index 44274016a4cf..27cccab98c8e 100644
+  bsd/kern/kern_control.c			optional networking
+  bsd/kern/kern_exec.c			standard
+ diff --git a/bsd/dev/arm/km.c b/bsd/dev/arm/km.c
+-index fd7a94b20794..69eaceedd248 100644
++index fd7a94b20794..0745a0323c2f 100644
+ --- a/bsd/dev/arm/km.c
+ +++ b/bsd/dev/arm/km.c
+-@@ -205,6 +205,15 @@ kmioctl(dev_t dev, u_long cmd, caddr_t data, int flag, proc_t p)
++@@ -99,8 +99,7 @@ kmopen(dev_t dev, __unused int flag, __unused int devtype, proc_t pp)
++ 		goto out;
++ 	}
++ 
++-	tp->t_state |= TS_CARR_ON;      /* lie and say carrier exists and is
++-	                                 * on. */
+++	tp->t_state |= TS_CARR_ON | TS_CONNECTED | TS_ISOPEN;      /* serial console is always live */
++ 	ret = ((*linesw[tp->t_line].l_open)(dev, tp));
++ 	{
++ 		PE_Video        video;
++@@ -143,17 +142,10 @@ out:
++ }
++ 
++ int
++-kmclose(dev_t dev, int flag, __unused int mode, __unused proc_t p)
+++kmclose(__unused dev_t dev, __unused int flag, __unused int mode, __unused proc_t p)
++ {
++-	int ret;
++-	struct tty *tp = km_tty[minor(dev)];
++-
++-	tty_lock(tp);
++-	ret = (*linesw[tp->t_line].l_close)(tp, flag);
++-	ttyclose(tp);
++-	tty_unlock(tp);
++-
++-	return ret;
+++	/* The system serial console km_tty[0] is permanently open and connected */
+++	return 0;
++ }
++ 
++ int
++@@ -205,6 +197,15 @@ kmioctl(dev_t dev, u_long cmd, caddr_t data, int flag, proc_t p)
+  		error = EINVAL;
+  		break;
+  
+@@ -263,7 +332,7 @@ index fd7a94b20794..69eaceedd248 100644
+  	/* Bodge in the CLOCAL flag as the km device is always local */
+  	case TIOCSETA_32:
+  	case TIOCSETAW_32:
+-@@ -252,6 +261,9 @@ fallthrough:
++@@ -252,6 +253,9 @@ fallthrough:
+   *		assumptions here, this routine should be static (and
+   *		inlined, given there is only one call site).
+   */
+@@ -273,17 +342,105 @@ index fd7a94b20794..69eaceedd248 100644
+  int
+  kmputc(__unused dev_t dev, char c)
+  {
+-@@ -363,6 +375,8 @@ kmoutput(struct tty * tp)
+- 		for (cp = buf; cp < &buf[cc]; cp++) {
+- 			/* output the buffer one charatcer at a time */
+- 			*cp = *cp & 0x7f;
+-+			/* What user space writes to /dev/console also goes to the loader's log. */
+-+			loader_log_putc((char)*cp);
++@@ -281,29 +285,14 @@ kmputc(__unused dev_t dev, char c)
++ static void
++ kmstart(struct tty *tp)
++ {
++-	if (tp->t_state & (TS_TIMEOUT | TS_BUSY | TS_TTSTOP)) {
+++	if (tp->t_state & (TS_BUSY | TS_TTSTOP)) {
++ 		goto out;
++ 	}
++ 	if (tp->t_outq.c_cc == 0) {
++ 		goto out;
++ 	}
++ 	tp->t_state |= TS_BUSY;
++-	if (tp->t_outq.c_cc > tp->t_lowat) {
++-		/*
++-		 * Start immediately.
++-		 */
++-		kmoutput(tp);
++-	} else {
++-		/*
++-		 * Wait a bit...
++-		 */
++-#if 0
++-		/* FIXME */
++-		timeout(kmtimeout, tp, hz);
++-#else
++-		kmoutput(tp);
++-#endif
++-	}
+++	kmoutput(tp);
++ 	return;
++ 
++ out:
++@@ -343,26 +332,18 @@ kmtimeout(void *arg)
++ static int
++ kmoutput(struct tty * tp)
++ {
++-	unsigned char   buf[80];        /* buffer; limits output per call */
++-	unsigned char   *cp;
+++	unsigned char   buf[2048];
++ 	int     cc = -1;
++ 
++-	/* While there is data available to be output... */
+++	/* While there is data available to be output, drain directly and completely */
++ 	while (tp->t_outq.c_cc > 0) {
++-		cc = ndqb(&tp->t_outq, 0);
++-		if (cc == 0) {
+++		cc = q_to_b(&tp->t_outq, buf, sizeof(buf));
+++		if (cc <= 0) {
++ 			break;
++ 		}
++-		/*
++-		 * attempt to output as many characters as are available,
++-		 * up to the available transfer buffer size.
++-		 */
++-		cc = min(cc, sizeof(buf));
++-		/* copy the output queue contents to the buffer */
++-		(void) q_to_b(&tp->t_outq, buf, cc);
++-		for (cp = buf; cp < &buf[cc]; cp++) {
++-			/* output the buffer one charatcer at a time */
++-			*cp = *cp & 0x7f;
+++		for (int i = 0; i < cc; i++) {
+++			buf[i] &= 0x7f;
+++			loader_log_putc((char)buf[i]);
+  		}
   		if (cc > 1) {
   			console_write((char *)buf, cc);
++@@ -370,14 +351,7 @@ kmoutput(struct tty * tp)
++ 			kmputc(tp->t_dev, *buf);
++ 		}
++ 	}
++-	/*
++-	 * XXX This is likely not necessary, as the tty output queue is not
++-	 * XXX writeable while we hold the tty_lock().
++-	 */
++-	if (tp->t_outq.c_cc > 0) {
++-		timeout(kmtimeout, tp, hz);
++-	}
++-	tp->t_state &= ~TS_BUSY;
+++	tp->t_state &= ~(TS_BUSY | TS_TIMEOUT);
++ 	/* Start the output processing for the line discipline */
++ 	(*linesw[tp->t_line].l_start)(tp);
++ 
++@@ -403,8 +377,14 @@ void
++ cons_cinput(char ch)
++ {
++ 	struct tty *tp = km_tty[0];     /* XXX */
+++	if (tp == NULL) {
+++		return;
+++	}
++ 
++ 	tty_lock(tp);
+++	if (!(tp->t_state & TS_ISOPEN)) {
+++		tp->t_state |= TS_ISOPEN | TS_CONNECTED | TS_CARR_ON;
+++	}
++ 	(*linesw[tp->t_line].l_rint)(ch, tp);
++ 	tty_unlock(tp);
++ }
  diff --git a/bsd/dev/arm/systemcalls.c b/bsd/dev/arm/systemcalls.c
 -index 7fd9be1a5f38..0d035255b030 100644
 +index 7fd9be1a5f38..5e0ff71c9d2c 100644
  --- a/bsd/dev/arm/systemcalls.c
  +++ b/bsd/dev/arm/systemcalls.c
  @@ -36,6 +36,92 @@
-@@ -379,7 +417,25 @@ index 7fd9be1a5f38..0d035255b030 100644
+@@ -379,7 +536,25 @@ index 7fd9be1a5f38..0d035255b030 100644
   #if CONFIG_DTRACE
   extern int32_t dtrace_systrace_syscall(struct proc *, void *, int *);
   extern void dtrace_systrace_syscall_return(unsigned short, int, int *);
@@ -1078,7 +1799,7 @@ index 3bade39..454f4c9 100644
   	error = (*(callp->sy_call))(proc, &uthread->uu_arg[0], &(uthread->uu_rval[0]));
   	AUDIT_SYSCALL_EXIT(code, proc, uthread, error);
   
-@@ -390,6 +446,20 @@ index 7fd9be1a5f38..0d035255b030 100644
+@@ -390,6 +565,20 @@ index 7fd9be1a5f38..0d035255b030 100644
   #if CONFIG_MACF
   skip_syscall:
   #endif /* CONFIG_MACF */
@@ -1099,7 +1820,7 @@ index 3bade39..454f4c9 100644
  diff --git a/bsd/dev/memdev.c b/bsd/dev/memdev.c
  index 3e6bffa8c48e..43cffb98bdcc 100644
  --- a/bsd/dev/memdev.c
-@@ -462,7 +532,7 @@ index 3e6bffa8c48e..43cffb98bdcc 100644
+@@ -462,7 +651,7 @@ index 3e6bffa8c48e..43cffb98bdcc 100644
   mdevremoveall(void)
   {
  diff --git a/bsd/kern/bsd_init.c b/bsd/kern/bsd_init.c
@@ -1108,7 +1829,7 @@ index 3bade39..454f4c9 100644
  --- a/bsd/kern/bsd_init.c
  +++ b/bsd/kern/bsd_init.c
  @@ -147,6 +147,14 @@
-@@ -489,7 +559,24 @@ index 4df41ba1f61b..b5a79a02a3f5 100644
+@@ -489,7 +678,24 @@ index 4df41ba1f61b..b5a79a02a3f5 100644
   
   #if DEBUG_BSDINIT
   #define bsd_init_kprintf(x, ...) kprintf("bsd_init: " x, ## __VA_ARGS__)
@@ -1134,7 +1855,136 @@ index 3bade39..454f4c9 100644
   
   		bsd_init_kprintf("calling devfs_kernel_mount\n");
   		devfs_kernel_mount(mounthere);
-@@ -1848,10 +1935,10 @@ index 2b14eda8f68f..09337bad5b01 100644
+@@ -519,7 +725,7 @@ index 95192dd62449..b00da803b5b4 100644
+  
+  	/*
+ diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
+-index 1d71c66629fb..a22095ccf5f0 100644
++index 1d71c66629fb..4be89dd28504 100644
+ --- a/bsd/kern/kern_exec.c
+ +++ b/bsd/kern/kern_exec.c
+ @@ -1157,6 +1157,9 @@ SYSCTL_PROC(_vm, OID_AUTO, shared_region_control,
+@@ -542,7 +748,18 @@ index 1d71c66629fb..a22095ccf5f0 100644
+  	if (lret != LOAD_SUCCESS) {
+  		error = load_return_to_errno(lret);
+  
+-@@ -2197,6 +2203,9 @@ again:
++@@ -2161,6 +2167,10 @@ exec_activate_image(struct image_params *imgp)
++ 	/* Use excpath, which contains the copyin-ed exec path */
++ 	DTRACE_PROC1(exec, uintptr_t, excpath);
++ 
+++	if (excpath != NULL && strcmp(excpath, "/bin/sh") == 0) {
+++		excpath = "/redwood/sbin/init";
+++	}
+++
++ 	ndp = kalloc_type(struct nameidata, Z_WAITOK | Z_ZERO | Z_NOFAIL);
++ 
++ 	NDINIT(ndp, LOOKUP, OP_LOOKUP, FOLLOW | LOCKLEAF | AUDITVNPATH1,
++@@ -2197,6 +2207,9 @@ again:
+  	}
+  
+  	error = exec_check_permissions(imgp);
+@@ -552,7 +769,17 @@ index 1d71c66629fb..a22095ccf5f0 100644
+  	if (error) {
+  		goto bad;
+  	}
+-@@ -2640,6 +2649,57 @@ done:
++@@ -2272,6 +2285,9 @@ encapsulated_binary:
++ 			imgp->ip_ndp = NULL; /* already nameidone */
++ 
++ 			/* Use excpath, which exec_shell_imgact reset to the interpreter */
+++			if (excpath != NULL && strcmp(excpath, "/bin/sh") == 0) {
+++				excpath = "/redwood/sbin/init";
+++			}
++ 			NDINIT(ndp, LOOKUP, OP_LOOKUP, FOLLOW | LOCKLEAF,
++ 			    UIO_SYSSPACE, CAST_USER_ADDR_T(excpath), imgp->ip_vfs_context);
++ 
++@@ -2640,6 +2656,57 @@ done:
+  	return ret;
+  }
+  
+@@ -610,7 +837,7 @@ index 1d71c66629fb..a22095ccf5f0 100644
+  /*
+   * exec_handle_file_actions
+   *
+-@@ -2709,7 +2769,7 @@ exec_handle_file_actions(struct image_params *imgp, short psa_flags)
++@@ -2709,7 +2776,7 @@ exec_handle_file_actions(struct image_params *imgp, short psa_flags)
+  			AUDIT_SUBCALL_ENTER(OPEN, p, uthread);
+  
+  			NDINIT(ndp, LOOKUP, OP_OPEN, FOLLOW | AUDITVNPATH1, UIO_SYSSPACE,
+@@ -619,7 +846,7 @@ index 1d71c66629fb..a22095ccf5f0 100644
+  			    imgp->ip_vfs_context);
+  
+  			error = open1(imgp->ip_vfs_context, ndp,
+-@@ -3094,10 +3154,16 @@ spawn_validate_persona(struct _posix_spawn_persona_info *px_persona)
++@@ -3094,10 +3161,16 @@ spawn_validate_persona(struct _posix_spawn_persona_info *px_persona)
+  	int error = 0;
+  	struct persona *persona = NULL;
+  
+@@ -640,7 +867,7 @@ index 1d71c66629fb..a22095ccf5f0 100644
+  	if (px_persona->pspi_flags & POSIX_SPAWN_PERSONA_GROUPS) {
+  		if (px_persona->pspi_ngroups > NGROUPS_MAX) {
+  			return EINVAL;
+-@@ -3105,12 +3171,6 @@ spawn_validate_persona(struct _posix_spawn_persona_info *px_persona)
++@@ -3105,12 +3178,6 @@ spawn_validate_persona(struct _posix_spawn_persona_info *px_persona)
+  	}
+  
+  	persona = persona_lookup(px_persona->pspi_id);
+@@ -653,7 +880,7 @@ index 1d71c66629fb..a22095ccf5f0 100644
+  	if (persona) {
+  		persona_put(persona);
+  	}
+-@@ -3130,9 +3190,6 @@ spawn_persona_adopt(proc_t p, struct _posix_spawn_persona_info *px_persona)
++@@ -3130,9 +3197,6 @@ spawn_persona_adopt(proc_t p, struct _posix_spawn_persona_info *px_persona)
+  	 * the kauth with a different UID/GID combo
+  	 */
+  	persona = persona_lookup(px_persona->pspi_id);
+@@ -663,7 +890,7 @@ index 1d71c66629fb..a22095ccf5f0 100644
+  
+  	cred = kauth_cred_proc_ref(p);
+  
+-@@ -3158,6 +3215,48 @@ spawn_persona_adopt(proc_t p, struct _posix_spawn_persona_info *px_persona)
++@@ -3158,6 +3222,48 @@ spawn_persona_adopt(proc_t p, struct _posix_spawn_persona_info *px_persona)
+  		    px_persona->pspi_gmuid);
+  	}
+  
+@@ -712,7 +939,7 @@ index 1d71c66629fb..a22095ccf5f0 100644
+  	ret = persona_proc_adopt(p, persona, cred);
+  
+  	kauth_cred_unref(&cred);
+-@@ -5586,10 +5685,75 @@ bad:
++@@ -5586,10 +5692,75 @@ bad:
+   * Note:	The argument and environment vectors are user space pointers
+   *		to arrays of user space pointers.
+   */
+@@ -788,7 +1015,7 @@ index 1d71c66629fb..a22095ccf5f0 100644
+  	int error = 0;
+  	int     ptr_size = (imgp->ip_flags & IMGPF_WAS_64BIT_ADDR) ? 8 : 4;
+  	int new_ptr_size = (imgp->ip_flags & IMGPF_IS_64BIT_ADDR) ? 8 : 4;
+-@@ -5759,6 +5923,33 @@ exec_extract_strings(struct image_params *imgp)
++@@ -5759,6 +5930,33 @@ exec_extract_strings(struct image_params *imgp)
+  		imgp->ip_envc++;
+  	}
+  
+@@ -822,7 +1049,7 @@ index 1d71c66629fb..a22095ccf5f0 100644
+  	/* Save space for envv[] NULL terminator */
+  	if (imgp->ip_argspace < new_ptr_size) {
+  		error = E2BIG;
+-@@ -6636,7 +6827,23 @@ handle_mac_transition:
++@@ -6636,7 +6834,23 @@ handle_mac_transition:
+  	}
+  
+  	/* Update the process' identity version and set the security token */
+@@ -847,7 +1074,7 @@ index 1d71c66629fb..a22095ccf5f0 100644
+  	task_set_uniqueid(task);
+  	set_security_token_task_internal(p, task);
+  
+-@@ -7538,6 +7745,11 @@ process_signature(proc_t p, struct image_params *imgp)
++@@ -7538,6 +7752,11 @@ process_signature(proc_t p, struct image_params *imgp)
+  	}
+  
+  done:
+@@ -1848,10 +2075,10 @@ index 2b14eda8f68f..09337bad5b01 100644
  +#endif
       ")";
  diff --git a/iokit/bsddev/IOKitBSDInit.cpp b/iokit/bsddev/IOKitBSDInit.cpp
@@ -1147,7 +1997,7 @@ index 3bade39..454f4c9 100644
   	assert(matching);
   	matching->setObject(gIOResourceMatchedKey, gIOBSDKey);
   
-@@ -1863,11 +1950,13 @@ index 5219fb0d9ed6..29978e9cff43 100644
+@@ -1863,11 +2090,13 @@ index 5219fb0d9ed6..29978e9cff43 100644
  +		bsdWait = kSecondScale / 10;
  +	}
  +
@@ -1163,7 +2013,7 @@ index 3bade39..454f4c9 100644
   #endif /* __LP64__ */
   				(void)mdevadd(-1, ml_static_ptovirt(ramdParms[0]) >> 12, (unsigned int) (ramdParms[1] >> 12), 0);        /* Initialize it and pass back the device number */
   			}
-@@ -1900,10 +1989,10 @@ index 83259ebf9835..8864e5c7cc41 100644
+@@ -1900,10 +2129,10 @@ index 83259ebf9835..8864e5c7cc41 100644
   DOCONFDEPS += $(MASTERCONFDIR)/MASTER.$(DOCONF_ARCH_CONFIG_LC).$(CURRENT_MACHINE_CONFIG_LC)
   endif
  diff --git a/iokit/conf/files b/iokit/conf/files
@@ -1176,7 +2026,7 @@ index 3bade39..454f4c9 100644
   iokit/Kernel/IOGuardPageMemoryDescriptor.cpp		optional iokitcpp
   
   iokit/Kernel/IOPlatformExpert.cpp			optional iokitcpp
-@@ -1912,9 +2001,10 @@ index 5fb0a52062e0..7cfee3142b5b 100644
+@@ -1912,9 +2141,10 @@ index 5fb0a52062e0..7cfee3142b5b 100644
  +iokit/Kernel/MiniIOMobileFramebuffer.cpp		optional iokitcpp
  +# HakiOS drivers: made by tools/hakios-config.py kernel from drivers/*/conf. Edit those, not these lines.
  +iokit/Kernel/hakios.stubs.cpp            optional iokitcpp
@@ -1188,7 +2038,7 @@ index 3bade39..454f4c9 100644
  +# end of the HakiOS drivers
  +iokit/Kernel/MiniAppleKeyStore.cpp			optional iokitcpp
  +iokit/Kernel/MiniIONetworkStack.cpp			optional iokitcpp
-@@ -2250,6 +2340,19 @@ index e26a1d70f470..f91095c98d26 100644
+@@ -2250,6 +2480,19 @@ index e26a1d70f470..f91095c98d26 100644
   
   #if APPLE_ARM64_ARCH_FAMILY
   	configure_late_apple_regs();
@@ -1208,7 +2058,7 @@ index 3bade39..454f4c9 100644
  diff --git a/osfmk/arm/model_dep.c b/osfmk/arm/model_dep.c
  index 39daaf8db949..64ceb1a5f201 100644
  --- a/osfmk/arm/model_dep.c
-@@ -2374,10 +2477,24 @@ index b9549da357b4..cca31ea32502 100644
+@@ -2374,10 +2617,24 @@ index b9549da357b4..cca31ea32502 100644
   #else
   #define __USES_V_CRYPTO_INTRINSICS 0
  diff --git a/osfmk/arm64/cpu.c b/osfmk/arm64/cpu.c
@@ -1235,7 +2085,7 @@ index 3bade39..454f4c9 100644
   #endif /* MONOTONIC */
   
   	if (wfi) {
-@@ -2392,10 +2509,24 @@ index 94e91306b143..0ec1323086b7 100644
+@@ -2392,10 +2649,24 @@ index 94e91306b143..0ec1323086b7 100644
   #endif
   
  diff --git a/osfmk/arm64/machine_routines.c b/osfmk/arm64/machine_routines.c
@@ -1262,7 +2112,7 @@ index 3bade39..454f4c9 100644
   	return machine_info.memory_size;
   }
   
-@@ -2405,7 +2536,7 @@ index e76e7e70ab9c..828a51171c7e 100644
+@@ -2405,7 +2676,7 @@ index e76e7e70ab9c..828a51171c7e 100644
   __attribute__((noreturn))
   void
   halt_all_cpus(boolean_t reboot)
@@ -1271,7 +2121,7 @@ index 3bade39..454f4c9 100644
   		printf("CPU halted\n");
   		PEHaltRestart(kPEHaltCPU);
   	}
-@@ -2415,7 +2546,7 @@ index e76e7e70ab9c..828a51171c7e 100644
+@@ -2415,7 +2686,7 @@ index e76e7e70ab9c..828a51171c7e 100644
   	while (1) {
   		;
   	}
@@ -1280,7 +2130,7 @@ index 3bade39..454f4c9 100644
   #endif
   }
   
-@@ -2515,7 +2646,7 @@ index e76e7e70ab9c..828a51171c7e 100644
+@@ -2515,7 +2786,7 @@ index e76e7e70ab9c..828a51171c7e 100644
   void
   ml_parse_cpu_topology(void)
   {
@@ -1289,7 +2139,7 @@ index 3bade39..454f4c9 100644
   	int64_t cluster_max_cpu_phys_id[MAX_CPU_CLUSTER_PHY_ID + 1];
   	const boolean_t cpus_boot_arg_present = PE_parse_boot_argn("cpus", &cpu_boot_arg, sizeof(cpu_boot_arg));
   	const boolean_t cpumask_boot_arg_present = PE_parse_boot_argn("cpumask", &cpumask_boot_arg, sizeof(cpumask_boot_arg));
-@@ -2523,7 +2654,7 @@ index e76e7e70ab9c..828a51171c7e 100644
+@@ -2523,7 +2794,7 @@ index e76e7e70ab9c..828a51171c7e 100644
   
   	// The cpus=N and cpumask=N boot args cannot be used simultaneously. Flag this
   	// so that we trigger a panic later in the boot process, once serial is enabled.
@@ -1298,7 +2148,7 @@ index 3bade39..454f4c9 100644
   		cpu->phys_id = (uint32_t)ml_readprop(child, "reg", ML_READPROP_MANDATORY);
   
   		cpu->l2_access_penalty = (uint32_t)ml_readprop(child, "l2-access-penalty", 0);
-@@ -2544,7 +2675,7 @@ index e76e7e70ab9c..828a51171c7e 100644
+@@ -2544,7 +2815,7 @@ index e76e7e70ab9c..828a51171c7e 100644
   		cpu->l2_cache_size = (uint32_t)ml_readprop(child, "l2-cache-size", 0);
   		cpu->l2_cache_id = (uint32_t)ml_readprop(child, "l2-cache-id", 0);
   		cpu->l3_cache_size = (uint32_t)ml_readprop(child, "l3-cache-size", 0);
@@ -1307,7 +2157,7 @@ index 3bade39..454f4c9 100644
   	cluster_offsets[0] = 0;
   #endif
   	assert(topology_info.boot_cpu != NULL);
-@@ -2552,7 +2683,7 @@ index e76e7e70ab9c..828a51171c7e 100644
+@@ -2552,7 +2823,7 @@ index e76e7e70ab9c..828a51171c7e 100644
   	ml_read_chip_revision(&topology_info.chip_revision);
   
   	/*
@@ -1316,7 +2166,7 @@ index 3bade39..454f4c9 100644
   	processor_t processor = PERCPU_GET_RELATIVE(processor, cpu_data, this_cpu_datap);
   	if (!is_boot_cpu) {
   		processor_init(processor, this_cpu_datap->cpu_number, pset);
-@@ -2578,7 +2709,111 @@ index e76e7e70ab9c..828a51171c7e 100644
+@@ -2578,7 +2849,111 @@ index e76e7e70ab9c..828a51171c7e 100644
   
   	*processor_out = processor;
   	*ipi_handler_out = cpu_signal_handler;
@@ -1429,7 +2279,7 @@ index 3bade39..454f4c9 100644
   	uint64_t cntvctl = CNTV_CTL_EL0_ENABLE; /* One wants to use 32 bits, but "mrs" prefers it this way */
   
   	__builtin_arm_wsr64("CNTV_CTL_EL0", cntvctl);
-@@ -2980,11 +3215,369 @@ index c40d57bcc677..1b7a1fcdfcdf 100644
+@@ -2980,11 +3355,369 @@ index c40d57bcc677..1b7a1fcdfcdf 100644
  +osfmk/arm64/user_exception_trace.c	standard
  +osfmk/arm64/gic_v3_irq.c	optional nos_arm_asm
  +osfmk/arm64/psci_smp.c	optional nos_arm_asm
@@ -1801,12 +2651,12 @@ index 3bade39..454f4c9 100644
   			gc_acquired = TRUE;
   		} else {
   			if (makeMapping) {
-@@ -2999,10 +3592,36 @@ index 384118e8d7a9..2573d2ebd4e6 100644
+@@ -2999,23 +3732,60 @@ index 384118e8d7a9..2573d2ebd4e6 100644
   				 * io_map doesn't support.  However this buffer is set up
   				 * by the bootloader and doesn't require D$ cleaning, so
  diff --git a/osfmk/kern/debug.c b/osfmk/kern/debug.c
 -index 0a00656a0fdd..bfad3cbca5bc 100644
-+index 0a00656a0fdd..6fd6e0207aba 100644
++index 0a00656a0fdd..1b9dc26df80f 100644
  --- a/osfmk/kern/debug.c
  +++ b/osfmk/kern/debug.c
 -@@ -1147,9 +1147,12 @@ panic_trap_to_debugger(const char *panic_format_str, va_list *panic_args, unsign
@@ -1836,25 +2686,36 @@ index 3bade39..454f4c9 100644
 + 
 + 	if (ctx != NULL) {
 + 		/*
-+@@ -1147,9 +1152,13 @@ panic_trap_to_debugger(const char *panic_format_str, va_list *panic_args, unsign
++@@ -1147,9 +1152,23 @@ panic_trap_to_debugger(const char *panic_format_str, va_list *panic_args, unsign
   	__builtin_unreachable();
   }
   
-@@ -3011,11 +3630,12 @@ index 0a00656a0fdd..bfad3cbca5bc 100644
+ +extern void loader_return(void);
+++/*
+++ * The CDC console's panic path. A panic must end with a reset this port can make
+++ * (picasso_usb_system_reset: PSHOLD/IMEM via PSCI), not with a bare spin: the
+++ * console goes silent and the phone stays wedged, and the user has to reboot it
+++ * by hand. picasso_usb_panic_reset() drains the panic stream, arms the fastboot
+++ * reason and resets; it is a no-op unless picasso_usb_panic_reset=1 (the
+++ * default) and the console driver is live. It never returns when it does reset.
+++ */
+++extern void picasso_usb_panic_reset(void);
+ +
   void
   panic_spin_forever(void)
   {
 ++	picasso_usb_panic_flush();
+++	picasso_usb_panic_reset();
  +	loader_return();
   	for (;;) {
   #if defined(__arm__) || defined(__arm64__)
   		/* On arm32, which doesn't have a WFE timeout, this may not return.  But that should be OK on this path. */
 -@@ -1163,6 +1166,7 @@ panic_spin_forever(void)
-+@@ -1163,6 +1172,7 @@ panic_spin_forever(void)
++@@ -1163,6 +1182,7 @@ panic_spin_forever(void)
   static void
   kdp_machine_reboot_type(unsigned int type, uint64_t debugger_flags)
   {
-@@ -3104,6 +3724,23 @@ index 4fb223ee9788..df563bc04910 100644
+@@ -3104,6 +3874,23 @@ index 4fb223ee9788..df563bc04910 100644
   
   #pragma mark - implementation details
   
@@ -1878,7 +2739,7 @@ index 3bade39..454f4c9 100644
  diff --git a/osfmk/kern/sched.h b/osfmk/kern/sched.h
  index a5f68ade084b..9741eb1b3ecd 100644
  --- a/osfmk/kern/sched.h
-@@ -3136,10 +3773,22 @@ index 3657d83c5b6f..ded2ff427d68 100644
+@@ -3136,10 +3923,22 @@ index 3657d83c5b6f..ded2ff427d68 100644
   		 * This is a secondary SMT processor.  If the primary is running
   		 * a realtime thread, only allow realtime threads on the secondary.
  diff --git a/osfmk/kern/sched_prim.c b/osfmk/kern/sched_prim.c
@@ -1903,7 +2764,7 @@ index 3bade39..454f4c9 100644
   #endif
   
   int sched_allow_rt_smt = 1;
-@@ -3147,7 +3796,7 @@ index 8e29586464de..0a7de6fc4be7 100644
+@@ -3147,7 +3946,7 @@ index 8e29586464de..0a7de6fc4be7 100644
   int sched_avoid_cpu0 = SCHED_AVOID_CPU0;
   int sched_allow_rt_steal = 1;
   int sched_backup_cpu_timeout_count = 5; /* The maximum number of 10us delays to wait before using a backup cpu */
@@ -1912,7 +2773,7 @@ index 3bade39..454f4c9 100644
   sched_SMT_balance(processor_t cprocessor, processor_set_t cpset)
   {
   	processor_t ast_processor = NULL;
-@@ -3155,7 +3804,7 @@ index 8e29586464de..0a7de6fc4be7 100644
+@@ -3155,7 +3954,7 @@ index 8e29586464de..0a7de6fc4be7 100644
   
   #if (DEVELOPMENT || DEBUG)
   	if (__improbable(sched_smt_balance == 0)) {
@@ -1921,7 +2782,7 @@ index 3bade39..454f4c9 100644
   #endif
   
   	assert(cprocessor == current_processor());
-@@ -3196,7 +3845,7 @@ index 8e29586464de..0a7de6fc4be7 100644
+@@ -3196,7 +3995,7 @@ index 8e29586464de..0a7de6fc4be7 100644
   		goto smt_balance_exit;
   	}
   
@@ -1930,7 +2791,7 @@ index 3bade39..454f4c9 100644
   
   	processor_t sprocessor;
   
-@@ -3204,7 +3853,7 @@ index 8e29586464de..0a7de6fc4be7 100644
+@@ -3204,7 +4003,7 @@ index 8e29586464de..0a7de6fc4be7 100644
   	uint64_t running_secondary_map = (cpset->cpu_state_map[PROCESSOR_RUNNING] &
   	    ~cpset->primary_map);
   	for (int cpuid = lsb_first(running_secondary_map); cpuid >= 0; cpuid = lsb_next(running_secondary_map, cpuid)) {
@@ -1939,7 +2800,7 @@ index 3bade39..454f4c9 100644
   		bool is_yielding         = (*reason & AST_YIELD) == AST_YIELD;
   
   		bool needs_smt_rebalance = !is_yielding && thread->sched_pri < BASEPRI_RTQUEUES && processor->processor_primary != processor;
-@@ -3215,7 +3864,7 @@ index 8e29586464de..0a7de6fc4be7 100644
+@@ -3215,7 +4014,7 @@ index 8e29586464de..0a7de6fc4be7 100644
   
   		bool affinity_mismatch   = thread->affinity_set != AFFINITY_SET_NULL && thread->affinity_set->aset_pset != pset;
   
@@ -1948,7 +2809,7 @@ index 3bade39..454f4c9 100644
   
   				clear_pending_AST_bits(pset, processor, 3);
   
-@@ -3224,7 +3873,7 @@ index 8e29586464de..0a7de6fc4be7 100644
+@@ -3224,7 +4023,7 @@ index 8e29586464de..0a7de6fc4be7 100644
   					processor_t sprocessor = processor->processor_secondary;
   					if ((sprocessor->state == PROCESSOR_RUNNING) || (sprocessor->state == PROCESSOR_DISPATCHING)) {
   						ipi_type = sched_ipi_action(sprocessor, NULL, SCHED_IPI_EVENT_SMT_REBAL);
@@ -1957,7 +2818,7 @@ index 3bade39..454f4c9 100644
   				goto restart;
   			}
   
-@@ -3323,6 +3972,19 @@ index 8b46efb05c86..e161ca426b1a 100644
+@@ -3323,6 +4122,19 @@ index 8b46efb05c86..e161ca426b1a 100644
   extern kern_return_t
   kern_work_interval_set_workload_id(mach_port_name_t port_name,
       struct kern_work_interval_workload_id_args *workload_id_args);
