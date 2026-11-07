@@ -2556,7 +2556,7 @@ struct wlfw_shadow_cfg { uint16_t ce_id, reg_offset; } __attribute__((packed)); 
 #define PD_INOUT 3u
 static const struct wlfw_ce_cfg wlfw_ce_tbl[] = {
 	/* flags per ath10k target_ce_config_wlan: 7 = NO_SNOOP|BYTE_SWAP|SWIZZLE (CE_ATTR_FLAGS), 15 = 7|DIS_INTR; CE7 pipedir 4 = host-only diag */
-	{0, PD_OUT, 32, 2048, 7}, {1, PD_IN, 32, 2048, 7}, {2, PD_IN, 64, 2048, 7},
+	{0, PD_OUT, 32, 2048, 7}, {1, PD_IN, 32, 2048, 7}, {2, PD_IN, 32, 2048, 7} /* DIAGNOSTIC ring21: CE2 nent 64->32 (CE1=32 survives) */,
 	{3, PD_OUT, 32, 2048, 7}, {4, PD_OUT, 256, 256, 15}, {5, PD_OUT, 1024, 64, 15},
 	{6, PD_INOUT, 32, 16384, 7}, {7, 4, 0, 0, 15}, {8, PD_IN, 32, 2048, 0},
 	{9, PD_IN, 32, 2048, 7}, {10, PD_IN, 32, 2048, 7}, {11, PD_IN, 32, 2048, 7},
@@ -2868,12 +2868,37 @@ void hakios_net_input(const uint8_t *frame, size_t length);
 int mbuf_copydata(void *m, size_t off, size_t len, void *out_data);
 }
 
+
 static void picasso_wlan_ce_poll(void);
+
+static bool auto_scan_done = false;
+static bool g_auto_scan_pending = false;
+static bool g_wmi_init_pending = false;
+static bool g_wmi_init_sent = false;
+static bool g_wmi_service_ready = false; /* DIAGNOSTIC ring70: FW sent SERVICE_READY (WMI event 0x1) */
+static bool g_wlan_hw_scan = false;
+static bool g_htc_handshake_done = false;
+static bool g_htc_wmi_sent = false;
+static bool g_htc_wmi_post_htt_sent = false;
+static void picasso_wlan_send_wmi_init(void);
+static int picasso_sta_scan(const struct hakios_sta_scan *what);
 
 static unsigned int
 picasso_wlan_poll(void)
 {
 	picasso_wlan_ce_poll();
+	/* DIAGNOSTIC ring64: send WMI_INIT once, on a poll AFTER the handshake
+	 * (not immediately in the CE2 handler). The FW needs a chance to send
+	 * WMI SERVICE_READY first; sending WMI commands right after the HTC
+	 * handshake crashes it (rings 61-63). A single TX here is safe. */
+	if (g_wmi_init_pending && g_htc_handshake_done && g_wmi_service_ready && !g_wmi_init_sent) { /* ring70: wait for SERVICE_READY */
+		g_wmi_init_sent = true;
+		g_wmi_init_pending = false;
+		picasso_wlan_send_wmi_init();
+	}
+	/* DIAGNOSTIC ring60: auto-scan REMOVED. Calling sta_scan from the .poll
+	 * callback panics the phone (ring59) — the poll context is unsafe for a
+	 * blocking scan. Scan is triggered manually via console `wifi scan`. */
 	return 0;
 }
 
@@ -3234,10 +3259,16 @@ picasso_add_bss(const char *ssid, const uint8_t *bssid, uint16_t freq, int16_t r
  * Standard 32-bit descriptor (struct ce_desc in ath10k/ce.h):
  * Total size is exactly 8 bytes (4B physical addr, 2B length, 2B flags).
  */
+/* 16-byte CE descriptor (WCN3990 ce_desc_64; ios-redfin radio.c desc_put):
+ * addr_lo, addr_hi (PA bits 36:32 in low 5 bits), nbytes, flags, reserved.
+ * The old 8-byte struct made the FW read misaligned entries. nbytes stays
+ * at offset 8 and flags at offset 10, so desc->nbytes/flags keep working. */
 struct picasso_ce_desc {
-	uint32_t addr;
+	uint32_t addr_lo;
+	uint32_t addr_hi;
 	uint16_t nbytes;
 	uint16_t flags;
+	uint32_t reserved;
 } __attribute__((packed));
 
 /*
@@ -3284,13 +3315,28 @@ struct picasso_ce_desc {
 #define CE_CONTROL_WATERMARK_HI_EN  0x02000000u
 
 #define CE_SR_BASE_LO               0x00
+#define CE_SR_BASE_HI               0x04
 #define CE_SR_SIZE                  0x08
 #define CE_DR_BASE_LO               0x0c
+#define CE_DR_BASE_HI               0x10
 #define CE_DR_SIZE                  0x14
+#define CE_CTRL1                    0x18
 #define CE_SR_WR_INDEX              0x3c
 #define CE_DST_WR_INDEX             0x40
 #define CE_CURRENT_SRRI             0x44
 #define CE_CURRENT_DRRI             0x48
+#define CE_SRC_WM                   0x4c
+#define CE_DST_WM                   0x50
+/* CE_CTRL1 bits (ios-redfin radio.c / ath10k ce.h) */
+#define CE_CTRL1_DMAX               0x0000ffffu
+#define CE_CTRL1_SRC_SWAP           (1u << 17)
+#define CE_CTRL1_DST_SWAP           (1u << 18)
+#define CE_CTRL1_RRI_UPD            (1u << 19)
+#define CE_ADDR_HI_MASK             0x1fu
+/* CE wrapper (RRI) registers, offset from CE0 (ios-redfin radio.c):
+ * wrapper base = WLAN_PA + 0x24c000 = CE_PA + 0xc000. */
+#define CE_WRAP_RRI_LO              0xc004
+#define CE_WRAP_RRI_HI              0xc008
 
 #define CE_RING_ENTRIES_TX          32
 #define CE_RING_ENTRIES_RX          32
@@ -3303,11 +3349,19 @@ struct picasso_ce_desc {
 #define CE1_RING_OFFSET             0x01000
 #define CE2_RING_OFFSET             0x02000
 #define CE3_RING_OFFSET             0x03000
+#define CE4_RING_OFFSET             0x04000
+#define CE5_RING_OFFSET             0x05000
+#define CE6_RING_OFFSET             0x06000
+#define CE7_RING_OFFSET             0x07000
+#define CE8_RING_OFFSET             0x38000
+#define CE9_RING_OFFSET             0x39000
+#define CE10_RING_OFFSET            0x3a000
+#define CE11_RING_OFFSET            0x3b000  /* DIAGNOSTIC ring24: all-12-CE program */
 
-#define CE0_BUFS_OFFSET             0x08000
-#define CE1_BUFS_OFFSET             0x0C000  /* 32 + 64 entries at 2048 = 196 KiB total */
-#define CE2_BUFS_OFFSET             0x1C000
-#define CE3_BUFS_OFFSET             0x28000
+#define CE0_BUFS_OFFSET             0x08000  /* ring76: 16 bufs/CE x 2048 = 32KB each, no overlap */
+#define CE1_BUFS_OFFSET             0x10000
+#define CE2_BUFS_OFFSET             0x18000
+#define CE3_BUFS_OFFSET             0x20000
 
 #define ATH10K_HTC_MSG_READY_ID                1
 #define ATH10K_HTC_MSG_CONNECT_SERVICE_ID      2
@@ -3316,6 +3370,13 @@ struct picasso_ce_desc {
 #define ATH10K_HTC_MSG_SETUP_COMPLETE_EX_ID    5
 
 #define ATH10K_HTC_SVC_ID_WMI_CONTROL          0x0100
+#define ATH10K_HTC_SVC_ID_HTT_DATA             0x0300
+#define ATH10K_HTC_CONN_NO_CREDIT_FLOW         0x0008
+/* DIAGNOSTIC ring44: handshake order per ios-redfin (ath10k_core_start):
+ * READY -> CONNECT HTT -> RESP(HTT) -> CONNECT WMI -> RESP(WMI) -> SETUP_COMPLETE.
+ * Send each CONNECT once only; the FW re-sends READY until the handshake
+ * completes, so a naive re-send on every READY floods CE0 and crashes. */
+static bool g_htc_htt_sent = false;
 
 static vm_offset_t s_ce_mem_va = 0;
 static uint64_t s_ce_mem_pa = 0;
@@ -3337,8 +3398,7 @@ static struct picasso_ce_desc *g_ce3_ring = NULL;
 static uint8_t *g_ce3_buf_virt = NULL;
 static uint32_t g_ce3_sw_index = 0;
 
-static bool g_htc_handshake_done = false;
-static uint8_t g_wmi_eid = 1;
+static uint8_t g_wmi_eid = 3; /* DIAGNOSTIC ring50: WMI TX is CE3 (ath10k); was 1 (HTC RX), which made send_wmi_scan refuse */
 
 static IOMemoryMap *s_wlan_ce_map = NULL;
 static uint64_t rmtfs_pa;
@@ -3362,7 +3422,6 @@ static uint32_t g_ce_target_cur_srri[12];
 static uint32_t g_ce_ring_nent[12];
 static uint32_t g_ce_ring_nbytes[12];
 static bool g_ce_target_ready = false;
-static bool g_wlan_hw_scan = false;
 static uint32_t g_ce_armed_ce;
 
 static void
@@ -3374,6 +3433,12 @@ picasso_wlan_ce_cfg_tables(void)
 		g_ce_pipe_dir[i] = (int)wlfw_ce_tbl[i].dir_type;
 		g_ce_pipe_nent[i] = wlfw_ce_tbl[i].nentries;
 		g_ce_pipe_nbytes[i] = wlfw_ce_tbl[i].nbytes_max;
+		/* DIAGNOSTIC ring76: cap CE0..CE3 at 16 ring entries so the
+		 * 32KB-per-CE buffers (16 x 2048) fit the 256KB pool without
+		 * overlapping. The FW told us 32 entries, but 4x32x2048 = 256KB
+		 * leaves no room for the rings; the old offsets overlapped
+		 * (CE3 slot 0 == CE2 slot 24) and CE3 TX crashed the phone. */
+		if (i < 4 && g_ce_pipe_nent[i] > 16) g_ce_pipe_nent[i] = 16;
 	}
 	for (unsigned i = 0; i < sizeof(wlfw_svc_tbl) / sizeof(wlfw_svc_tbl[0]); i++) {
 		uint32_t svc = wlfw_svc_tbl[i].service_id;
@@ -3487,6 +3552,98 @@ picasso_wlan_ce_dump(void)
 	picasso_ce_mmio_load(c3, CE_SR_SIZE, "CE3.SR_SIZE");
 }
 
+/* Program CE0..CE3 rings (ios-redfin radio.c ce_start, ath10k_ce_init_*_ring):
+ * RRI wrapper address, per-CE source/dest ring base+size, CTRL1, watermarks,
+ * then post RX buffers on the dest rings. Only CE0..CE3 are owned by this
+ * driver (HTC control + WMI); CE4..CE11 stay unprogrammed. */
+static void
+picasso_wlan_ce_program_rings(void)
+{
+	/* DIAGNOSTIC step 4: RRI re-enabled (1 buffer on CE1 only). */
+	uint64_t rri_pa = s_ce_mem_pa + 0x3c000ull;   /* free tail of the 256K pool */
+	volatile uint8_t *c0 = s_wlan_ce_base + ce_off_of(0);
+
+	/* The CE writes its read indices to rri[ce] (src [15:0], dst [31:16]). */
+	ce_wr(c0, CE_WRAP_RRI_LO, (uint32_t)rri_pa);
+	ce_wr(c0, CE_WRAP_RRI_HI, (uint32_t)((rri_pa >> 32) & CE_ADDR_HI_MASK));
+	for (uint32_t ce = 0; ce < 12; ce++) { /* DIAGNOSTIC ring24: all 12 CEs */
+		volatile uint8_t *c = s_wlan_ce_base + ce_off_of(ce);
+		ce_wr(c, CE_CTRL1, ce_rd(c, CE_CTRL1) | CE_CTRL1_RRI_UPD);
+	}
+	for (uint32_t ce = 0; ce < 12; ce++) { /* DIAGNOSTIC ring24: all 12 CEs */
+		volatile uint8_t *c = s_wlan_ce_base + ce_off_of(ce);
+		uint32_t nent = g_ce_ring_nent[ce];
+		uint32_t nbytes = g_ce_ring_nbytes[ce];
+		uint64_t ring_pa = 0, buf_pa = 0;
+		uint32_t dir = g_ce_pipe_dir[ce];
+		if (ce == 0) { ring_pa = s_ce_mem_pa + CE0_RING_OFFSET; buf_pa = s_ce_mem_pa + CE0_BUFS_OFFSET; }
+		else if (ce == 1) { ring_pa = s_ce_mem_pa + CE1_RING_OFFSET; buf_pa = s_ce_mem_pa + CE1_BUFS_OFFSET; }
+		else if (ce == 2) { ring_pa = s_ce_mem_pa + CE2_RING_OFFSET; buf_pa = s_ce_mem_pa + CE2_BUFS_OFFSET; }
+		else if (ce == 4) { ring_pa = s_ce_mem_pa + CE4_RING_OFFSET; buf_pa = 0; }
+		else if (ce == 5) { ring_pa = s_ce_mem_pa + CE5_RING_OFFSET; buf_pa = 0; }
+		else if (ce == 6) { ring_pa = s_ce_mem_pa + CE6_RING_OFFSET; buf_pa = 0; }
+		else if (ce == 7) { ring_pa = s_ce_mem_pa + CE7_RING_OFFSET; buf_pa = 0; }
+		else if (ce == 8) { ring_pa = s_ce_mem_pa + CE8_RING_OFFSET; buf_pa = 0; }
+		else if (ce == 9) { ring_pa = s_ce_mem_pa + CE9_RING_OFFSET; buf_pa = 0; }
+		else if (ce == 10) { ring_pa = s_ce_mem_pa + CE10_RING_OFFSET; buf_pa = 0; }
+		else if (ce == 11) { ring_pa = s_ce_mem_pa + CE11_RING_OFFSET; buf_pa = 0; }
+		else { ring_pa = s_ce_mem_pa + CE3_RING_OFFSET; buf_pa = s_ce_mem_pa + CE3_BUFS_OFFSET; }
+		/* DIAGNOSTIC ring80: log every CE's programmed ring/buffer PA,
+		 * so CE3's SR ring + buffer can be checked against working CE0.
+		 * The FW crashes on CE3 TX even though the WMI_INIT bytes are
+		 * correct — verify the CE3 ring_pa/buf_pa are sane and inside
+		 * the SMMU CB5 bypass window (pool s_ce_mem_pa). */
+		LOG("picasso_wlan_ce_init: CE%u dir=%d ring_pa=%llx buf_pa=%llx nent=%u nbytes=%u",
+		    ce, dir, (unsigned long long)ring_pa, (unsigned long long)buf_pa, nent, nbytes);
+		if (dir == PD_OUT || dir == PD_INOUT) {   /* source ring (host -> target) */
+			ce_wr(c, CE_SR_BASE_LO, (uint32_t)ring_pa);
+			ce_wr(c, CE_SR_BASE_HI, (uint32_t)((ring_pa >> 32) & CE_ADDR_HI_MASK));
+			ce_wr(c, CE_SR_SIZE, nent);
+			ce_wr(c, CE_CTRL1, (ce_rd(c, CE_CTRL1) & ~(CE_CTRL1_DMAX | CE_CTRL1_SRC_SWAP)) | nbytes);
+			ce_wr(c, CE_SRC_WM, nent);
+		}
+		if (dir == PD_IN || dir == PD_INOUT) {    /* dest ring (target -> host) */
+			ce_wr(c, CE_DR_BASE_LO, (uint32_t)ring_pa);
+			ce_wr(c, CE_DR_BASE_HI, (uint32_t)((ring_pa >> 32) & CE_ADDR_HI_MASK));  /* DIAGNOSTIC step 10: direct write, no RMW */
+			ce_wr(c, CE_DR_SIZE, nent);
+			ce_wr(c, CE_CTRL1, ce_rd(c, CE_CTRL1) & ~CE_CTRL1_DST_SWAP);
+			ce_wr(c, CE_DST_WM, nent);
+		}
+		(void)buf_pa;
+	}
+	/* DIAGNOSTIC step 2: RX posting re-enabled, RRI still skipped. */
+	for (uint32_t ce = 0; ce < 12; ce++) {
+		if (ce != 1 && ce != 2) continue; /* DIAGNOSTIC ring38: post CE1+CE2 (test if CB5 fixes CE2 crash) */
+		if (g_ce_pipe_dir[ce] != PD_IN && g_ce_pipe_dir[ce] != PD_INOUT) continue;
+		volatile uint8_t *c = s_wlan_ce_base + ce_off_of(ce);
+		struct picasso_ce_desc *ring = NULL;
+		uint64_t buf_pa = 0;
+		uint32_t nent = g_ce_ring_nent[ce];
+		uint32_t nbytes = g_ce_ring_nbytes[ce];
+		if (ce == 1) { ring = g_ce1_ring; buf_pa = s_ce_mem_pa + CE1_BUFS_OFFSET; }
+		else if (ce == 2) { ring = g_ce2_ring; buf_pa = s_ce_mem_pa + CE2_BUFS_OFFSET; }
+		else continue;
+		uint32_t posted = 8;   /* DIAGNOSTIC step 9: CE1+CE2, 8 bufs, SMMU 0x640 on */
+		for (uint32_t i = 0; i < posted; i++) {
+			ring[i].addr_lo = (uint32_t)(buf_pa + (uint64_t)i * CE_BUF_SIZE);
+			ring[i].addr_hi = (uint32_t)(((buf_pa + (uint64_t)i * CE_BUF_SIZE) >> 32) & CE_ADDR_HI_MASK);
+			ring[i].nbytes = 0; /* DIAGNOSTIC ring23: ios-redfin ce_post (FW sets len) */
+			ring[i].flags = 0;
+			ring[i].reserved = 0;
+		}
+		FlushPoC_DcacheRegion((vm_offset_t)ring, (size_t)posted * sizeof(*ring));
+		mb();
+		/* DR_WR_INDEX is a free-running count (ios-redfin writes dst_wr
+		 * unmasked); masking it made CE1 (nent=32, posted=32) report 0
+		 * buffers, so the FW had nowhere to put HTC_READY. */
+		ce_wr(c, CE_DST_WR_INDEX, posted);
+	}
+	LOG("picasso_wlan_ce_init: CE0..CE3 rings programmed, RX buffers posted");
+	/* No read-back here: reading CE registers after programming (CE active)
+	 * faults and resets the phone (two boots stopped at this line). The
+	 * pre-programming dump already proves ce_rd works. */
+}
+
 static void
 picasso_wlan_ce_init(void)
 {
@@ -3549,25 +3706,67 @@ picasso_wlan_ce_init(void)
 	 * the modem (and the phone) down. */
 	picasso_wlan_ce_dump();
 
+	/* Ring sizes come from the WLAN_CFG tables (wlfw_ce_tbl via cfg_tables). */
+	for (uint32_t ce = 0; ce < 12; ce++) { /* DIAGNOSTIC ring24: all 12 CEs */
+		g_ce_ring_nent[ce] = g_ce_pipe_nent[ce];
+		g_ce_ring_nbytes[ce] = g_ce_pipe_nbytes[ce];
+		g_ce_target_cur_srri[ce] =
+		    ce_rd(s_wlan_ce_base + ce_off_of(ce), CE_CURRENT_SRRI);
+	}
+	picasso_wlan_ce_program_rings();
+	g_ce_armed_ce = 0xfffu;   /* DIAGNOSTIC ring24: CE0..CE11 */
+	g_ce_target_ready = true;
+
 	g_ce_bus_init = true;
 	initialized = true;
-	LOG("picasso_wlan_ce_init: copy engines read only; no ring armed this boot");
+	LOG("picasso_wlan_ce_init: CE0..CE3 armed, target ready");
 }
 
+/* Write one source-ring descriptor (16B, ios-redfin desc_put layout) then
+ * bump the CE's source write index so the FW picks the buffer up. */
 static void
 ce_kick_src(uint32_t ce, uint64_t buf_pa, uint32_t total_len)
 {
 	volatile uint8_t *c = s_wlan_ce_base + ce_off_of(ce);
 	uint32_t n = g_ce_target_cur_srri[ce] & (g_ce_ring_nent[ce] - 1);
+	struct picasso_ce_desc *ring = NULL;
+
+	if (ce == 0) ring = g_ce0_ring;
+	else if (ce == 3) ring = g_ce3_ring;
+	if (ring) {
+		ring[n].addr_lo = (uint32_t)buf_pa;
+		ring[n].addr_hi = (uint32_t)((buf_pa >> 32) & CE_ADDR_HI_MASK);
+		ring[n].nbytes = (uint16_t)total_len;
+		/* DIAGNOSTIC ring77: descriptor flags carry the HTC endpoint id
+		 * (transfer_id). ios-redfin ce_send: flags = (eid << 4) & 0xfff0.
+		 * CE0 control eid=0 -> 0x00 (worked); CE3 WMI eid=1 -> 0x10;
+		 * CE4 HTT eid=3 -> 0x30. Picasso set flags=0 for every CE, so
+		 * the FW saw a WMI message (eid=1 in the HTC header) with
+		 * transfer_id=0 on CE3 and crashed. This is why CE0 TX worked
+		 * and every CE3 TX (WMI_INIT, VDEV_CREATE) panicked the phone. */
+		ring[n].flags = (ce == 3) ? 0x10 : (ce == 4) ? 0x30 : 0x00;
+		ring[n].reserved = 0;
+		FlushPoC_DcacheRegion((vm_offset_t)&ring[n], sizeof(*ring));
+	}
 
 	FlushPoC_DcacheRegion((vm_offset_t)(s_ce_mem_va + (buf_pa - s_ce_mem_pa)), total_len);
 	mb();
 	g_ce_target_cur_srri[ce] = (n + 1) & (g_ce_ring_nent[ce] - 1);
-	ce_wr(c, CE_SR_WR_INDEX, g_ce_target_cur_srri[ce]);
+	/* DIAGNOSTIC ring40: ios-redfin signals via SHADOW (WLAN_PA+0x32000+4*ce),
+	 * not SR_WR_IDX directly. Map SHADOW once and write there. */
+	{
+		static volatile uint32_t *shadow = NULL;
+		if (!shadow) {
+			vm_offset_t sh = ml_io_map(0x18832000, 0x1000);
+			if (sh) shadow = (volatile uint32_t *)sh;
+		}
+		if (shadow) shadow[ce] = g_ce_target_cur_srri[ce];
+		else ce_wr(c, CE_SR_WR_INDEX, g_ce_target_cur_srri[ce]); /* fallback */
+	}
 }
 
 static void
-picasso_htc_send_connect_service(void)
+picasso_htc_send_connect_service_svc(uint16_t svc)
 {
 	if (!g_ce_target_ready || !(g_ce_armed_ce & 1u)) return;
 
@@ -3575,31 +3774,40 @@ picasso_htc_send_connect_service(void)
 	uint32_t slot = g_ce_target_cur_srri[0] & (n - 1);
 	uint8_t *buf = g_ce0_buf_virt + (uint64_t)slot * CE_BUF_SIZE;
 	bzero(buf, 64);
+	/* flags: WMI -> 0x0100, HTT -> HTC_CONN_NO_CREDIT_FLOW (0x0008) */
+	uint16_t cflags = (svc == ATH10K_HTC_SVC_ID_WMI_CONTROL) ? 0x0100 : ATH10K_HTC_CONN_NO_CREDIT_FLOW;
 
-	/* HTC Header (4 bytes) */
-	buf[0] = 0;     /* Endpoint 0 (Control) */
-	buf[1] = 0;     /* Flags */
-	buf[2] = 8;     /* Payload length: 8 bytes */
-	buf[3] = 0;
+	/* DIAGNOSTIC ring41: ios-redfin HTC format — 8-byte header
+	 * (eid, flags, len u16, trailer, seq, pad u16) + 8-byte payload
+	 * (msg_id u16, svc u16, flags u16, pad u16). Total 16 bytes.
+	 * Old 4-byte header was malformed and likely crashed the FW. */
+	buf[0] = 0;     /* eid = 0 (Control) */
+	buf[1] = 0;     /* flags */
+	buf[2] = 8;     /* len lo (payload = 8) */
+	buf[3] = 0;     /* len hi */
+	buf[4] = 0;     /* trailer */
+	buf[5] = 0;     /* seq */
+	buf[6] = 0;     /* pad lo */
+	buf[7] = 0;     /* pad hi */
+	buf[8] = 0x02;  /* msg_id = 2 (CONNECT_SERVICE) lo */
+	buf[9] = 0x00;  /* msg_id hi */
+	buf[10] = (uint8_t)(svc & 0xff); /* svc lo */
+	buf[11] = (uint8_t)(svc >> 8);   /* svc hi */
+	buf[12] = (uint8_t)(cflags & 0xff); /* connect flags lo */
+	buf[13] = (uint8_t)(cflags >> 8);   /* connect flags hi */
+	buf[14] = 0;    /* pad */
+	buf[15] = 0;    /* pad */
 
-	/* ath10k_htc_msg: message_id = 2 (CONNECT_SERVICE) */
-	buf[4] = 0x02;
-	buf[5] = 0x00;
+	ce_kick_src(0, s_ce_mem_pa + CE0_BUFS_OFFSET + (uint64_t)slot * CE_BUF_SIZE, 16);
 
-	/* ath10k_htc_conn_svc: service_id = 0x0100 (WMI_CONTROL) */
-	buf[6] = 0x00;
-	buf[7] = 0x01;
+	LOG("picasso_htc_send_connect_service: Sent CONNECT_SERVICE (svc %#x) to CE0 [slot %u]",
+	    svc, slot);
+}
 
-	/* flags = 0, pad0 = 0, pad1 = 0 */
-	buf[8] = 0;
-	buf[9] = 0;
-	buf[10] = 0;
-	buf[11] = 0;
-
-	ce_kick_src(0, s_ce_mem_pa + CE0_BUFS_OFFSET + (uint64_t)slot * CE_BUF_SIZE, 12);
-
-	LOG("picasso_htc_send_connect_service: Sent CONNECT_SERVICE (WMI 0x0100) to CE0 [slot %u]",
-	    slot);
+static void
+picasso_htc_send_connect_service(void)
+{
+	picasso_htc_send_connect_service_svc(ATH10K_HTC_SVC_ID_WMI_CONTROL);
 }
 
 static void
@@ -3612,21 +3820,229 @@ picasso_htc_send_setup_complete(void)
 	uint8_t *buf = g_ce0_buf_virt + (uint64_t)slot * CE_BUF_SIZE;
 	bzero(buf, 64);
 
-	/* HTC Header (4 bytes) */
-	buf[0] = 0;     /* Endpoint 0 (Control) */
-	buf[1] = 0;     /* Flags */
-	buf[2] = 12;    /* Payload length: 12 bytes */
-	buf[3] = 0;
+	/* DIAGNOSTIC ring49: ios-redfin HTC format — 8-byte header
+	 * (eid, flags, len u16, trailer, seq, pad u16) + 12-byte payload
+	 * (msg_id u16=5, 10 zero bytes). Total 20 bytes. Old 4-byte header
+	 * (16 bytes total) likely crashed the FW in ring48. */
+	buf[0] = 0;     /* eid = 0 (Control) */
+	buf[1] = 0;     /* flags */
+	buf[2] = 12;    /* len lo (payload = 12) */
+	buf[3] = 0;     /* len hi */
+	buf[4] = 0;     /* trailer */
+	buf[5] = 0;     /* seq */
+	buf[6] = 0;     /* pad lo */
+	buf[7] = 0;     /* pad hi */
+	buf[8] = 0x05;  /* msg_id = 5 (SETUP_COMPLETE_EX) lo */
+	buf[9] = 0x00;  /* msg_id hi */
+	/* buf[10..19] = 0 (pad/flags of SETUP_COMPLETE_EX, bzero'd) */
 
-	/* ath10k_htc_msg: message_id = 5 (SETUP_COMPLETE_EX) */
-	buf[4] = 0x05;
-	buf[5] = 0x00;
-
-	/* struct ath10k_htc_setup_complete_extended: pad0=0, pad1=0, flags=0 (all 0) */
-
-	ce_kick_src(0, s_ce_mem_pa + CE0_BUFS_OFFSET + (uint64_t)slot * CE_BUF_SIZE, 16);
+	ce_kick_src(0, s_ce_mem_pa + CE0_BUFS_OFFSET + (uint64_t)slot * CE_BUF_SIZE, 20);
 
 	LOG("picasso_htc_send_setup_complete: Sent SETUP_COMPLETE_EX to CE0 [slot %u]", slot);
+}
+
+/* DIAGNOSTIC ring52: minimal WMI_INIT (ios-redfin wmi_send_init, n=0 host mem
+ * chunks). The FW crashed on START_SCAN without a prior WMI_INIT; the WMI
+ * layer likely needs initialising first. Sent on CE3 right after the HTC
+ * handshake, before the auto-scan. */
+/* DIAGNOSTIC ring54: VDEV_CREATE (ios-redfin vdev_create). The FW crashed on
+ * START_SCAN without a VDEV; the scan references vdev 0, which must exist.
+ * Sent on CE3 after WMI_INIT, before the scan. */
+/* DIAGNOSTIC ring55: SCAN_CHAN_LIST (ios-redfin scan_start). The FW crashed
+ * on START_SCAN; ios-redfin sends the channel list (CMD 0x3003) before
+ * VDEV_CREATE and the scan. Sent on CE3 after WMI_INIT. */
+static void
+picasso_wlan_send_scan_chan_list(void)
+{
+uint32_t pipe = 3; /* DIAGNOSTIC ring69: WMI TX is always CE3 (ath10k); g_wmi_eid is the FW-assigned HTC eid (1/2), not a CE pipe */
+if (pipe == 0 || pipe >= 12 || g_ce_pipe_dir[pipe] != PD_OUT) {
+LOG("picasso_wlan_send_scan_chan_list: WMI pipe %u is not a FW TX pipe (dir=%d), refusing",
+    pipe, pipe < 12 ? g_ce_pipe_dir[pipe] : -1);
+return;
+}
+uint32_t n = g_ce_ring_nent[pipe];
+uint32_t slot = g_ce_target_cur_srri[pipe] & (n - 1);
+uint8_t *buf = g_ce3_buf_virt + (uint64_t)slot * CE_BUF_SIZE;
+bzero(buf, 512);
+
+uint8_t *wmi = buf + 8; /* after HTC header */
+uint32_t wmi_len = 0;
+
+/* WMI command ID (4 bytes, LE): CMD_SCAN_CHAN_LIST = 0x3003 */
+wmi[wmi_len++] = 0x03; wmi[wmi_len++] = 0x30;
+wmi[wmi_len++] = 0x00; wmi[wmi_len++] = 0x00;
+
+/* TLV: TAG_SCAN_CHAN_LIST_CMD = 0x4f, Len = 4, value = num channels */
+wmi[wmi_len++] = 4;    wmi[wmi_len++] = 0x00;
+wmi[wmi_len++] = 0x4f; wmi[wmi_len++] = 0x00;
+*(uint32_t *)(wmi + wmi_len) = 11; wmi_len += 4;
+
+/* TLV: TAG_ARRAY_STRUCT = 0x12, Len = 11 * 28 = 308 */
+wmi[wmi_len++] = 52;   wmi[wmi_len++] = 0x01; /* 308 = 0x134 */
+wmi[wmi_len++] = 0x12; wmi[wmi_len++] = 0x00;
+
+static const uint32_t chan_freqs[11] = {
+2412, 2417, 2422, 2427, 2432, 2437, 2442, 2447, 2452, 2457, 2462
+};
+for (int i = 0; i < 11; i++) {
+uint32_t f = chan_freqs[i];
+uint32_t flags = 1u | (1u << 7) | (1u << 11); /* 2.4GHz: mode 1 */
+wmi[wmi_len++] = 24;   wmi[wmi_len++] = 0x00; /* Len 24 */
+wmi[wmi_len++] = 0x50; wmi[wmi_len++] = 0x00; /* TAG_CHANNEL */
+*(uint32_t *)(wmi + wmi_len) = f; wmi_len += 4;
+*(uint32_t *)(wmi + wmi_len) = f; wmi_len += 4;
+*(uint32_t *)(wmi + wmi_len) = 0; wmi_len += 4;
+*(uint32_t *)(wmi + wmi_len) = flags; wmi_len += 4;
+*(uint32_t *)(wmi + wmi_len) = (40u << 8) | (40u << 16); wmi_len += 4;
+*(uint32_t *)(wmi + wmi_len) = 40u << 8; wmi_len += 4;
+}
+
+/* HTC header (8 bytes) at buf[0..7]; len = wmi payload length */
+buf[0] = 1; /* DIAGNOSTIC ring62: eid=1 (WMI control), not pipe (3) */
+buf[1] = 0;
+buf[2] = (uint8_t)(wmi_len & 0xff);
+buf[3] = (uint8_t)((wmi_len >> 8) & 0xff);
+buf[4] = 0;
+buf[5] = 0;
+buf[6] = 0;
+buf[7] = 0;
+
+uint32_t total_len = 8 + wmi_len;
+ce_kick_src(pipe, s_ce_mem_pa + CE3_BUFS_OFFSET + (uint64_t)slot * CE_BUF_SIZE, total_len);
+LOG("picasso_wlan_send_scan_chan_list: Dispatched SCAN_CHAN_LIST (%u bytes) to CE%u [slot %u]",
+    total_len, pipe, slot);
+}
+
+static void
+picasso_wlan_send_vdev_create(void)
+{
+uint32_t pipe = 3; /* DIAGNOSTIC ring69: WMI TX is always CE3 (ath10k); g_wmi_eid is the FW-assigned HTC eid (1/2), not a CE pipe */
+if (pipe == 0 || pipe >= 12 || g_ce_pipe_dir[pipe] != PD_OUT) {
+LOG("picasso_wlan_send_vdev_create: WMI pipe %u is not a FW TX pipe (dir=%d), refusing",
+    pipe, pipe < 12 ? g_ce_pipe_dir[pipe] : -1);
+return;
+}
+uint32_t n = g_ce_ring_nent[pipe];
+uint32_t slot = g_ce_target_cur_srri[pipe] & (n - 1);
+uint8_t *buf = g_ce3_buf_virt + (uint64_t)slot * CE_BUF_SIZE;
+bzero(buf, 512);
+
+uint8_t *wmi = buf + 8; /* after HTC header */
+uint32_t wmi_len = 0;
+
+/* WMI command ID (4 bytes, LE): CMD_VDEV_CREATE = 0x5001 */
+wmi[wmi_len++] = 0x01; wmi[wmi_len++] = 0x50;
+wmi[wmi_len++] = 0x00; wmi[wmi_len++] = 0x00;
+
+/* TLV: TAG_VDEV_CREATE_CMD = 0x56, Len = 20 */
+wmi[wmi_len++] = 20;   wmi[wmi_len++] = 0x00;
+wmi[wmi_len++] = 0x56; wmi[wmi_len++] = 0x00;
+*(uint32_t *)(wmi + wmi_len) = 0; wmi_len += 4; /* vdev 0 */
+*(uint32_t *)(wmi + wmi_len) = 2; wmi_len += 4; /* station */
+*(uint32_t *)(wmi + wmi_len) = 0; wmi_len += 4;
+/* MAC address (6 bytes, locally-administered placeholder) */
+wmi[wmi_len++] = 0x02; wmi[wmi_len++] = 0x00;
+wmi[wmi_len++] = 0x00; wmi[wmi_len++] = 0x00;
+wmi[wmi_len++] = 0x00; wmi[wmi_len++] = 0x01;
+wmi_len += 2; /* pad to 20-byte TLV body */
+
+/* HTC header (8 bytes) at buf[0..7]; len = wmi payload length */
+buf[0] = 1; /* DIAGNOSTIC ring62: eid=1 (WMI control), not pipe (3) */
+buf[1] = 0;
+buf[2] = (uint8_t)(wmi_len & 0xff);
+buf[3] = (uint8_t)((wmi_len >> 8) & 0xff);
+buf[4] = 0;
+buf[5] = 0;
+buf[6] = 0;
+buf[7] = 0;
+
+uint32_t total_len = 8 + wmi_len;
+ce_kick_src(pipe, s_ce_mem_pa + CE3_BUFS_OFFSET + (uint64_t)slot * CE_BUF_SIZE, total_len);
+LOG("picasso_wlan_send_vdev_create: Dispatched VDEV_CREATE (%u bytes) to CE%u [slot %u]",
+    total_len, pipe, slot);
+}
+
+static void
+picasso_wlan_send_wmi_init(void)
+{
+	uint32_t pipe = 3; /* DIAGNOSTIC ring69: WMI TX is always CE3 (ath10k); g_wmi_eid is the FW-assigned HTC eid (1/2), not a CE pipe */
+	if (pipe == 0 || pipe >= 12 || g_ce_pipe_dir[pipe] != PD_OUT) {
+		LOG("picasso_wlan_send_wmi_init: WMI pipe %u is not a FW TX pipe (dir=%d), refusing",
+		    pipe, pipe < 12 ? g_ce_pipe_dir[pipe] : -1);
+		return;
+	}
+	uint32_t n = g_ce_ring_nent[pipe];
+	uint32_t slot = g_ce_target_cur_srri[pipe] & (n - 1);
+	uint8_t *buf = g_ce3_buf_virt + (uint64_t)slot * CE_BUF_SIZE;
+	bzero(buf, 512);
+
+	uint8_t *wmi = buf + 8; /* after HTC header */
+	uint32_t wmi_len = 0;
+
+	/* WMI command ID (4 bytes, LE): WMI_CMD_INIT = 0x1 */
+	wmi[wmi_len++] = 0x01; wmi[wmi_len++] = 0x00;
+	wmi[wmi_len++] = 0x00; wmi[wmi_len++] = 0x00;
+
+	/* TLV: TAG_INIT_CMD = 0x4a, Len = 28 */
+	wmi[wmi_len++] = 28;   wmi[wmi_len++] = 0x00;
+	wmi[wmi_len++] = 0x4a; wmi[wmi_len++] = 0x00;
+	*(uint32_t *)(wmi + wmi_len) = 0x01000000u; wmi_len += 4; /* ABI_VER0 */
+	*(uint32_t *)(wmi + wmi_len) = 53; wmi_len += 4;         /* ABI_VER1 */
+	*(uint32_t *)(wmi + wmi_len) = 0x5f414351u; wmi_len += 4;/* ABI_NS0 "QCA_" */
+	*(uint32_t *)(wmi + wmi_len) = 0x00004c4du; wmi_len += 4;/* ABI_NS1 "ML" */
+	*(uint32_t *)(wmi + wmi_len) = 0; wmi_len += 4;
+	*(uint32_t *)(wmi + wmi_len) = 0; wmi_len += 4;
+	*(uint32_t *)(wmi + wmi_len) = 0; wmi_len += 4; /* n = 0 host mem chunks */
+
+	/* TLV: TAG_RESOURCE_CONFIG = 0x4b, Len = 176 (44 u32, ath10k wcn3990) */
+	wmi[wmi_len++] = 176;  wmi[wmi_len++] = 0x00;
+	wmi[wmi_len++] = 0x4b; wmi[wmi_len++] = 0x00;
+	{
+		/* DIAGNOSTIC ring78: minimal rc_init — only NUM_VDEVS=4,
+		 * NUM_PEERS=33 and chain mask 0x3; everything else zero.
+		 * Isolates WMI_INIT content vs CE3 transport: if the phone
+		 * survives a minimal INIT, one of the zeroed values was
+		 * crashing the FW; if it still panics, the CE3 TX path itself
+		 * is broken. */
+		static const uint32_t rc_init[44] = {
+			4, 33, 0, 0, 0, 0, 0, 0x3, 0x3,
+			0, 0, 0, 0, 0, 0, 0, 0, 0,
+			0, 0, 0, 0, 0, 0, 0, 0, 0,
+			0, 0, 0, 0, 0, 0, 0, 0, 0,
+			0, 0, 0, 0, 0, 0, 0, 0
+		};
+		memcpy(wmi + wmi_len, rc_init, sizeof(rc_init));
+		wmi_len += sizeof(rc_init);
+	}
+
+	/* TLV: TAG_ARRAY_STRUCT = 0x12, Len = 0 (no host mem chunks) */
+	wmi[wmi_len++] = 0x00; wmi[wmi_len++] = 0x00;
+	wmi[wmi_len++] = 0x12; wmi[wmi_len++] = 0x00;
+
+	/* HTC header (8 bytes) at buf[0..7]; len = wmi payload length */
+	buf[0] = 1; /* DIAGNOSTIC ring62: eid=1 (WMI control), not pipe (3) */
+	buf[1] = 0;
+	buf[2] = (uint8_t)(wmi_len & 0xff);
+	buf[3] = (uint8_t)((wmi_len >> 8) & 0xff);
+	buf[4] = 0;
+	buf[5] = 0;
+	buf[6] = 0;
+	buf[7] = 0;
+
+	uint32_t total_len = 8 + wmi_len;
+	/* DIAGNOSTIC ring79: hex-dump the WMI_INIT buffer before the kick,
+	 * so the exact byte stream can be diffed against ios-redfin's
+	 * wmi_send_init output. The phone crashes on receipt, so the dump
+	 * must land BEFORE ce_kick_src. */
+	{
+		char hb[512]; uint32_t ho = 0;
+		for (uint32_t i = 0; i < total_len && ho + 3 < sizeof(hb); i++)
+			ho += (uint32_t)snprintf(hb + ho, sizeof(hb) - ho, "%02x", buf[i]);
+		LOG("picasso_wlan_send_wmi_init: WMI_INIT hex (%uB): %s", total_len, hb);
+	}
+	ce_kick_src(pipe, s_ce_mem_pa + CE3_BUFS_OFFSET + (uint64_t)slot * CE_BUF_SIZE, total_len);
+	LOG("picasso_wlan_send_wmi_init: Dispatched WMI_INIT (%u bytes) to CE%u [slot %u]",
+	    total_len, pipe, slot);
 }
 
 static void
@@ -3636,7 +4052,7 @@ picasso_wlan_send_wmi_scan(void)
 
 	/* WMI lives on the service pipe assigned by CSN (ath10k: svc->pipe), not
 	 * on a hardcoded CE3: kick nothing if the FW gave WMI somewhere else. */
-	uint32_t pipe = g_wmi_eid;
+	uint32_t pipe = 3; /* DIAGNOSTIC ring69: WMI TX is always CE3 (ath10k); g_wmi_eid is the FW-assigned HTC eid (1/2), not a CE pipe */
 	if (pipe == 0 || pipe >= 12 || g_ce_pipe_dir[pipe] != PD_OUT) {
 		LOG("picasso_wlan_send_wmi_scan: WMI pipe %u is not a FW TX pipe (dir=%d), refusing",
 		    pipe, pipe < 12 ? g_ce_pipe_dir[pipe] : -1);
@@ -3648,45 +4064,51 @@ picasso_wlan_send_wmi_scan(void)
 	uint8_t *buf = g_ce3_buf_virt + (uint64_t)slot * CE_BUF_SIZE;
 	bzero(buf, 512);
 
-	/* HTC Header (4 bytes) */
-	buf[0] = (uint8_t)pipe;             /* Endpoint ID negotiated from HTC */
-	buf[1] = 0;                         /* Flags */
-	/* buf[2..3] = payload length */
-
-	/* WMI TLV Header (4 bytes) starting at buf + 4 */
-	uint8_t *wmi = buf + 4;
+	/* DIAGNOSTIC ring51: rewrite WMI scan to ios-redfin scan_send_start exactly.
+	 * Old version was missing the 4-byte WMI cmd ID (0x3001) before the TLVs
+	 * and used the wrong TLV tag (0x0017 vs 0x4d) — the FW crashed parsing it.
+	 * Layout: 8-byte HTC header + 4-byte cmd ID + TLVs. */
+	uint8_t *wmi = buf + 8; /* after HTC header */
 	uint32_t wmi_len = 0;
 
-	/* Tag: 0x0017 (WMI_TLV_TAG_STRUCT_START_SCAN_CMD), Len: 0x48 (72 bytes) */
-	wmi[wmi_len++] = 0x17; wmi[wmi_len++] = 0x00;
-	wmi[wmi_len++] = 0x48; wmi[wmi_len++] = 0x00;
+	/* WMI command ID (4 bytes, LE): CMD_START_SCAN = 0x3001 */
+	wmi[wmi_len++] = 0x01; wmi[wmi_len++] = 0x30;
+	wmi[wmi_len++] = 0x00; wmi[wmi_len++] = 0x00;
 
-	/* wmi_start_scan_cmd body (72 bytes) */
-	*(uint32_t *)(wmi + wmi_len) = 1; wmi_len += 4; /* scan_id */
-	*(uint32_t *)(wmi + wmi_len) = 1; wmi_len += 4; /* scan_req_id */
-	*(uint32_t *)(wmi + wmi_len) = 0; wmi_len += 4; /* vdev_id */
-	*(uint32_t *)(wmi + wmi_len) = 1; wmi_len += 4; /* scan_priority = 1 */
-	*(uint32_t *)(wmi + wmi_len) = 0x3f; wmi_len += 4; /* notify_scan_events */
-	*(uint32_t *)(wmi + wmi_len) = 50; wmi_len += 4;   /* dwell_time_active */
-	*(uint32_t *)(wmi + wmi_len) = 150; wmi_len += 4;  /* dwell_time_passive */
-	*(uint32_t *)(wmi + wmi_len) = 50; wmi_len += 4;   /* min_rest_time */
-	*(uint32_t *)(wmi + wmi_len) = 500; wmi_len += 4;  /* max_rest_time */
-	*(uint32_t *)(wmi + wmi_len) = 20000; wmi_len += 4;/* max_scan_time */
-	*(uint32_t *)(wmi + wmi_len) = 0; wmi_len += 4;    /* scan_ctrl_flags */
-	*(uint32_t *)(wmi + wmi_len) = 0; wmi_len += 4;    /* burst_duration_ms */
+	/* TLV: TAG_START_SCAN_CMD = 0x4d, Len = 100 */
+	wmi[wmi_len++] = 100;  wmi[wmi_len++] = 0x00;
+	wmi[wmi_len++] = 0x4d; wmi[wmi_len++] = 0x00;
+
+	/* wmi_start_scan_cmd body (100 bytes), ios-redfin values */
+	*(uint32_t *)(wmi + wmi_len) = 0xa000 | 1; wmi_len += 4; /* scan_id */
+	*(uint32_t *)(wmi + wmi_len) = 0xa000 | 1; wmi_len += 4; /* scan_req_id */
+	*(uint32_t *)(wmi + wmi_len) = 0; wmi_len += 4; /* vdev */
+	*(uint32_t *)(wmi + wmi_len) = 1; wmi_len += 4; /* priority low */
+	*(uint32_t *)(wmi + wmi_len) = 0x11f; wmi_len += 4; /* events */
+	*(uint32_t *)(wmi + wmi_len) = 50; wmi_len += 4;   /* dwell active */
+	*(uint32_t *)(wmi + wmi_len) = 150; wmi_len += 4;  /* dwell passive */
+	*(uint32_t *)(wmi + wmi_len) = 50; wmi_len += 4;   /* min rest */
+	*(uint32_t *)(wmi + wmi_len) = 500; wmi_len += 4;  /* max rest */
+	*(uint32_t *)(wmi + wmi_len) = 0; wmi_len += 4;
+	*(uint32_t *)(wmi + wmi_len) = 0; wmi_len += 4;
+	*(uint32_t *)(wmi + wmi_len) = 0; wmi_len += 4;
+	*(uint32_t *)(wmi + wmi_len) = 20000; wmi_len += 4;/* max scan time */
+	*(uint32_t *)(wmi + wmi_len) = 5; wmi_len += 4;    /* probe delay */
+	*(uint32_t *)(wmi + wmi_len) = 0x31; wmi_len += 4; /* scan_ctrl_flags */
+	*(uint32_t *)(wmi + wmi_len) = 0; wmi_len += 4;
 	*(uint32_t *)(wmi + wmi_len) = 11; wmi_len += 4;   /* num_channels */
+	*(uint32_t *)(wmi + wmi_len) = 1; wmi_len += 4;    /* num_bssids */
 	*(uint32_t *)(wmi + wmi_len) = 0; wmi_len += 4;    /* num_ssids */
-	*(uint32_t *)(wmi + wmi_len) = 0; wmi_len += 4;    /* num_bssids */
 	*(uint32_t *)(wmi + wmi_len) = 0; wmi_len += 4;    /* ie_len */
 	*(uint32_t *)(wmi + wmi_len) = 3; wmi_len += 4;    /* num_probes */
 
-	/* mac_addr (6 bytes) + mac_mask (6 bytes) */
-	memset(wmi + wmi_len, 0xff, 12);
-	wmi_len += 12;
+	/* mac addr + mask: 16 bytes zero (ios-redfin skips 16) */
+	memset(wmi + wmi_len, 0, 16);
+	wmi_len += 16;
 
-	/* TLV Channels Array: Tag = 0x0013 (ARRAY_UINT32), Len = 11 * 4 = 44 */
-	wmi[wmi_len++] = 0x13; wmi[wmi_len++] = 0x00;
+	/* TLV Channels Array: Tag = 0x10 (ARRAY_UINT32), Len = 11 * 4 = 44 */
 	wmi[wmi_len++] = 44;   wmi[wmi_len++] = 0x00;
+	wmi[wmi_len++] = 0x10; wmi[wmi_len++] = 0x00;
 
 	static const uint32_t scan_freqs[11] = {
 		2412, 2417, 2422, 2427, 2432, 2437, 2442, 2447, 2452, 2457, 2462
@@ -3696,11 +4118,28 @@ picasso_wlan_send_wmi_scan(void)
 		wmi_len += 4;
 	}
 
-	/* Fill HTC length */
+	/* Trailing TLVs (ios-redfin): ARRAY_FIXED_STRUCT(0), ARRAY_FIXED_STRUCT(8,
+	 * bssid broadcast ff:ff:ff:ff:ff:ff), ARRAY_BYTE(0) */
+	wmi[wmi_len++] = 0x00; wmi[wmi_len++] = 0x00;
+	wmi[wmi_len++] = 0x13; wmi[wmi_len++] = 0x00;
+	wmi[wmi_len++] = 0x08; wmi[wmi_len++] = 0x00;
+	wmi[wmi_len++] = 0x13; wmi[wmi_len++] = 0x00;
+	memset(wmi + wmi_len, 0xff, 6);
+	wmi_len += 8;
+	wmi[wmi_len++] = 0x00; wmi[wmi_len++] = 0x00;
+	wmi[wmi_len++] = 0x11; wmi[wmi_len++] = 0x00;
+
+	/* HTC header (8 bytes) at buf[0..7]; len = wmi payload length */
+	buf[0] = 1; /* DIAGNOSTIC ring62: eid=1 (WMI control), not pipe (3) */             /* Endpoint ID negotiated from HTC */
+	buf[1] = 0;                         /* Flags */
 	buf[2] = (uint8_t)(wmi_len & 0xff);
 	buf[3] = (uint8_t)((wmi_len >> 8) & 0xff);
+	buf[4] = 0;                         /* trailer */
+	buf[5] = 0;                         /* seq */
+	buf[6] = 0;                         /* pad lo */
+	buf[7] = 0;                         /* pad hi */
 
-	uint32_t total_len = 4 + wmi_len;
+	uint32_t total_len = 8 + wmi_len;
 
 	ce_kick_src(pipe, s_ce_mem_pa + CE3_BUFS_OFFSET + (uint64_t)slot * CE_BUF_SIZE, total_len);
 
@@ -3708,18 +4147,51 @@ picasso_wlan_send_wmi_scan(void)
 	    total_len, pipe, slot);
 }
 
+
+
 static void
 picasso_wlan_ce_poll(void)
 {
-	if (!g_ce_target_ready || !(g_ce_armed_ce & (1u << 1))) return;
+	/* DIAGNOSTIC ring58: re-entrancy guard. picasso_sta_scan() is called from
+	 * inside ce_poll (auto-scan trigger) and itself calls ce_poll in its
+	 * delay/dwell loops — nested polls corrupt g_ce2_sw_index / DRRI state
+	 * and crash the phone. If a poll is already running, return. */
+	static bool poll_active = false;
+	if (poll_active) return;
+	poll_active = true;
+	if (!g_ce_target_ready || !(g_ce_armed_ce & (1u << 1))) { poll_active = false; return; }
+
+	/* DIAGNOSTIC ring45: FW sends CE2 slot 0 (not READY) then waits — it only
+	 * sends HTC_READY after the host sends CONNECT. So send CONNECT(HTT) once
+	 * on the first poll (like the old poke, but HTT, not WMI, and only once).
+	 * The CE2 READY handler then continues HTT -> WMI -> SETUP_COMPLETE. */
+	if (g_ce_target_ready && (g_ce_armed_ce & (1u << 1)) && !g_htc_wmi_sent) {
+		g_htc_wmi_sent = true;
+		LOG("picasso_wlan_ce_poll: DIAGNOSTIC ring46 — first poll, sending CONNECT(WMI) (FW rejected HTT status 7)");
+		picasso_htc_send_connect_service_svc(ATH10K_HTC_SVC_ID_WMI_CONTROL);
+	}
 
 	/* ---------------- Poll CE1: Target -> Host HTT + HTC Control ---------------- */
 	volatile uint8_t *ce1 = s_wlan_ce_base + ce_off_of(1);
 	uint32_t hw_drri1 = ce_rd(ce1, CE_CURRENT_DRRI);
+	/* DIAGNOSTIC ring22: ios-redfin polls RRI in host memory, not the DRRI
+	 * register — FW may only update RRI (CTRL1_RRI_UPD is set). RRI lives
+	 * at pool+0x3c000, dst index in bits [31:16]. Use max of both. */
+	uint32_t rri1 = 0;
+	if (s_ce_mem_va) {
+		volatile uint32_t *rri = (volatile uint32_t *)(s_ce_mem_va + 0x3c000ull);
+		rri1 = (rri[1] >> 16) & 0xffffu;
+		if (rri1 > hw_drri1) hw_drri1 = rri1;
+	}
+	static uint32_t last_drri1 = 0xFFFFFFFFu;
+	if (hw_drri1 != last_drri1) {
+		LOG("picasso_wlan_ce_poll: CE1 DRRI=%u (was %u) RRI=%u sw=%u", hw_drri1, last_drri1, rri1, g_ce1_sw_index);
+		last_drri1 = hw_drri1;
+	}
 	uint32_t n1 = g_ce_ring_nent[1];
 	uint32_t nb1 = g_ce_ring_nbytes[1];
 
-	while (n1 && g_ce1_sw_index != (hw_drri1 & n1)) {
+	while (n1 && g_ce1_sw_index != (hw_drri1 & (n1 - 1))) {
 		uint32_t slot = g_ce1_sw_index;
 		struct picasso_ce_desc *desc = &g_ce1_ring[slot];
 		uint8_t *pkt = g_ce1_buf_virt + (uint64_t)slot * CE_BUF_SIZE;
@@ -3727,6 +4199,9 @@ picasso_wlan_ce_poll(void)
 		FlushPoC_DcacheRegion((vm_offset_t)desc, sizeof(*desc));
 		FlushPoC_DcacheRegion((vm_offset_t)pkt, (size_t)nb1);
 		uint16_t nbytes = desc->nbytes;
+		/* DIAGNOSTIC ring23: ios-redfin poll — nbytes==0 means FW wrote nothing
+		 * yet (DRRI/RRI value proved unreliable: 25169 garbage). */
+		if (nbytes == 0 || nbytes > CE_BUF_SIZE) break;
 
 		LOG("picasso_wlan_ce_poll: [CE1 slot %u] nbytes=%u data: %02x %02x %02x %02x %02x %02x %02x %02x",
 		    slot, nbytes, pkt[0], pkt[1], pkt[2], pkt[3], pkt[4], pkt[5], pkt[6], pkt[7]);
@@ -3765,26 +4240,28 @@ picasso_wlan_ce_poll(void)
 		}
 
 		/* Replenish CE1 descriptor (host ring: give the buffer back) */
-		desc->nbytes = (slot + 1 == n1) ? (uint16_t)(nb1 | CE_DESC_FLAGS_LAST)
-		                               : (uint16_t)nb1;
-		desc->flags = (uint16_t)CE_DESC_FLAGS_HOST_ADDR;
+		desc->addr_lo = (uint32_t)(s_ce_mem_pa + CE1_BUFS_OFFSET + (uint64_t)slot * CE_BUF_SIZE);
+		desc->addr_hi = (uint32_t)(((s_ce_mem_pa + CE1_BUFS_OFFSET + (uint64_t)slot * CE_BUF_SIZE) >> 32) & CE_ADDR_HI_MASK);
+		desc->nbytes = 0; /* DIAGNOSTIC ring23: ios-redfin ce_post */
+		desc->flags = 0;
+		desc->reserved = 0;
 		FlushPoC_DcacheRegion((vm_offset_t)desc, sizeof(*desc));
 		mb();
 		ce_wr(ce1, CE_DST_WR_INDEX, slot);
 
-		g_ce1_sw_index = (slot + 1) & n1;
+		g_ce1_sw_index = (slot + 1) & (n1 - 1);
 		hw_drri1 = ce_rd(ce1, CE_CURRENT_DRRI);
 	}
 
 	/* ---------------- Poll CE2: Target -> Host WMI Events / Beacons ---------------- */
-	if (!(g_ce_armed_ce & (1u << 2)) || g_ce_pipe_dir[2] != PD_IN) return;
+	if (!(g_ce_armed_ce & (1u << 2)) || g_ce_pipe_dir[2] != PD_IN) { poll_active = false; return; }
 
 	volatile uint8_t *ce2 = s_wlan_ce_base + ce_off_of(2);
 	uint32_t hw_drri2 = ce_rd(ce2, CE_CURRENT_DRRI);
 	uint32_t n2 = g_ce_ring_nent[2];
 	uint32_t nb2 = g_ce_ring_nbytes[2];
 
-	while (n2 && g_ce2_sw_index != (hw_drri2 & n2)) {
+	while (n2 && g_ce2_sw_index != (hw_drri2 & (n2 - 1))) {
 		uint32_t slot = g_ce2_sw_index;
 		struct picasso_ce_desc *desc = &g_ce2_ring[slot];
 		uint8_t *buf = g_ce2_buf_virt + (uint64_t)slot * CE_BUF_SIZE;
@@ -3793,13 +4270,182 @@ picasso_wlan_ce_poll(void)
 		FlushPoC_DcacheRegion((vm_offset_t)buf, (size_t)nb2);
 		uint16_t nbytes = desc->nbytes;
 
-		LOG("picasso_wlan_ce_poll: [CE2 slot %u] DRRI=%u nbytes=%u flags=0x%04x data: %02x %02x %02x %02x %02x %02x %02x %02x",
+		LOG("picasso_wlan_ce_poll: [CE2 slot %u] DRRI=%u nbytes=%u flags=0x%04x data: %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x",
 		    slot, hw_drri2, nbytes, desc->flags,
-		    buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7]);
+		    buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7],
+		    buf[8], buf[9], buf[10], buf[11], buf[12], buf[13], buf[14], buf[15],
+		    buf[16], buf[17], buf[18], buf[19]); /* DIAGNOSTIC ring42: full 20B dump */
 
-		/* WMI events arrive as unnamed TLVs: scan events carry 802.11 frames
-		 * (STRUCT_MGMT_RX_EVENT / MGT_RX_EVENT) further inside the payload. */
-		if (nbytes > 4 && nbytes <= nb2) {
+		/* DIAGNOSTIC ring68: unswap the RX data. The FW byte-swaps each
+		 * u32 (wlfw_ce_tbl flags=7 includes BYTE_SWAP), so the raw buffer
+		 * parses as garbage (hlen=0, msg=512/1). After unswapping, READY
+		 * and WMI CONNECT_RESP (status=0, eid=1) parse cleanly. Swap in
+		 * place; the FW overwrites this slot on the next message. */
+		{
+			uint32_t nswap = (uint32_t)nbytes & ~3u;
+			for (uint32_t i = 0; i < nswap; i += 4) {
+				uint32_t w;
+				memcpy(&w, buf + i, 4);
+				w = __builtin_bswap32(w);
+				memcpy(buf + i, &w, 4);
+			}
+			FlushPoC_DcacheRegion((vm_offset_t)buf, (size_t)nswap);
+		}
+
+		/* DIAGNOSTIC ring43: ios-redfin routes ALL CE messages via htc_rx.
+		 * Parse this CE2 message as HTC: 8-byte header (eid, flags, len u16,
+		 * trailer, seq, pad u16) + payload. If eid==0 and payload msg is
+		 * READY(1) or CONNECT_RESP(3), it is the HTC handshake (not WMI). */
+		if (nbytes >= 10) {
+			uint8_t heid = buf[0];
+			uint16_t hlen = (uint16_t)buf[2] | ((uint16_t)buf[3] << 8);
+			uint16_t hmsg = (uint16_t)buf[8] | ((uint16_t)buf[9] << 8);
+			LOG("picasso_wlan_ce_poll: [CE2 HTC parse] eid=%u hlen=%u msg=%u", heid, hlen, hmsg);
+			/* DIAGNOSTIC ring70: detect FW SERVICE_READY (WMI event 0x1).
+			 * The FW sends it (340B, eid 1/2) after the HTC handshake;
+			 * WMI_INIT sent before it crashes the phone (ring69). */
+			if (!g_wmi_service_ready && (heid == 1 || heid == 2) && hmsg == 1 && nbytes >= 100) {
+				LOG("picasso_wlan_ce_poll: *** WMI SERVICE_READY received on CE2 (eid=%u, nbytes=%u) ***", heid, nbytes);
+				/* DIAGNOSTIC ring75: do NOT set g_wmi_service_ready here.
+				 * poll dispatches WMI_INIT as soon as the flag is set, and
+				 * the phone crashes so fast that the TLV parse output below
+				 * never reaches the log (ring74). Set the flag only AFTER
+				 * the TLV loop finishes, at the end of this block. */
+				/* DIAGNOSTIC ring72: parse SERVICE_READY TLVs (ios-redfin
+				 * wmi_svc_ready, ws-n-wifi). TLVs start at buf+12 (after the
+				 * 8B HTC header + 4B WMI event ID); each TLV is {len u16,
+				 * tag u16, value}. TAG_SERVICE_READY (0x20) len>=40 has
+				 * fw_version@+0, abi@+4, rf_chains@+36, ht_cap_info@+40;
+				 * tag 0x21 (HAL_REG_CAPABILITIES) has eeprom_rd@+0. */
+				for (uint32_t o = 12; o + 4 <= nbytes;) {
+					uint16_t tl, tt;
+					memcpy(&tl, buf + o, 2); memcpy(&tt, buf + o + 2, 2);
+					if (o + 4 + tl > nbytes) break;
+					const uint8_t *v = buf + o + 4;
+					LOG("picasso_wlan_ce_poll: *** SERVICE_READY TLV o=%u tag=%#x len=%u ***", o, tt, tl);
+					if (tt == 0x20 && tl >= 40) {
+						uint32_t fw, abi, rf, ht = 0;
+						memcpy(&fw, v, 4); memcpy(&abi, v + 4, 4);
+						memcpy(&rf, v + 36, 4);
+						if (tl >= 44) memcpy(&ht, v + 40, 4);
+						LOG("picasso_wlan_ce_poll: *** SERVICE_READY fw=%08x abi=%08x rf_chains=%u ht_caps=%#x ***", fw, abi, rf, ht);
+					} else if (tt == 0x21 && tl >= 4) {
+						uint32_t rd; memcpy(&rd, v, 4);
+						LOG("picasso_wlan_ce_poll: *** SERVICE_READY eeprom_regdomain=%#x ***", rd);
+					} else if (tt == 0x12) {
+						/* DIAGNOSTIC ring73: TAG_ARRAY_STRUCT holds inner
+						 * TLVs {len, tag}; TAG_HOST_MEM_REQ (0x22) is a 16B
+						 * wmi_mem_req {req_id, unit_size, num_unit_info,
+						 * num_units}. ios-redfin allocates pool memory for
+						 * these and sends n_chunks in WMI_INIT; picasso
+						 * sends n=0. Log what the FW wants. */
+						for (uint32_t q = 0; q + 4 <= tl;) {
+							uint16_t ql, qt;
+							memcpy(&ql, v + q, 2); memcpy(&qt, v + q + 2, 2);
+							if (q + 4 + ql > tl) break;
+							if (qt == 0x22 && ql >= 16) {
+								uint32_t rid, usz, nui, nu;
+								memcpy(&rid, v + q + 4, 4);
+								memcpy(&usz, v + q + 8, 4);
+								memcpy(&nui, v + q + 12, 4);
+								memcpy(&nu, v + q + 16, 4);
+								LOG("picasso_wlan_ce_poll: *** SERVICE_READY mem_req id=%u unit_size=%u info=%#x units=%u ***", rid, usz, nui, nu);
+							}
+							q += 4 + ql;
+						}
+					}
+					o += 4 + tl;
+				}
+				/* DIAGNOSTIC ring75: parse complete — now allow WMI_INIT. */
+				g_wmi_service_ready = true;
+				LOG("picasso_wlan_ce_poll: *** SERVICE_READY parse complete, WMI_INIT allowed ***");
+			}
+			if (heid == 0 && hmsg == 1 && nbytes >= 16) {
+				/* READY: connect HTT first (ios-redfin order), once only.
+				 * FW re-sends READY until handshake completes — do NOT
+				 * re-send on every READY (floods CE0). */
+				/* DIAGNOSTIC ring67: WMI FIRST. The FW answers HTT CONNECT
+				 * but ignores WMI CONNECT sent after HTT RESP (ring66).
+				 * Try connecting WMI first. */
+				if (!g_htc_wmi_post_htt_sent) {
+					g_htc_wmi_post_htt_sent = true;
+					LOG("picasso_wlan_ce_poll: *** HTC_MSG_READY on CE2 -> CONNECT WMI (ring67) ***");
+					picasso_htc_send_connect_service_svc(ATH10K_HTC_SVC_ID_WMI_CONTROL);
+				}
+			} else if (heid == 0 && hmsg == 3 && nbytes >= 16) {
+				uint16_t svc = (uint16_t)buf[10] | ((uint16_t)buf[11] << 8);
+				uint8_t status = buf[12];
+				uint8_t assigned_eid = buf[13];
+				LOG("picasso_wlan_ce_poll: *** HTC CONNECT_RESP on CE2: svc=%#x status=%u eid=%u ***",
+				    svc, status, assigned_eid);
+				/* DIAGNOSTIC ring47: FW answers CONNECT_RESP with status=7 and
+				 * eid=208 for HTT — status/eid parse may be off, but the FW IS
+				 * engaging, so proceed on svc alone (do not gate on status==0). */
+				if (svc == ATH10K_HTC_SVC_ID_HTT_DATA) {
+					/* DIAGNOSTIC ring48: FW answers HTT RESP (status=7) but never
+					 * a WMI RESP. Try SETUP_COMPLETE directly — WMI may already
+					 * ride the control endpoint. */
+					/* DIAGNOSTIC ring53: guard — CE2 re-processes slot 2, which sent
+					 * SETUP_COMPLETE + WMI_INIT twice (ring52). Send them once. */
+					{
+						static bool setup_sent = false;
+						if (!setup_sent) {
+							setup_sent = true;
+							LOG("picasso_wlan_ce_poll: HTT resp (status=%u) -> SETUP_COMPLETE directly", status);
+							/* DIAGNOSTIC ring65: ios-redfin order — on HTT RESP,
+							 * connect WMI (do NOT send SETUP_COMPLETE yet). The
+							 * WMI RESP branch sends SETUP_COMPLETE. Previously
+							 * SETUP was sent here and CONNECT(WMI) was never
+							 * sent after HTT RESP, so the WMI service was never
+							 * connected and WMI on CE3 crashed the FW (61-64). */
+							/* DIAGNOSTIC ring67: on HTT RESP (after WMI RESP),
+							 * send SETUP_COMPLETE and finish the handshake. */
+							picasso_htc_send_setup_complete();
+							g_htc_handshake_done = true;
+							g_wmi_init_pending = true; /* ring67: WMI_INIT after full handshake */
+						}
+					}
+					LOG("picasso_wlan_ce_poll: *** HTC HANDSHAKE COMPLETE (via CE2, SETUP after HTT RESP)! ***");
+					/* DIAGNOSTIC ring50: auto-scan once after handshake (wifi_scan=1).
+					 * The console `wifi scan` output is not reliably captured, so
+					 * run the scan in-kernel; results go to the kernel log. */
+					{
+
+						/* DIAGNOSTIC ring59: do NOT call sta_scan from inside
+						 * ce_poll — it blocks the modem thread and its nested
+						 * ce_poll calls corrupt ring state (rings 56-58). Set a
+						 * flag; picasso_wlan_poll runs the scan outside ce_poll. */
+						if (!auto_scan_done && g_wlan_hw_scan) {
+							g_auto_scan_pending = true;
+							IOLog("picasso_wlan_ce_poll: DIAGNOSTIC ring59 — auto-scan pending\n");
+						}
+					}
+				} else if (svc == ATH10K_HTC_SVC_ID_WMI_CONTROL) {
+					if (assigned_eid && assigned_eid < 12) {
+						g_wmi_eid = assigned_eid;
+						g_ce_target_cur_srri[assigned_eid] =
+						    ce_rd(s_wlan_ce_base + ce_off_of(assigned_eid), CE_CURRENT_SRRI);
+					}
+					/* DIAGNOSTIC ring67: on WMI RESP, connect HTT next
+					 * (SETUP_COMPLETE moves to the HTT RESP branch). */
+					if (!g_htc_htt_sent) {
+						g_htc_htt_sent = true;
+						LOG("picasso_wlan_ce_poll: WMI RESP -> CONNECT HTT (ring67)");
+						picasso_htc_send_connect_service_svc(ATH10K_HTC_SVC_ID_HTT_DATA);
+					}
+					LOG("picasso_wlan_ce_poll: *** HTC HANDSHAKE COMPLETE (via CE2)! WMI READY ON CE%u ***",
+					    g_wmi_eid);
+				}
+			}
+		}
+
+		/* DIAGNOSTIC ring57: the beacon scan loop below is DISABLED. It scanned
+		 * every byte offset of every CE2 message for 0x80/0x50/0x40 + 0x00 and
+		 * called the beacon parser on arbitrary WMI payload bytes — a false
+		 * positive on a large WMI event (340/988B) crashes the phone. Beacons
+		 * must be parsed only from real WMI scan events, not raw CE2 traffic.
+		 * (Re-enable with proper WMI event gating once the scan survives.) */
+		if (0 && nbytes > 4 && nbytes <= nb2) {
 			for (size_t off = 0; off + 36 <= (size_t)nbytes; off++) {
 				const uint8_t *p = buf + off;
 				if ((p[0] == 0x80 || p[0] == 0x50 || p[0] == 0x40) && p[1] == 0x00) {
@@ -3810,16 +4456,21 @@ picasso_wlan_ce_poll(void)
 		}
 
 		/* Replenish CE2 descriptor */
+		desc->addr_lo = (uint32_t)(s_ce_mem_pa + CE2_BUFS_OFFSET + (uint64_t)slot * CE_BUF_SIZE);
+		desc->addr_hi = (uint32_t)(((s_ce_mem_pa + CE2_BUFS_OFFSET + (uint64_t)slot * CE_BUF_SIZE) >> 32) & CE_ADDR_HI_MASK);
 		desc->nbytes = (slot + 1 == n2) ? (uint16_t)(nb2 | CE_DESC_FLAGS_LAST)
 		                               : (uint16_t)nb2;
+		desc->flags = (uint16_t)CE_DESC_FLAGS_HOST_ADDR;
+		desc->reserved = 0;
 		desc->flags = (uint16_t)CE_DESC_FLAGS_HOST_ADDR;
 		FlushPoC_DcacheRegion((vm_offset_t)desc, sizeof(*desc));
 		mb();
 		ce_wr(ce2, CE_DST_WR_INDEX, slot);
 
-		g_ce2_sw_index = (slot + 1) & n2;
+		g_ce2_sw_index = (slot + 1) & (n2 - 1);
 		hw_drri2 = ce_rd(ce2, CE_CURRENT_DRRI);
 	}
+	poll_active = false;
 }
 
 static void
@@ -3908,6 +4559,11 @@ picasso_sta_scan(const struct hakios_sta_scan *what)
 			IOLog("picasso_sta_scan: HTC handshake did not complete, scan skipped\n");
 			return 0;
 		}
+
+		/* DIAGNOSTIC ring59: send CHAN_LIST + VDEV immediately (ring55 order).
+		 * The 1s delay in rings 56-58 blocked ce_poll and crashed the FW. */
+		picasso_wlan_send_scan_chan_list();
+		picasso_wlan_send_vdev_create();
 
 		picasso_wlan_send_wmi_scan();
 
@@ -5558,6 +6214,56 @@ recovery_thread(void *arg __unused, wait_result_t wr __unused)
 	thread_terminate(current_thread());
 }
 
+		/* DIAGNOSTIC ring27: CB-based "emulate bypass" for the QCOM SMMU
+	 * bypass quirk (arm-smmu-qcom.c): writing S2CR type BYPASS is
+	 * silently converted to FAULT on this SMMU (ring26 readback
+	 * proved it: wrote 0x10000, read 0x20000 type=2). The Linux
+	 * workaround — and ios-redfin's smmu_wlan_identity() — is to
+	 * configure a context bank with translation off (SCTLR M=0,
+	 * CBAR S1_TRANS_S2_BYPASS) and point S2CR type TRANSLATE at it.
+	 * Returns the CB number, or -1 if no free CB. */
+static int
+smmu_cb_bypass(volatile uint32_t *r, uint32_t sid, uint32_t mask, int smr_idx) {
+	/* WRITE-ONLY CB config (ring35): CB register READS hang, but WRITES may work.
+	 * Use CB5 (CBAR=0, unconfigured per ring34 scan). CB base = 0x15080000 (npage*psize).
+	 * Configure: FSR clear, TTBR0=0, TCR=0, TCR2=0, MAIR=0, CBA2R=1, CBAR=0x1f000,
+	 * SCTLR=0xe0 (M=0). Then S2CR type 0 -> CB5, SMR valid last. */
+	uint32_t idr1 = r[0x24 >> 2];
+	uint32_t psize = (idr1 >> 31) ? 0x10000u : 0x1000u;
+	uint32_t npage = 1u << (((idr1 >> 28) & 7u) + 1u);
+	int cb = 5;
+	uint64_t cb_base_pa = 0x15000000ull + (uint64_t)npage * psize + (uint64_t)cb * psize;
+	vm_offset_t cb_map = ml_io_map(cb_base_pa, 0x1000);
+	if (cb_map == 0) { LOG("wlan smmu: CB-bypass: cannot map CB region %#llx", cb_base_pa); return -1; }
+	volatile uint32_t *cbr = (volatile uint32_t *)cb_map;
+	uint32_t gr1_off = psize >> 2;
+	LOG("wlan smmu: CB-bypass: configuring CB%d at %#llx (write-only, no reads)", cb, cb_base_pa);
+	cbr[0x58 >> 2] = 0xffffffffu; /* FSR clear */
+	cbr[0x20 >> 2] = 0; /* TTBR0 lo */
+	cbr[0x24 >> 2] = 0; /* TTBR0 hi */
+	cbr[0x30 >> 2] = 0; /* TCR */
+	cbr[0x10 >> 2] = 0; /* TCR2 */
+	cbr[0x38 >> 2] = 0; /* MAIR lo */
+	cbr[0x3c >> 2] = 0; /* MAIR hi */
+	r[gr1_off + (0x800 >> 2) + cb] = 0x1u; /* CBA2R */
+	r[gr1_off + cb] = 0x0001f000u; /* CBAR */
+	cbr[0x00 >> 2] = 0x000000e0u; /* SCTLR: CFCFG|CFIE|CFRE, M=0 */
+	r[(0xc00 >> 2) + smr_idx] = (uint32_t)cb; /* S2CR: translate via CB5 */
+	r[(0x800 >> 2) + smr_idx] = (1u << 31) | (mask << 16) | sid; /* SMR valid last */
+	r[0x70 >> 2] = 0; /* sTLBGSYNC */
+	for (int i = 0; i < 1000 && (r[0x74 >> 2] & 1u); i++) { __asm__ volatile ("nop"); }
+	__asm__ volatile ("dsb sy" ::: "memory");
+	LOG("wlan smmu: CB-bypass: SID %#x -> CB%d via SMR%d (write-only config done)", sid, cb, smr_idx);
+	/* Verify via GR0 map (CBAR reads work): did CBAR[5] become 0x1f000? */
+	{
+		uint32_t _cbar5 = r[gr1_off + 5];
+		uint32_t _s2 = r[(0xc00 >> 2) + smr_idx];
+		uint32_t _smr = r[(0x800 >> 2) + smr_idx];
+		LOG("wlan smmu: CB-bypass verify: CBAR[5]=%08x S2CR[%d]=%08x SMR[%d]=%08x", _cbar5, smr_idx, _s2, smr_idx, _smr);
+	}
+	return cb;
+}
+
 static void
 modem_thread(void *arg __unused, wait_result_t wr __unused)
 {
@@ -5611,14 +6317,28 @@ modem_thread(void *arg __unused, wait_result_t wr __unused)
 		uint32_t wlansmmu = 2;
 		(void)PE_parse_boot_argn("modem_wlansmmu", &wlansmmu, sizeof(wlansmmu));
 		if (wlansmmu) {
-			vm_offset_t smmu = ml_io_map(0x15000000, 0x2000);
+			vm_offset_t smmu = ml_io_map(0x15000000, 0x2000); /* reverted: large maps hang */
 			if (smmu != 0) {
 				volatile uint32_t *r = (volatile uint32_t *)smmu;
 				uint32_t idr0 = r[0x20 >> 2];
 				uint32_t num_smr = idr0 & 0xffu;
+				uint32_t idr1 = r[0x24 >> 2];
+				LOG("wlan smmu: IDR0 %08x IDR1 %08x: nsmr=%u ncb=%u psize=%#x npage=%u", idr0, idr1, idr0 & 0xffu, idr1 & 0xffu, (idr1 >> 31) ? 0x10000u : 0x1000u, 1u << (((idr1 >> 28) & 7u) + 1u));
+				/* DIAGNOSTIC ring34: scan CBARs via GR1 (reachable in GR0 map).
+				 * CBAR=0x1f000 means S1_TRANS_S2_BYPASS (translation-off);
+				 * CBAR=0 means unconfigured. Either could serve as a bypass CB
+				 * without touching CB registers (which hang on read). */
+				{
+					uint32_t _ps = (idr1 >> 31) ? 0x10000u : 0x1000u;
+					uint32_t _nc = idr1 & 0xffu;
+					for (uint32_t _c = 0; _c < _nc && _c < 64; _c++) {
+						uint32_t _cbar = r[(_ps >> 2) + _c];
+						if (_cbar == 0x0001f000u || _cbar == 0)
+							LOG("wlan smmu: CBAR[%u]=%08x", _c, _cbar);
+					}
+				}
 				int match_idx = -1;
 				int free_idx = -1;
-
 				for (uint32_t i = 0; i < num_smr && i < 128; i++) {
 					uint32_t smr = r[(0x800 >> 2) + i];
 					if (!(smr & (1u << 31))) {
@@ -5638,23 +6358,39 @@ modem_thread(void *arg __unused, wait_result_t wr __unused)
 					LOG("wlan smmu: match at SMR[%d]=%08x S2CR=%08x (type=%u)",
 					    match_idx, r[(0x800 >> 2) + match_idx], s2, type);
 					if (wlansmmu >= 2) {
-						/* Ensure mask covers stream 0xc0 and 0xc1 (WLAN and WLAN_CE) */
-						r[(0x800 >> 2) + match_idx] = (1u << 31) | (1u << 16) | 0xc0u;
-						s2 = (s2 & ~(3u << 16)) | (1u << 16);
-						r[(0xc00 >> 2) + match_idx] = s2;
-						__asm__ volatile ("dsb sy" ::: "memory");
-						LOG("wlan smmu: SMR[%d] set to 0x800100c0 and S2CR[%d] set to bypass (%08x)",
-						    match_idx, match_idx, s2);
+						/* DIAGNOSTIC ring27: CB-bypass (S2CR bypass is FAULT on this SMMU) */
+						(void)s2;
+						smmu_cb_bypass(r, 0xc0u, 1u, match_idx);
 					}
 				} else if (wlansmmu >= 2 && free_idx >= 0) {
 					/* Stream 0xc0 with mask 0x1 (covers 0xc0 and 0xc1) */
-					r[(0x800 >> 2) + free_idx] = (1u << 31) | (1u << 16) | 0xc0u;
-					r[(0xc00 >> 2) + free_idx] = (1u << 16); /* bypass */
-					__asm__ volatile ("dsb sy" ::: "memory");
-					LOG("wlan smmu: allocated SMR[%d]=%08x S2CR=bypass",
-					    free_idx, (1u << 31) | (1u << 16) | 0xc0u);
+					/* DIAGNOSTIC ring27: CB-bypass (S2CR bypass is FAULT on this SMMU) */
+					smmu_cb_bypass(r, 0xc0u, 1u, free_idx);
 				} else {
 					LOG("wlan smmu: no match found for stream 0xc0 (free_idx=%d)", free_idx);
+				}
+				/* DIAGNOSTIC: second stream 0x640 (ios-redfin WLAN_SID). Scan
+				 * for an existing match, else allocate a free SMR, bypass. */
+				{
+					int m640 = -1, f640 = -1;
+					for (int i = 0; i < 128; i++) {
+						uint32_t sm = r[(0x800 >> 2) + i];
+						if (!(sm & (1u << 31))) { if (f640 < 0) f640 = i; continue; }
+						uint32_t mk = (sm >> 16) & 0x7fffu;
+						if (((sm ^ 0x640u) & 0x7fffu & ~mk) == 0) { m640 = i; break; }
+					}
+					if (m640 >= 0) {
+						uint32_t s2 = r[(0xc00 >> 2) + m640];
+						LOG("wlan smmu: 0x640 match at SMR[%d]=%08x S2CR=%08x (type=%u)", m640, r[(0x800 >> 2) + m640], s2, (s2 >> 16) & 3u);
+						/* DIAGNOSTIC ring27: CB-bypass */
+						(void)s2;
+						smmu_cb_bypass(r, 0x640u, 1u, m640);
+					} else if (f640 >= 0) {
+						/* DIAGNOSTIC ring27: CB-bypass */
+						smmu_cb_bypass(r, 0x640u, 1u, f640);
+					} else {
+						LOG("wlan smmu: no match/free SMR for stream 0x640");
+					}
 				}
 			} else {
 				LOG("wlan smmu: cannot map 0x15000000");
