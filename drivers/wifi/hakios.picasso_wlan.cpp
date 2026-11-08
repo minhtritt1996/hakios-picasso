@@ -2416,12 +2416,14 @@ modem_monitor(void *arg __unused, wait_result_t wr __unused)
 #define WLFW_CAP            0x0024
 #define WLFW_BDF_DOWNLOAD   0x0025
 #define WLFW_CAL_REPORT     0x0026
+#define WLFW_MAC_ADDR       0x0033
 #define WLFW_MSA_READY_IND  0x002B
 #define WLFW_MSA_INFO       0x002D
 #define WLFW_MSA_READY      0x002E
 #define WLFW_HOST_CAP       0x0034
+#define WLFW_DYNAMIC_FEATURE_MASK 0x003B /* ring129: icnss sends after CAP (quirk FW_REJUVENATE_ENABLE) */
 #define WLFW_CLIENT_ID      0x4b4e454cu
-#define WLFW_MAX_BDF_CHUNK  4096u
+#define WLFW_MAX_BDF_CHUNK  6144u /* ring124: BDF chunk 4096->6144 (ios-redfin seg_size 6144; tests FW BDF processing vs chunk boundaries) */
 
 static uint32_t wlfw_chip_id = 0xff, wlfw_chip_family = 0, wlfw_board_id = 0xff, wlfw_soc_id = 0;
 static struct fw_file *wlfw_bdf_file = NULL;
@@ -2535,6 +2537,26 @@ wlfw_select_bdf(void)
 	if (f != NULL) {
 		LOG("t=%u ms: WLFW selected BDF '%s' (%u bytes) for board_id 0x%x",
 		    g_ms, f->name, f->size, wlfw_board_id);
+		/* DIAGNOSTIC ring84: do the BDF variants actually differ? All are
+		 * 26328B; if they are byte-identical the BDF choice cannot explain
+		 * the WMI_INIT crash. Log a cheap checksum (byte sum + first 4B)
+		 * for the main candidates. Runs after selection, so it cannot
+		 * change which BDF is used. */
+		{
+			static const char *names[] = { "bdwlan.bin", "bdwlan.b00", "bdwlan.b30", "bdwlan.b01", "bdf_g7a.bin", "bdf_j9.bin" };
+			for (unsigned i = 0; i < sizeof(names)/sizeof(names[0]); i++) {
+				struct fw_file *cf = fw_get(names[i]);
+				if (cf != NULL && cf->data != NULL && cf->size > 0) {
+					uint32_t sum = 0;
+					for (uint32_t k = 0; k < cf->size; k++) sum += cf->data[k];
+					LOG("t=%u ms: BDF cksum %s size=%u sum=%08x head=%02x%02x%02x%02x",
+					    g_ms, names[i], cf->size, sum,
+					    cf->data[0], cf->data[1], cf->data[2], cf->data[3]);
+				} else {
+					LOG("t=%u ms: BDF cksum %s NOT FOUND", g_ms, names[i]);
+				}
+			}
+		}
 	} else {
 		LOG("t=%u ms: WLFW ERROR: no bdwlan file found in modem image/!", g_ms);
 	}
@@ -2556,8 +2578,8 @@ struct wlfw_shadow_cfg { uint16_t ce_id, reg_offset; } __attribute__((packed)); 
 #define PD_INOUT 3u
 static const struct wlfw_ce_cfg wlfw_ce_tbl[] = {
 	/* flags per ath10k target_ce_config_wlan: 7 = NO_SNOOP|BYTE_SWAP|SWIZZLE (CE_ATTR_FLAGS), 15 = 7|DIS_INTR; CE7 pipedir 4 = host-only diag */
-	{0, PD_OUT, 32, 2048, 7}, {1, PD_IN, 32, 2048, 7}, {2, PD_IN, 32, 2048, 7} /* DIAGNOSTIC ring21: CE2 nent 64->32 (CE1=32 survives) */,
-	{3, PD_OUT, 32, 2048, 7}, {4, PD_OUT, 256, 256, 15}, {5, PD_OUT, 1024, 64, 15},
+	{0, PD_OUT, 32, 2048, 7}, {1, PD_IN, 32, 2048, 7}, {2, PD_IN, 64, 2048, 7} /* ring114: CE2 nent 32->64 (match qcacld adrastea; Droidian Wi-Fi works, FW 321b002a) — HW ring stays capped at 16 (pool), only WLAN_CFG value changes */,
+	{3, PD_OUT, 32, 2048, 7}, {4, PD_OUT, 256, 256, 15}, {5, PD_OUT, 256, 64, 15}, /* ring120: CE5 nent 1024->256 (1024x16B=16KB overflows its 4KB pool ring region 0x5000-0x6000; 256x16B=4KB fits) */
 	{6, PD_INOUT, 32, 16384, 7}, {7, 4, 0, 0, 15}, {8, PD_IN, 32, 2048, 0},
 	{9, PD_IN, 32, 2048, 7}, {10, PD_IN, 32, 2048, 7}, {11, PD_IN, 32, 2048, 7},
 };
@@ -2599,7 +2621,10 @@ wlfw_step(void)
 	uint32_t v32;
 	uint16_t msg;
 
-	if (wlfw_state < 1 || wlfw_state > 10 || wlfw_port == 0) {
+	/* DIAGNOSTIC ring83: guard was > 10, but MODE_REQ is case 11 after the
+	 * ring81 renumbering — wlfw_step() returned early and MODE_REQ was never
+	 * sent, leaving the phone alive but stuck after WLAN_CFG (rings 81/82). */
+	if (wlfw_state < 1 || wlfw_state > 11 || wlfw_port == 0) {
 		return;
 	}
 	switch (wlfw_state) {
@@ -2612,6 +2637,7 @@ wlfw_step(void)
 		qm_tlv(&m, 0x10, &one, 1);              /* fw_ready_enable */
 		qm_tlv(&m, 0x13, &one, 1);              /* msa_ready_enable */
 		qm_tlv(&m, 0x14, &one, 1);              /* pin_connect_result_enable */
+		v32 = 1; qm_tlv(&m, 0x19, &v32, 4);     /* ring129: rejuvenate_enable = 1 (u32; icnss sends when FW_REJUVENATE_ENABLE quirk on, default ON) */
 		v32 = WLFW_CLIENT_ID;
 		qm_tlv(&m, 0x15, &v32, 4);              /* client_id */
 		break;
@@ -2654,17 +2680,22 @@ wlfw_step(void)
 		}
 		break;
 	case 5:
-		/* ath10k_qmi_host_cap_send_sync: daemon_support = 0, 8-bit version for
-		 * older FW. The icnss sequence is cap -> host_cap; the FW may refuse it
-		 * (not supported), which the response handler treats as non-fatal. */
-		msg = WLFW_HOST_CAP;
+		/* ring129: DYNAMIC_FEATURE_MASK (msg 0x3B) after CAP — icnss sends it under the FW_REJUVENATE_ENABLE quirk (mask=0x01 u64, TLV 0x10). Replaces ring128's skip-to-9; after its response state 5->6 and case 6 skips to FW_READY wait (9). */
+		msg = WLFW_DYNAMIC_FEATURE_MASK;
 		qm_init_req(&m, svc_txn++, msg);
 		if (m.b == NULL) {
 			return;
 		}
-		qm_tlv(&m, 0x10, &zero, 1);             /* daemon_support = 0 (u8) */
+		{
+			uint64_t feat = 1;
+			qm_tlv(&m, 0x10, &feat, 8);        /* dynamic_feature_mask = 0x01 */
+		}
 		break;
 	case 6: {
+		/* ring128: BDF download SKIPPED (defensive; case 5 already jumps to 9). Droidian icnss sends no BDF; FW uses its own. */
+		wlfw_state = 9;
+		wlfw_step();
+		return;
 		/* ath10k_qmi_bdf_dnld_send_sync: download bdwlan in chunks */
 		if (wlfw_bdf_file == NULL) {
 			wlfw_bdf_file = wlfw_select_bdf();
@@ -2707,6 +2738,29 @@ wlfw_step(void)
 		break;
 	}
 	case 7:
+		/* ring121: MAC_ADDR REMOVED — test whether the QMI MAC_ADDR itself (not its absence) puts the FW in a crashing state for WMI_INIT. ios-redfin sends the identical MAC and works, so low odds; CAL_REPORT (state 8) still runs, so FW_READY_IND is unaffected. */
+		wlfw_state = 9; /* ring128: was 8 (CAL_REPORT); now skip to FW_READY wait */
+		wlfw_step();
+		return;
+		/* DEAD (ring81): QMI MAC_ADDR (0x33) — ios-redfin/cnss-daemon
+		 * sends the MAC address before CAL_REPORT; picasso skipped it.
+		 * FW may assert on WMI_INIT if no MAC was registered. */
+		msg = WLFW_MAC_ADDR;
+		qm_init_req(&m, svc_txn++, msg);
+		if (m.b == NULL) {
+			return;
+		}
+		{
+			static const uint8_t mac[6] = { 0x02, 0x50, 0x49, 0x58, 0x45, 0x4c };
+			qm_tlv(&m, 0x10, mac, 6);
+		}
+		break;
+	case 8:
+		/* ring128: CAL_REPORT SKIPPED (mimic Droidian icnss). */
+		wlfw_state = 9;
+		wlfw_step();
+		return;
+		/* ring118 REVERTED (ring119): removing CAL_REPORT stalls the boot — FW never sends FW_READY_IND (0x21) without it, state machine stuck at state 9. CAL_REPORT is REQUIRED to unblock the FW (it signals end of calibration data), NOT the crash cause. Restored. */
 		/* ath10k_qmi_send_cal_report_req: meta_data_len = 0 */
 		msg = WLFW_CAL_REPORT;
 		qm_init_req(&m, svc_txn++, msg);
@@ -2715,16 +2769,16 @@ wlfw_step(void)
 		}
 		qm_tlv(&m, 0x01, &zero, 1);             /* meta_data_len = 0 */
 		break;
-	case 8:
+	case 9:
 		/* Wait for WLFW_FW_READY_IND (0x0021) indication */
 		if (wlfw_ready) {
-			wlfw_state = 9;
+			wlfw_state = 10;
 			wlfw_step();
 		} else {
 			LOG("t=%u ms: WLFW waiting for FW_READY_IND (0x21)...", g_ms);
 		}
 		return;
-	case 9: {
+	case 10: {
 		uint8_t buf[12 * 20 + 20 * 12 + 12 * 4];
 		uint32_t o = 0, k;
 		const uint32_t nce = sizeof(wlfw_ce_tbl) / sizeof(wlfw_ce_tbl[0]);
@@ -2736,8 +2790,11 @@ wlfw_step(void)
 		if (m.b == NULL) {
 			return;
 		}
-		/* No host_version TLV (0x10): ath10k passes version=NULL to
-		 * ath10k_qmi_wlan_enable(), so it omits this TLV entirely. */
+		/* ring122: host_version TLV (0x10) ADDED — icnss sends it (QMI_STRING, max 16 chars, TLV 0x10 per wlan_firmware_service_v01.c EI array; HakiOS omitted it because ath10k omits it). */
+		{
+			static const char hv[] = "qcacld-3.0";
+			qm_tlv(&m, 0x10, hv, (uint16_t)(sizeof(hv) - 1));
+		}
 		/* QMI array TLVs carry a leading count byte (Linux qmi_encdec.c wire
 		 * format). ios-redfin phone/wifi/wlfw.c — working WCN3990 on SM7250 —
 		 * prepends a u8 count to each array. Without it the FW misparses the
@@ -2781,11 +2838,11 @@ wlfw_step(void)
 		}
 		break;
 	}
-	case 10:
+	case 11:
 		/* Send MODE_REQ (mission mode) FIRST; the CE block is only clocked
 		 * after it, so a CE register read before MODE_REQ hangs. The response
 		 * handler calls picasso_wlan_ce_init() + net_attach() once MODE_REQ
-		 * is acked (state 10 -> 11). ios-redfin does WLAN_CFG -> MODE_REQ ->
+		 * is acked (state 11 -> 12). ios-redfin does WLAN_CFG -> MODE_REQ ->
 		 * CE init for the same reason. (An earlier revision did CE init here
 		 * and hung on the first CE read.) */
 		msg = WLFW_WLAN_MODE_REQ;
@@ -2876,6 +2933,7 @@ static bool g_auto_scan_pending = false;
 static bool g_wmi_init_pending = false;
 static bool g_wmi_init_sent = false;
 static bool g_wmi_service_ready = false; /* DIAGNOSTIC ring70: FW sent SERVICE_READY (WMI event 0x1) */
+static uint32_t g_wmi_service_ready_ms = 0; /* ring104: SERVICE_READY timestamp for the 500ms delay */
 static bool g_wlan_hw_scan = false;
 static bool g_htc_handshake_done = false;
 static bool g_htc_wmi_sent = false;
@@ -2891,7 +2949,7 @@ picasso_wlan_poll(void)
 	 * (not immediately in the CE2 handler). The FW needs a chance to send
 	 * WMI SERVICE_READY first; sending WMI commands right after the HTC
 	 * handshake crashes it (rings 61-63). A single TX here is safe. */
-	if (g_wmi_init_pending && g_htc_handshake_done && g_wmi_service_ready && !g_wmi_init_sent) { /* ring70: wait for SERVICE_READY */
+	if (g_wmi_init_pending && g_htc_handshake_done && g_wmi_service_ready && !g_wmi_init_sent && (g_ms - g_wmi_service_ready_ms) >= 5000 /* ring110: 5s delay (was 500ms) — FW WMI layer may need more time after SERVICE_READY */) { /* ring104: 500ms delay after SERVICE_READY */
 		g_wmi_init_sent = true;
 		g_wmi_init_pending = false;
 		picasso_wlan_send_wmi_init();
@@ -3348,7 +3406,7 @@ struct picasso_ce_desc {
 #define CE0_RING_OFFSET             0x00000
 #define CE1_RING_OFFSET             0x01000
 #define CE2_RING_OFFSET             0x02000
-#define CE3_RING_OFFSET             0x03000
+#define CE3_RING_OFFSET             0x30000 /* ring98: move CE3 ring out of 0x3000 (probe FW read of CE3 SR) */
 #define CE4_RING_OFFSET             0x04000
 #define CE5_RING_OFFSET             0x05000
 #define CE6_RING_OFFSET             0x06000
@@ -3438,7 +3496,7 @@ picasso_wlan_ce_cfg_tables(void)
 		 * overlapping. The FW told us 32 entries, but 4x32x2048 = 256KB
 		 * leaves no room for the rings; the old offsets overlapped
 		 * (CE3 slot 0 == CE2 slot 24) and CE3 TX crashed the phone. */
-		if (i < 4 && g_ce_pipe_nent[i] > 16) g_ce_pipe_nent[i] = 16;
+		if (i < 3 /* ring97: CE3 keeps nent=32 (match WLAN_CFG) */ && g_ce_pipe_nent[i] > 16) g_ce_pipe_nent[i] = 16;
 	}
 	for (unsigned i = 0; i < sizeof(wlfw_svc_tbl) / sizeof(wlfw_svc_tbl[0]); i++) {
 		uint32_t svc = wlfw_svc_tbl[i].service_id;
@@ -3548,6 +3606,11 @@ picasso_wlan_ce_dump(void)
 	picasso_ce_mmio_load(c2, CE_DR_BASE_LO, "CE2.DR_BASE_LO");
 	picasso_ce_mmio_load(c2, CE_DR_SIZE, "CE2.DR_SIZE");
 	picasso_ce_mmio_load(c2, CE_CURRENT_DRRI, "CE2.CURRENT_DRRI");
+	/* ring103: read back CE3 SR_BASE (verify FW sees the programmed ring PA). */
+	picasso_ce_mmio_load(c3, CE_SR_BASE_LO, "CE3.SR_BASE_LO");
+	picasso_ce_mmio_load(c3, CE_SR_BASE_HI, "CE3.SR_BASE_HI");
+	picasso_ce_mmio_load(c3, CE_SR_SIZE, "CE3.SR_SIZE");
+	picasso_ce_mmio_load(c3, CE_CURRENT_SRRI, "CE3.CURRENT_SRRI");
 	picasso_ce_mmio_load(c3, CE_SR_BASE_LO, "CE3.SR_BASE_LO");
 	picasso_ce_mmio_load(c3, CE_SR_SIZE, "CE3.SR_SIZE");
 }
@@ -3664,10 +3727,10 @@ picasso_wlan_ce_init(void)
 	picasso_wlan_ce_cfg_tables();
 
 	LOG("picasso_wlan_ce_init: Initializing CE0..CE3 using 256KB DMA memory at PA 0x%llx...",
-	    rmtfs_pa + 0x100000ull);
+	    rmtfs_pa + 0x200000ull); /* ring127: pool moved out of rmtfs buffer (was +0x100000, INSIDE the 2MB rmtfs window) */
 
-	s_ce_mem_va = (vm_offset_t)(rmtfs_va + 0x100000ull);
-	s_ce_mem_pa = rmtfs_pa + 0x100000ull;
+	s_ce_mem_va = (vm_offset_t)(rmtfs_va + 0x200000ull);
+	s_ce_mem_pa = rmtfs_pa + 0x200000ull;
 	bzero((void *)s_ce_mem_va, 0x40000);
 
 	uint8_t *ce_base = (uint8_t *)s_ce_mem_va;
@@ -3744,7 +3807,7 @@ ce_kick_src(uint32_t ce, uint64_t buf_pa, uint32_t total_len)
 		 * the FW saw a WMI message (eid=1 in the HTC header) with
 		 * transfer_id=0 on CE3 and crashed. This is why CE0 TX worked
 		 * and every CE3 TX (WMI_INIT, VDEV_CREATE) panicked the phone. */
-		ring[n].flags = (ce == 3) ? 0x10 : (ce == 4) ? 0x30 : 0x00;
+		ring[n].flags = (ce == 3) ? 0x01 : (ce == 4) ? 0x30 : 0x00; /* ring117: CE3 meta_data 0x10->0x01 (qcacld value; ios-redfin uses 0x10) */
 		ring[n].reserved = 0;
 		FlushPoC_DcacheRegion((vm_offset_t)&ring[n], sizeof(*ring));
 	}
@@ -3760,7 +3823,7 @@ ce_kick_src(uint32_t ce, uint64_t buf_pa, uint32_t total_len)
 			vm_offset_t sh = ml_io_map(0x18832000, 0x1000);
 			if (sh) shadow = (volatile uint32_t *)sh;
 		}
-		if (shadow) shadow[ce] = g_ce_target_cur_srri[ce];
+		if (shadow) shadow[ce] = g_ce_target_cur_srri[ce]; /* ring124: WAR magic 0xceef0000 reverted (ring123 proved it inert) */
 		else ce_wr(c, CE_SR_WR_INDEX, g_ce_target_cur_srri[ce]); /* fallback */
 	}
 }
@@ -3965,8 +4028,8 @@ LOG("picasso_wlan_send_vdev_create: Dispatched VDEV_CREATE (%u bytes) to CE%u [s
 static void
 picasso_wlan_send_wmi_init(void)
 {
-	uint32_t pipe = 3; /* DIAGNOSTIC ring69: WMI TX is always CE3 (ath10k); g_wmi_eid is the FW-assigned HTC eid (1/2), not a CE pipe */
-	if (pipe == 0 || pipe >= 12 || g_ce_pipe_dir[pipe] != PD_OUT) {
+	uint32_t pipe = 3; /* ring106 reverted: WMI_INIT on CE3 (standard) */ /* DIAGNOSTIC ring69: WMI TX is always CE3 (ath10k); g_wmi_eid is the FW-assigned HTC eid (1/2), not a CE pipe */
+	if (pipe >= 12 || g_ce_pipe_dir[pipe] != PD_OUT) {
 		LOG("picasso_wlan_send_wmi_init: WMI pipe %u is not a FW TX pipe (dir=%d), refusing",
 		    pipe, pipe < 12 ? g_ce_pipe_dir[pipe] : -1);
 		return;
@@ -3987,15 +4050,15 @@ picasso_wlan_send_wmi_init(void)
 	wmi[wmi_len++] = 28;   wmi[wmi_len++] = 0x00;
 	wmi[wmi_len++] = 0x4a; wmi[wmi_len++] = 0x00;
 	*(uint32_t *)(wmi + wmi_len) = 0x01000000u; wmi_len += 4; /* ABI_VER0 */
-	*(uint32_t *)(wmi + wmi_len) = 53; wmi_len += 4;         /* ABI_VER1 */
+	*(uint32_t *)(wmi + wmi_len) = 986; wmi_len += 4;        /* ABI_VER1 (ring93: qcacld-3.0 era revision, was 53) */
 	*(uint32_t *)(wmi + wmi_len) = 0x5f414351u; wmi_len += 4;/* ABI_NS0 "QCA_" */
 	*(uint32_t *)(wmi + wmi_len) = 0x00004c4du; wmi_len += 4;/* ABI_NS1 "ML" */
 	*(uint32_t *)(wmi + wmi_len) = 0; wmi_len += 4;
 	*(uint32_t *)(wmi + wmi_len) = 0; wmi_len += 4;
 	*(uint32_t *)(wmi + wmi_len) = 0; wmi_len += 4; /* n = 0 host mem chunks */
 
-	/* TLV: TAG_RESOURCE_CONFIG = 0x4b, Len = 176 (44 u32, ath10k wcn3990) */
-	wmi[wmi_len++] = 176;  wmi[wmi_len++] = 0x00;
+	/* TLV: TAG_RESOURCE_CONFIG = 0x4b, Len = 304 (76 u32, qcacld-3.0 ring92; restored ring106) */
+	wmi[wmi_len++] = 0x30;  wmi[wmi_len++] = 0x01; /* 304 = 0x130 LE */
 	wmi[wmi_len++] = 0x4b; wmi[wmi_len++] = 0x00;
 	{
 		/* DIAGNOSTIC ring78: minimal rc_init — only NUM_VDEVS=4,
@@ -4004,12 +4067,42 @@ picasso_wlan_send_wmi_init(void)
 		 * survives a minimal INIT, one of the zeroed values was
 		 * crashing the FW; if it still panics, the CE3 TX path itself
 		 * is broken. */
-		static const uint32_t rc_init[44] = {
-			4, 33, 0, 0, 0, 0, 0, 0x3, 0x3,
+		/* DIAGNOSTIC ring87: rc_init set to match Linux ath10k
+		 * ath10k_wmi_tlv_op_gen_init (wmi-tlv.c) verbatim, instead of the
+		 * ios-redfin values (ring78 minimal) or the ios-redfin full table.
+		 * Key differences vs the ios-redfin full table: vow_config rc[26]=0
+		 * (ios-redfin had 0x400 there), num_msdu_desc rc[28]=1056
+		 * (TARGET_TLV_NUM_MSDU_DESC), max_frag_entries rc[29]=2,
+		 * num_tdls_vdevs rc[30]=1, chain masks rc[7]=rc[8]=0x7 (ath10k
+		 * always 0x7; picasso used 0x3 since ring71), host_capab
+		 * rc[43]=0x200 (BIT(9) MGMT_BUNDLE_TX_COMPL). ast_skid_limit=16
+		 * and num_wds_entries=2 kept from ios-redfin (ath10k takes them
+		 * from per-chip hw_params); rx_decap_mode=1, num_wow_filters=22
+		 * (TARGET_TLV_NUM_WOW_PATTERNS). */
+		/* DIAGNOSTIC ring89: num_offload_peers / num_offload_reorder_bufs
+		 * set to 0. The ring88 service bitmap shows the FW does NOT
+		 * advertise WMI_SERVICE_RX_FULL_REORDER (=69: word 2 bit 5;
+		 * svcmap[2]=0x0f has only bits 0-3). Linux ath10k sets both fields
+		 * to TARGET_TLV_NUM_VDEVS (4) only when RX_FULL_REORDER is in
+		 * svc_map, else 0. Ring87 claimed 4 unconditionally — wrong for
+		 * this FW. host_capab stays 0x200 (BIT(9)); TX_DATA_ACK_RSSI
+		 * (=109) is also not advertised, so BIT(18) stays clear. */
+		/* DIAGNOSTIC ring92: rc_init extended 44 -> 76 u32s to match
+		 * qcacld-3.0 wmi_resource_config (304 B). ath10k sends only 44
+		 * (176 B); the WMITLV FIX-length check expects 304, so the FW
+		 * rejected/mis-parsed every prior WMI_INIT. rc[0..42] unchanged
+		 * (ath10k == qcacld first 43 fields), rc[43]=0x200 (flag1 bit 9),
+		 * rc[44..75]=0 (all default 0 for plain STA). ABI_VER1 stays 53. */
+		static const uint32_t rc_init[76] = {
+			4, 38, 3, 3, 2, 76, 16, 0x7, 0x7, /* ring125: rc[1]=38 peers, rc[2]=rc[3]=3 offload (ap_maxoffload=2+1), rc[5]=76 tids — .ko runtime values (wma_open disasm), NOT source defaults */
+			0x64, 0x64, 0x64, 0x28, 2, 8, 3, 3, 8, /* ring125: rc[14]=8 scan_max_pending_req (.ko runtime, mov x10,#8); mcast/flag1 kept (already ruled out individually) */
+			4, 16, 2, 0x400, 0, 0, 0, 0, 0, /* ring115: rc[18]=4 rc[19]=16 rc[20]=2 mcast, rc[22]=0 wds (qcacld) */
+			3, 1056, 10, 1, 8, 3, 32, 0, 6, /* ring115: rc[27]=3 gtk, rc[29]=10 frag, rc[31]=8 tdls, rc[32]=3 bcn, rc[33]=32 mcastflt (qcacld) */ /* ring113: rc[34]=0 (num_wow_filters, qcacld) */
+			0, 1, 1, 0, 1, 2, 2, 0x40000600, /* ring115: rc[40]=1 rc[41]=2 rc[42]=2 ocb (qcacld) */ /* ring112: flag1 = 0x40000600 (bits 9+10 + bit 30 IPA_DISABLE, qcacld wma_set_ipa_disable_config) */
 			0, 0, 0, 0, 0, 0, 0, 0, 0,
 			0, 0, 0, 0, 0, 0, 0, 0, 0,
 			0, 0, 0, 0, 0, 0, 0, 0, 0,
-			0, 0, 0, 0, 0, 0, 0, 0
+			0, 0, 0, 0, 0
 		};
 		memcpy(wmi + wmi_len, rc_init, sizeof(rc_init));
 		wmi_len += sizeof(rc_init);
@@ -4021,7 +4114,7 @@ picasso_wlan_send_wmi_init(void)
 
 	/* HTC header (8 bytes) at buf[0..7]; len = wmi payload length */
 	buf[0] = 1; /* DIAGNOSTIC ring62: eid=1 (WMI control), not pipe (3) */
-	buf[1] = 0;
+	buf[1] = 0x01; /* ring116: HTC_FLAGS_NEED_CREDIT_UPDATE (qcacld/ios-redfin set it; HakiOS sent 0) */
 	buf[2] = (uint8_t)(wmi_len & 0xff);
 	buf[3] = (uint8_t)((wmi_len >> 8) & 0xff);
 	buf[4] = 0;
@@ -4040,6 +4133,8 @@ picasso_wlan_send_wmi_init(void)
 			ho += (uint32_t)snprintf(hb + ho, sizeof(hb) - ho, "%02x", buf[i]);
 		LOG("picasso_wlan_send_wmi_init: WMI_INIT hex (%uB): %s", total_len, hb);
 	}
+	/* ring101: bare shadow[3] write (srri unchanged, FW sees no new desc). */
+	{ static volatile uint32_t *sh = NULL; if (!sh) { vm_offset_t a = ml_io_map(0x18832000, 0x1000); if (a) sh = (volatile uint32_t *)a; } if (sh) { sh[3] = g_ce_target_cur_srri[3]; LOG("picasso_wlan_send_wmi_init: ring101: bare shadow[3]=%u written", g_ce_target_cur_srri[3]); } }
 	ce_kick_src(pipe, s_ce_mem_pa + CE3_BUFS_OFFSET + (uint64_t)slot * CE_BUF_SIZE, total_len);
 	LOG("picasso_wlan_send_wmi_init: Dispatched WMI_INIT (%u bytes) to CE%u [slot %u]",
 	    total_len, pipe, slot);
@@ -4323,12 +4418,33 @@ picasso_wlan_ce_poll(void)
 					if (o + 4 + tl > nbytes) break;
 					const uint8_t *v = buf + o + 4;
 					LOG("picasso_wlan_ce_poll: *** SERVICE_READY TLV o=%u tag=%#x len=%u ***", o, tt, tl);
+					/* DIAGNOSTIC ring88: dump the FW service bitmap (tag 0x10,
+					 * len 128 = 32 u32s) so we can compare the FW-advertised
+					 * services against what WMI_INIT claims. 8 words per line. */
+					if (tt == 0x10 && tl >= 128) {
+						for (uint32_t r = 0; r < 4; r++) {
+							uint32_t w0, w1, w2, w3, w4, w5, w6, w7;
+							memcpy(&w0, v + (r*8+0)*4, 4); memcpy(&w1, v + (r*8+1)*4, 4);
+							memcpy(&w2, v + (r*8+2)*4, 4); memcpy(&w3, v + (r*8+3)*4, 4);
+							memcpy(&w4, v + (r*8+4)*4, 4); memcpy(&w5, v + (r*8+5)*4, 4);
+							memcpy(&w6, v + (r*8+6)*4, 4); memcpy(&w7, v + (r*8+7)*4, 4);
+							LOG("picasso_wlan_ce_poll: *** SERVICE_READY svcmap[%u..%u]=%08x %08x %08x %08x %08x %08x %08x %08x ***",
+							    r*8, r*8+7, w0, w1, w2, w3, w4, w5, w6, w7);
+						}
+					}
 					if (tt == 0x20 && tl >= 40) {
 						uint32_t fw, abi, rf, ht = 0;
 						memcpy(&fw, v, 4); memcpy(&abi, v + 4, 4);
 						memcpy(&rf, v + 36, 4);
 						if (tl >= 44) memcpy(&ht, v + 40, 4);
 						LOG("picasso_wlan_ce_poll: *** SERVICE_READY fw=%08x abi=%08x rf_chains=%u ht_caps=%#x ***", fw, abi, rf, ht);
+					/* ring118 diagnostic: hw_bd_id at v+80, hw_bd_info at v+84..v+104 (Droidian: Board id 0, Board version 2 0 0 0 0) */
+					if (tl >= 104) {
+						uint32_t bdid, binfo[5];
+						memcpy(&bdid, v + 80, 4);
+						memcpy(binfo, v + 84, 20);
+						LOG("picasso_wlan_ce_poll: *** SERVICE_READY hw_bd_id=%u hw_bd_info=%u %u %u %u %u ***", bdid, binfo[0], binfo[1], binfo[2], binfo[3], binfo[4]);
+					}
 					} else if (tt == 0x21 && tl >= 4) {
 						uint32_t rd; memcpy(&rd, v, 4);
 						LOG("picasso_wlan_ce_poll: *** SERVICE_READY eeprom_regdomain=%#x ***", rd);
@@ -4357,7 +4473,7 @@ picasso_wlan_ce_poll(void)
 					o += 4 + tl;
 				}
 				/* DIAGNOSTIC ring75: parse complete — now allow WMI_INIT. */
-				g_wmi_service_ready = true;
+				g_wmi_service_ready = true; g_wmi_service_ready_ms = g_ms; /* ring104 */
 				LOG("picasso_wlan_ce_poll: *** SERVICE_READY parse complete, WMI_INIT allowed ***");
 			}
 			if (heid == 0 && hmsg == 1 && nbytes >= 16) {
@@ -4756,9 +4872,9 @@ wlfw_rx(const uint8_t *d, uint32_t len)
 		} else if (msg == WLFW_FW_READY_IND) {
 			LOG("t=%u ms: *** WLFW FW_READY_IND (0x21) RECEIVED! ***", g_ms);
 			wlfw_ready = true;
-			/* CE init moved to WLFW step 9, after WLAN_CFG: the FW only arms/clocks the CE block once it has the CE config, so reading CE regs on FW_READY_IND hangs. */
-			if (wlfw_state == 8) {
-				wlfw_state = 9;
+			/* CE init moved to WLFW step 10, after WLAN_CFG: the FW only arms/clocks the CE block once it has the CE config, so reading CE regs on FW_READY_IND hangs. */
+			if (wlfw_state == 9) {
+				wlfw_state = 10;
 				wlfw_tries = 0;
 				wlfw_step();
 			}
@@ -4855,10 +4971,15 @@ wlfw_rx(const uint8_t *d, uint32_t len)
 		LOG("t=%u ms: WLFW BDF download complete (%u bytes in %u segments)",
 		    g_ms, wlfw_bdf_file->size, wlfw_bdf_seg);
 	}
-	if (wlfw_state >= 1 && wlfw_state <= 10) {
+	/* DIAGNOSTIC ring82: guard was <= 10, which excluded the MODE_REQ
+	 * response after the ring81 renumbering (MODE_REQ is now case 11);
+	 * with <= 10 the handler never ran for state 11, so MISSION MODE
+	 * ATTACH COMPLETE could never trigger. */
+	LOG("t=%u ms: WLFW resp %x handled, state %u -> %u", g_ms, msg, wlfw_state, wlfw_state + 1);
+	if (wlfw_state >= 1 && wlfw_state <= 11) {
 		wlfw_state++;
 		wlfw_tries = 0;
-		if (wlfw_state > 10) {
+		if (wlfw_state > 11) {
 			LOG("t=%u ms: *** WLFW MISSION MODE ATTACH COMPLETE! WLAN RADIO IS ACTIVE! ***", g_ms);
 			wlfw_state = 0;
 			picasso_wlan_ce_init();
@@ -5376,7 +5497,7 @@ rmtfs_init_buf(void)
 	}
 	rmtfs_pa = RMTFS_BUFFER_PA_DEFAULT;
 	PE_parse_boot_argn("modem_buffer", &rmtfs_pa, sizeof(rmtfs_pa));
-	rmtfs_map = map_phys(rmtfs_pa, RMTFS_BUF_SIZE, true);
+	rmtfs_map = map_phys(rmtfs_pa, RMTFS_BUF_SIZE + 0x40000, true); /* ring127: +256KB so rmtfs_va + 0x200000 (CE pool) is mapped */
 	if (rmtfs_map == NULL) {
 		LOG("rmtfs: buffer pa %llx cannot be mapped", rmtfs_pa);
 		return;
@@ -5385,12 +5506,19 @@ rmtfs_init_buf(void)
 	bzero(rmtfs_va, RMTFS_BUF_SIZE);
 	LOG("rmtfs: buffer pa %llx mapped at %p", rmtfs_pa, rmtfs_va);
 
-	/* The copy engines at rmtfs_pa + 0x100000 are beyond RMTFS_BUF_SIZE and
-	 * live in DDR that HLOS itself reads and writes: leave them with HLOS only.
-	 * Only the rmtfs window goes to MSS_MSA (the modem's own EFS traffic). */
+	/* ring127: the CE pool was at rmtfs_pa + 0x100000, INSIDE the 2MB rmtfs
+	 * window (this comment wrongly claimed it was beyond RMTFS_BUF_SIZE).
+	 * Pool moved to rmtfs_pa + 0x200000 (just past the window); the rmtfs
+	 * window goes to MSS_MSA only, the pool goes to {MSS_MSA, WLAN, WLAN_CE}
+	 * so the FW can DMA it. */
 	{
 		static const uint32_t vm[1] = { VMID_MSS_MSA };
 		r = hyp_assign(rmtfs_pa, RMTFS_BUF_SIZE, vm, 1);
+	}
+	{
+		static const uint32_t vm_pool[3] = { 15, 24, 25 }; /* MSS_MSA, WLAN, WLAN_CE */
+		uint64_t pr = hyp_assign(rmtfs_pa + 0x200000, 0x40000, vm_pool, 3);
+		LOG("rmtfs: CE pool %llx+0x40000 assign %llx to MSS_MSA/WLAN/WLAN_CE", rmtfs_pa + 0x200000, pr);
 	}
 	LOG("rmtfs: shared buffer %llx+%llx assign %llx to MSS_MSA only", rmtfs_pa,
 	    (uint64_t)RMTFS_BUF_SIZE, r);
@@ -6113,7 +6241,7 @@ modem_watch(unsigned seconds)
 		LOG("no apps<->modem SMEM partition");
 		return false;
 	}
-	LOG("modem_watch: starting watch for up to %u seconds...", seconds);
+	LOG("modem_watch: starting watch for up to %u seconds...", seconds); /* ring130 diagnostic REVERTED: the SMEM read returned "(none / SMEM cleared)" (SMEM does not survive the reset) AND stalled the boot at FW_READY wait twice (ring130, ring130c) — reading ITEM_MSS_CRASH at modem_watch start breaks bring-up. */
 	for (unsigned ms = 0; ms < seconds * 1000; ms++) {
 		if (in == NULL) {
 			uint32_t sz = 0;

@@ -35,9 +35,8 @@ done
 verify_upstream_clean() {
 	echo "==> Checking integrity of $UPSTREAM_DIR (must be 100% clean)..."
 	local expected=(
-		"hakios-xnu-kernel:96ffbc532e970f3540885755d457e401e04d4707"
-		"hakios-uefi:687fa6c6a5a70f43184de92980e0a76eea5f2c4b"
-		"hakios-metal:7025778b8c0bbb1a99793f1be06474782d50cdaf"
+		"hakios-xnu-kernel:63fc2b4633bac3af8e57dadab9f5a8d4cb940438"
+		"hakios-uefi:1c6522893266157506c767e2ca427053ed3634a8"
 		"xnu-8796.121.2:c54f35ca767986246321eb901baf8f5ff7923f6a"
 		"hfs-627.100.6:31d5ec238dfab485e78a9a30b8b92d13e8914f03"
 		"Mu-Silicium:b363060778a1ebbc9a2b705f0a0a00cff432c009"
@@ -74,7 +73,7 @@ prepare_workspaces() {
 	if [ ! -d "$BUILD_DIR/hakios-xnu-kernel" ]; then
 		echo "==> Cloning $UPSTREAM_DIR/hakios-xnu-kernel into $BUILD_DIR/hakios-xnu-kernel..."
 		git clone -q "$UPSTREAM_DIR/hakios-xnu-kernel" "$BUILD_DIR/hakios-xnu-kernel"
-		git -C "$BUILD_DIR/hakios-xnu-kernel" checkout -q 96ffbc532e970f3540885755d457e401e04d4707
+		git -C "$BUILD_DIR/hakios-xnu-kernel" checkout -q 63fc2b4633bac3af8e57dadab9f5a8d4cb940438
 
 		echo "==> Applying hakios-picasso kernel/driver/userland/loader patches (0001..0005)..."
 		for p in \
@@ -121,20 +120,13 @@ prepare_workspaces() {
 		fi
 	fi
 
-	# 2. hakios-metal build workspace
-	if [ ! -d "$BUILD_DIR/hakios-metal" ]; then
-		echo "==> Cloning $UPSTREAM_DIR/hakios-metal into $BUILD_DIR/hakios-metal..."
-		git clone -q "$UPSTREAM_DIR/hakios-metal" "$BUILD_DIR/hakios-metal"
-		git -C "$BUILD_DIR/hakios-metal" checkout -q 7025778b8c0bbb1a99793f1be06474782d50cdaf
-		echo "    + applying 0006-hakios-metal-clang15-constexpr-signbit.patch"
-		git -C "$BUILD_DIR/hakios-metal" apply --whitespace=nowarn "$PICASSO_DIR/patches/0006-hakios-metal-clang15-constexpr-signbit.patch"
-	fi
+	# 2. hakios-metal is in-tree (build/hakios-xnu-kernel/hakios-metal/); no separate clone.
 
-	# 3. hakios-uefi build workspace
+	# 2. hakios-uefi build workspace
 	if [ ! -d "$BUILD_DIR/hakios-uefi" ]; then
 		echo "==> Cloning $UPSTREAM_DIR/hakios-uefi into $BUILD_DIR/hakios-uefi..."
 		git clone -q "$UPSTREAM_DIR/hakios-uefi" "$BUILD_DIR/hakios-uefi"
-		git -C "$BUILD_DIR/hakios-uefi" checkout -q 687fa6c6a5a70f43184de92980e0a76eea5f2c4b
+		git -C "$BUILD_DIR/hakios-uefi" checkout -q 1c6522893266157506c767e2ca427053ed3634a8
 		mkdir -p "$BUILD_DIR/hakios-uefi/devices"
 		ln -sfn "$PICASSO_DIR" "$BUILD_DIR/hakios-uefi/devices/picasso"
 	fi
@@ -177,7 +169,7 @@ build_userland() {
 	export PATH="$BUILD_DIR/hakios-xnu-kernel/xnu-deps/host/bin:$PATH"
 
 	cp -f "$PICASSO_DIR/userland/rc.jobs.picasso" userland/rc.jobs.picasso
-	RC_JOBS=rc.jobs.picasso HAKIOS_METAL="$BUILD_DIR/hakios-metal" GL=1 ./userland/build.sh
+	RC_JOBS=rc.jobs.picasso HAKIOS_METAL="$BUILD_DIR/hakios-xnu-kernel/hakios-metal" GL=1 ./userland/build.sh
 	cp -f userland/root.apfs "$OUT_DIR/root.apfs"
 	[ -f userland/system.apfs ] && cp -al -f userland/system.apfs "$OUT_DIR/system.apfs"
 
@@ -241,9 +233,7 @@ export_patches() {
 	echo "==> Exporting changes from $BUILD_DIR into $PICASSO_DIR/patches/..."
 	echo "========================================================================"
 	local KWS="$BUILD_DIR/hakios-xnu-kernel"
-	local MWS="$BUILD_DIR/hakios-metal"
-	local BASE_SHA="96ffbc532e970f3540885755d457e401e04d4707"
-	local METAL_SHA="7025778b8c0bbb1a99793f1be06474782d50cdaf"
+	local BASE_SHA="63fc2b4633bac3af8e57dadab9f5a8d4cb940438"
 
 	git -C "$KWS" add -N xnu/files/bsd/dev/picasso_usb.c userland/com.apple.ZhuGeService.plist userland/var userland/src/sh.c 2>/dev/null || true
 
@@ -271,7 +261,7 @@ export_patches() {
 		> "$PICASSO_DIR/patches/0004-userland-picasso-init-inject-springboard.patch"
 	git -C "$KWS" diff "$BASE_SHA" -- Makefile configs/ devices/manifest.conf docs/ tools/ xnuloader/ \
 		> "$PICASSO_DIR/patches/0005-loader-configs-and-tools-picasso.patch"
-	git -C "$MWS" diff "$METAL_SHA" \
+	git -C "$KWS" diff "$BASE_SHA" -- hakios-metal/ \
 		> "$PICASSO_DIR/patches/0006-hakios-metal-clang15-constexpr-signbit.patch"
 
 	echo "==> Verifying generated patches apply cleanly against read-only $UPSTREAM_DIR..."
@@ -284,7 +274,7 @@ export_patches() {
 		git -C "$UPSTREAM_DIR/hakios-xnu-kernel" apply --check --whitespace=nowarn "$PICASSO_DIR/patches/$p"
 		echo "    [OK] $p"
 	done
-	git -C "$UPSTREAM_DIR/hakios-metal" apply --check --whitespace=nowarn "$PICASSO_DIR/patches/0006-hakios-metal-clang15-constexpr-signbit.patch"
+	git -C "$UPSTREAM_DIR/hakios-xnu-kernel" apply --check --whitespace=nowarn "$PICASSO_DIR/patches/0006-hakios-metal-clang15-constexpr-signbit.patch"
 	echo "    [OK] 0006-hakios-metal-clang15-constexpr-signbit.patch"
 }
 

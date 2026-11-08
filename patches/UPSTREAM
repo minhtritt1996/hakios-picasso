@@ -2,12 +2,9 @@
 
 hakios-xnu-kernel:
   repository: https://github.com/oosexgang/hakios-xnu-kernel.git
-  revision:   96ffbc532e970f3540885755d457e401e04d4707
+  revision:   63fc2b4633bac3af8e57dadab9f5a8d4cb940438
 
 hakios-uefi:
   repository: https://github.com/oosexgang/hakios-uefi.git
-  revision:   687fa6c6a5a70f43184de92980e0a76eea5f2c4b
+  revision:   1c6522893266157506c767e2ca427053ed3634a8
 
-hakios-metal:
-  repository: https://github.com/oosexgang/hakios-metal.git
-  revision:   7025778b8c0bbb1a99793f1be06474782d50cdaf

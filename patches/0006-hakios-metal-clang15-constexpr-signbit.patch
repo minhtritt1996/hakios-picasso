@@ -1,7 +1,7 @@
-diff --git a/include/hakios-metal/a6xx.hpp b/include/hakios-metal/a6xx.hpp
+diff --git a/hakios-metal/include/hakios-metal/a6xx.hpp b/hakios-metal/include/hakios-metal/a6xx.hpp
 index b01af4c..b90e01d 100644
---- a/include/hakios-metal/a6xx.hpp
-+++ b/include/hakios-metal/a6xx.hpp
+--- a/hakios-metal/include/hakios-metal/a6xx.hpp
++++ b/hakios-metal/include/hakios-metal/a6xx.hpp
 @@ -3975,7 +3975,7 @@ constexpr uint32_t regVfdDestCntlInstr(uint32_t i) { return REG_A6XX_VFD_DEST_CN
  // by 2^23 (exact: a float has 24 significant bits). A finite value round-trips exactly (tests/a6xx_test.cpp holds it
  // to memcpy); NaN gives the quiet NaN, an infinity 0x7f800000 with its sign.
